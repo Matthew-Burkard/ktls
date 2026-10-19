@@ -14,6 +14,7 @@ pub enum Severity {
     Error,
     Warning,
     Info,
+    Hint,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,8 +22,10 @@ pub struct Diagnostic {
     pub range: TextRange,
     pub severity: Severity,
     pub message: String,
-    /// Kotlin compiler diagnostic id, e.g. `UNRESOLVED_REFERENCE`.
+    /// Kotlin compiler diagnostic id, e.g. `UNRESOLVED_REFERENCE`, or a lint rule id.
     pub code: &'static str,
+    /// Unused or redundant code (editors render it faded).
+    pub unnecessary: bool,
 }
 
 /// Why semantic checks were skipped for a file (shown once, not per diagnostic).
@@ -32,7 +35,45 @@ pub enum Coverage {
     SyntaxOnly(String),
 }
 
+/// Compiler diagnostics plus the enabled lint rules.
 pub fn file_diagnostics(snap: &Snapshot, path: &Path) -> (Vec<Diagnostic>, Coverage) {
+    let (mut out, coverage) = compiler_diagnostics(snap, path);
+    if snap.lints.enabled {
+        let lints = super::lints::lint_file(snap, path, coverage == Coverage::Full);
+        out.extend(lints.iter().filter(|l| l.level != super::lints::Level::Action).map(|l| l.diagnostic()));
+        out.sort_by_key(|d| (d.range.start(), d.range.end()));
+    }
+    (out, coverage)
+}
+
+/// How thoroughly `path` can be checked.
+pub fn coverage(snap: &Snapshot, path: &Path) -> Coverage {
+    let Some(file) = snap.file(path) else { return Coverage::SyntaxOnly("unknown file".into()) };
+    let ctx = snap.context_of(path);
+    if file.language == Language::Java {
+        Coverage::SyntaxOnly("Java files are only indexed".into())
+    } else if file.language == Language::KotlinScript {
+        Coverage::SyntaxOnly("scripts are checked for syntax only".into())
+    } else if let Some(c) = ctx.filter(|_| snap.workspace.jdk.is_some() && !snap.workspace.is_complete(ctx)) {
+        let m = snap.workspace.module(c.module);
+        Coverage::SyntaxOnly(format!("dependencies of module {} are not fully resolved", m.name))
+    } else if ctx.is_none() {
+        Coverage::SyntaxOnly("file is not part of any module's source roots".into())
+    } else if snap.workspace.jdk.is_none() {
+        Coverage::SyntaxOnly("no JDK found".into())
+    } else if !snap.resolver(path).classpath.has_builtins() {
+        Coverage::SyntaxOnly("the Kotlin standard library is not on the classpath".into())
+    } else {
+        Coverage::Full
+    }
+}
+
+/// The lint findings for `path` (with their fixes).
+pub fn lints(snap: &Snapshot, path: &Path) -> Vec<super::lints::Lint> {
+    super::lints::lint_file(snap, path, coverage(snap, path) == Coverage::Full)
+}
+
+fn compiler_diagnostics(snap: &Snapshot, path: &Path) -> (Vec<Diagnostic>, Coverage) {
     let Some(file) = snap.file(path) else { return (Vec::new(), Coverage::SyntaxOnly("unknown file".into())) };
     if file.language == Language::Java {
         return (Vec::new(), Coverage::SyntaxOnly("Java files are only indexed".into()));
@@ -49,29 +90,15 @@ pub fn file_diagnostics(snap: &Snapshot, path: &Path) -> (Vec<Diagnostic>, Cover
         if !lines.insert(line) {
             continue;
         }
-        out.push(Diagnostic { range: e.range, severity: Severity::Error, message: e.message.clone(), code: "SYNTAX" });
+        out.push(Diagnostic { range: e.range, severity: Severity::Error, message: e.message.clone(), code: "SYNTAX", unnecessary: false });
     }
 
-    let ctx = snap.context_of(path);
-    let coverage = if file.language == Language::KotlinScript {
-        Coverage::SyntaxOnly("scripts are checked for syntax only".into())
-    } else if ctx.is_none() {
-        Coverage::SyntaxOnly("file is not part of any module's source roots".into())
-    } else if snap.workspace.jdk.is_none() {
-        Coverage::SyntaxOnly("no JDK found".into())
-    } else if !snap.workspace.is_complete(ctx) {
-        let m = snap.workspace.module(ctx.unwrap().module);
-        Coverage::SyntaxOnly(format!("dependencies of module {} are not fully resolved", m.name))
-    } else {
-        Coverage::Full
-    };
+    let coverage = coverage(snap, path);
     if coverage != Coverage::Full {
         return (out, coverage);
     }
+    let ctx = snap.context_of(path);
     let resolver = snap.resolver(path);
-    if !resolver.classpath.has_builtins() {
-        return (out, Coverage::SyntaxOnly("the Kotlin standard library is not on the classpath".into()));
-    }
     let summary = file.summary();
 
     // Imports.
@@ -129,6 +156,7 @@ pub fn file_diagnostics(snap: &Snapshot, path: &Path) -> (Vec<Diagnostic>, Cover
                     severity: Severity::Error,
                     message: format!("Redeclaration: {}", d.symbol.name),
                     code: "REDECLARATION",
+                    unnecessary: false,
                 });
             }
     }
@@ -139,7 +167,7 @@ pub fn file_diagnostics(snap: &Snapshot, path: &Path) -> (Vec<Diagnostic>, Cover
 }
 
 fn unresolved(range: TextRange, name: &str) -> Diagnostic {
-    Diagnostic { range, severity: Severity::Error, message: format!("Unresolved reference '{name}'."), code: "UNRESOLVED_REFERENCE" }
+    Diagnostic { range, severity: Severity::Error, message: format!("Unresolved reference '{name}'."), code: "UNRESOLVED_REFERENCE", unnecessary: false }
 }
 
 fn decl_name(n: &SyntaxNode) -> Option<String> {

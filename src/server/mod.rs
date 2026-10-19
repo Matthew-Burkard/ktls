@@ -97,6 +97,15 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool) -> Server
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         references_provider: Some(lsp_types::OneOf::Left(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(lsp_types::CodeActionOptions {
+            code_action_kinds: Some(vec![
+                lsp_types::CodeActionKind::QUICKFIX,
+                lsp_types::CodeActionKind::REFACTOR_REWRITE,
+                lsp_types::CodeActionKind::SOURCE_FIX_ALL,
+            ]),
+            resolve_provider: None,
+            work_done_progress_options: Default::default(),
+        })),
         workspace_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
             commands: vec![COMMAND_RELOAD.into(), COMMAND_MODEL.into()],
@@ -149,7 +158,11 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
         sender: connection.sender.clone(),
         tasks_tx,
         tasks_rx,
-        host: AnalysisHost::default(),
+        host: {
+            let mut host = AnalysisHost::default();
+            host.set_lint_config(config.lint.clone());
+            host
+        },
         docs: HashMap::new(),
         config,
         encoding,
@@ -284,6 +297,18 @@ impl Server {
                     Ok(serde_json::to_value(handlers::hover(cx, &path, tdp.position)?).unwrap())
                 });
             }
+            CodeActionRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::CodeActionParams>(CodeActionRequest::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                let enabled = self.config.lint.enabled;
+                self.spawn(id, move |cx| {
+                    let actions = match (&path, enabled) {
+                        (Some(p), true) => handlers::code_actions(cx, p, params.range, params.context.only.as_deref())?,
+                        _ => Vec::new(),
+                    };
+                    Ok(serde_json::to_value(actions).unwrap())
+                });
+            }
             WorkspaceSymbolRequest::METHOD => {
                 let Ok((id, params)) = req.extract::<lsp_types::WorkspaceSymbolParams>(WorkspaceSymbolRequest::METHOD) else { return };
                 self.spawn(id, move |cx| {
@@ -377,6 +402,7 @@ impl Server {
             return;
         }
         let reload = new.project != self.config.project || new.jdk_home != self.config.jdk_home || new.cache_dir != self.config.cache_dir;
+        self.host.set_lint_config(new.lint.clone());
         self.config = new;
         if reload {
             self.start_load(false);

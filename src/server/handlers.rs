@@ -156,6 +156,86 @@ pub fn file_diagnostics(cx: &Ctx, path: &Path) -> Result<(Vec<lsp_types::Diagnos
     Ok((diags.iter().map(|d| to_proto::diagnostic(&file.text, &index, d, cx.enc)).collect(), coverage))
 }
 
+/// Quick fixes and suppressions for lint findings in `range`, plus "fix all" for the file.
+pub fn code_actions(cx: &Ctx, path: &Path, range: lsp_types::Range, only: Option<&[lsp_types::CodeActionKind]>) -> Result<Vec<lsp_types::CodeActionOrCommand>> {
+    use crate::analysis::lints::{self, Category, Fix, Level};
+    use lsp_types::{CodeAction, CodeActionKind, CodeActionOrCommand, TextEdit, WorkspaceEdit};
+    let Some(file) = cx.snap.file(path) else { return Ok(Vec::new()) };
+    let text = &file.text;
+    let index = LineIndex::new(text);
+    let wanted = crate::syntax::TextRange::new(index.offset(text, range.start, cx.enc), index.offset(text, range.end, cx.enc));
+    let found = diagnostics::lints(cx.snap, path);
+    cx.check()?;
+    let wants = |k: &CodeActionKind| {
+        only.is_none_or(|o| o.iter().any(|w| k.as_str() == w.as_str() || k.as_str().starts_with(&format!("{}.", w.as_str()))))
+    };
+    let uri = path_to_uri(path);
+    let edit = |edits: Vec<&lints::Edit>| WorkspaceEdit {
+        changes: Some(std::collections::HashMap::from([(
+            uri.clone(),
+            edits.into_iter().map(|e| TextEdit { range: index.range(text, e.range, cx.enc), new_text: e.text.clone() }).collect(),
+        )])),
+        ..Default::default()
+    };
+    let action = |title: &str, kind: CodeActionKind, diag: Option<lsp_types::Diagnostic>, fix: &Fix, preferred: bool| {
+        CodeActionOrCommand::CodeAction(CodeAction {
+            title: title.to_string(),
+            kind: Some(kind),
+            diagnostics: diag.map(|d| vec![d]),
+            edit: Some(edit(fix.edits.iter().collect())),
+            is_preferred: Some(preferred),
+            ..Default::default()
+        })
+    };
+    let mut out = Vec::new();
+    if wants(&CodeActionKind::QUICKFIX) {
+        let root = file.parse().syntax();
+        for l in found.iter().filter(|l| l.range.intersect(wanted).is_some() && l.level != Level::Action) {
+            let diag = to_proto::diagnostic(text, &index, &l.diagnostic(), cx.enc);
+            if let Some(fix) = &l.fix {
+                out.push(action(&fix.title, CodeActionKind::QUICKFIX, Some(diag.clone()), fix, true));
+            }
+            for s in lints::suppress_fixes(&root, text, l) {
+                out.push(action(&s.title, CodeActionKind::QUICKFIX, Some(diag.clone()), &s, false));
+            }
+        }
+    }
+    // Rules at level `action`: a refactoring at the cursor, without a diagnostic.
+    if wants(&CodeActionKind::REFACTOR_REWRITE) {
+        for l in found.iter().filter(|l| l.level == Level::Action && l.range.intersect(wanted).is_some()) {
+            if let Some(fix) = &l.fix {
+                out.push(action(&fix.title, CodeActionKind::REFACTOR_REWRITE, None, fix, false));
+            }
+        }
+    }
+    // Fix all unused/redundant code at once (non-overlapping fixes only).
+    if wants(&CodeActionKind::SOURCE_FIX_ALL) {
+        let mut edits: Vec<&lints::Edit> = Vec::new();
+        let mut end = crate::syntax::TextSize::from(0);
+        for l in &found {
+            let Some(fix) = &l.fix else { continue };
+            if !matches!(l.rule.category, Category::Unused | Category::Redundancy) || matches!(l.level, Level::Hint | Level::Action) {
+                continue;
+            }
+            let start = fix.edits.iter().map(|e| e.range.start()).min().unwrap_or_default();
+            if start < end && !edits.is_empty() {
+                continue;
+            }
+            end = fix.edits.iter().map(|e| e.range.end()).max().unwrap_or_default();
+            edits.extend(fix.edits.iter());
+        }
+        if !edits.is_empty() && (only.is_some() || edits.len() > 1) {
+            out.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: "Fix all unused and redundant code".into(),
+                kind: Some(CodeActionKind::SOURCE_FIX_ALL),
+                edit: Some(edit(edits)),
+                ..Default::default()
+            }));
+        }
+    }
+    Ok(out)
+}
+
 fn offset_of(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Option<(std::sync::Arc<crate::analysis::FileData>, crate::syntax::TextSize)> {
     let file = cx.snap.file(path)?.clone();
     let index = LineIndex::new(&file.text);

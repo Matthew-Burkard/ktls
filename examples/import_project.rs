@@ -25,7 +25,7 @@ fn main() {
                 "  module {} complete={} kotlin={:?} deps={} main_cp={} test_cp={}",
                 m.name,
                 m.complete,
-                m.kotlin.version,
+                m.kotlin,
                 m.dependencies.len(),
                 m.classpath(kotlin_lsp::project::SourceKind::Main).len(),
                 m.classpath(kotlin_lsp::project::SourceKind::Test).len()

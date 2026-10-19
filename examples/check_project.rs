@@ -1,6 +1,6 @@
 //! Import a project, load all sources and run diagnostics on every Kotlin file.
 //!
-//! cargo run --release --example check_project -- <dir> [max-shown]
+//! cargo run --release --example check_project -- <dir> [max-shown] [code]
 
 use std::collections::BTreeMap;
 
@@ -13,6 +13,8 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = std::path::PathBuf::from(&args[0]).canonicalize().unwrap();
     let max: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
+    // Only show diagnostics with this code.
+    let only = args.get(2).cloned();
     let t = std::time::Instant::now();
     let opts = LoadOptions::new(kotlin_lsp::util::default_cache_dir());
     let projects: Vec<_> = project::discover(&[dir]).into_iter().map(|(r, bs)| project::load(&r, bs, &opts)).collect();
@@ -45,7 +47,7 @@ fn main() {
             *by_code.entry(d.code).or_default() += 1;
             let text = &f.text[usize::from(d.range.start())..usize::from(d.range.end())];
             *names.entry(format!("{} {text}", d.code)).or_default() += 1;
-            if shown < max {
+            if shown < max && only.as_deref().is_none_or(|c| c == d.code) {
                 shown += 1;
                 let line = f.text[..usize::from(d.range.start())].matches('\n').count() + 1;
                 println!("{}:{line}: {} [{}]", f.path.display(), d.message, d.code);

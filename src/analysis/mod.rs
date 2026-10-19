@@ -9,6 +9,7 @@ pub mod diagnostics;
 pub mod ide;
 pub mod index;
 pub mod java;
+pub mod lints;
 pub mod resolve;
 pub mod source;
 
@@ -90,6 +91,11 @@ impl Workspace {
 
     pub fn context_of(&self, path: &Path) -> Option<FileContext> {
         self.roots.iter().find(|(r, _)| path.starts_with(r)).map(|(_, c)| *c)
+    }
+
+    /// The (deepest) source root containing `path`.
+    pub fn source_root_of(&self, path: &Path) -> Option<&Path> {
+        self.roots.iter().find(|(r, _)| path.starts_with(r)).map(|(r, _)| r.as_path())
     }
 
     pub fn source_roots(&self) -> impl Iterator<Item = &(PathBuf, FileContext)> {
@@ -203,6 +209,7 @@ pub struct Snapshot {
     pub workspace: Arc<Workspace>,
     pub files: Arc<HashMap<PathBuf, Arc<FileData>>>,
     pub index: Arc<SourceIndex>,
+    pub lints: Arc<lints::LintConfig>,
 }
 
 impl Snapshot {
@@ -226,17 +233,22 @@ pub struct AnalysisHost {
     index: Option<Arc<SourceIndex>>,
     /// Files changed since the index was last built.
     dirty: HashSet<PathBuf>,
+    lints: Arc<lints::LintConfig>,
 }
 
 impl Default for AnalysisHost {
     fn default() -> Self {
-        AnalysisHost { workspace: Arc::new(Workspace::empty()), files: HashMap::new(), index: None, dirty: HashSet::new() }
+        AnalysisHost { workspace: Arc::new(Workspace::empty()), files: HashMap::new(), index: None, dirty: HashSet::new(), lints: Arc::default() }
     }
 }
 
 impl AnalysisHost {
     pub fn workspace(&self) -> &Arc<Workspace> {
         &self.workspace
+    }
+
+    pub fn set_lint_config(&mut self, config: lints::LintConfig) {
+        self.lints = Arc::new(config);
     }
 
     /// Replace the workspace model. Files read from disk are dropped (the caller
@@ -325,6 +337,11 @@ impl AnalysisHost {
             self.index = Some(Arc::new(SourceIndex::build(&files, &self.workspace)));
         }
         self.dirty.clear();
-        Snapshot { workspace: self.workspace.clone(), files: Arc::new(self.files.clone()), index: self.index.clone().unwrap() }
+        Snapshot {
+            workspace: self.workspace.clone(),
+            files: Arc::new(self.files.clone()),
+            index: self.index.clone().unwrap(),
+            lints: self.lints.clone(),
+        }
     }
 }

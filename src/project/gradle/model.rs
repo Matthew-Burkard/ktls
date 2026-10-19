@@ -590,6 +590,8 @@ pub struct ScriptInterpreter<'s> {
     pub subprojects: Vec<Vec<Stmt>>,
     /// `project(":x") { }` blocks: path → closure.
     pub project_blocks: Vec<(String, Vec<Stmt>)>,
+    /// `pluginManager.withPlugin(id) { }` / `plugins.withId(id) { }` waiting for `id`.
+    deferred: Vec<(String, Vec<Stmt>)>,
 }
 
 impl<'s> ScriptInterpreter<'s> {
@@ -607,6 +609,7 @@ impl<'s> ScriptInterpreter<'s> {
             allprojects: Vec::new(),
             subprojects: Vec::new(),
             project_blocks: Vec::new(),
+            deferred: Vec::new(),
         }
     }
 
@@ -905,6 +908,17 @@ impl<'s> ScriptInterpreter<'s> {
                 }
             }
             (_, "afterEvaluate") | (_, "configure") | (_, "with") => self.stmts(body, ctx),
+            // Runs when (or once) the plugin is applied.
+            (_, "pluginManager.withPlugin" | "plugins.withId" | "project.pluginManager.withPlugin" | "project.plugins.withId") => {
+                if let Some(id) = first_str() {
+                    let id = canonical_plugin_id(&id);
+                    if self.model.plugins.iter().any(|p| p.id == id && p.apply) {
+                        self.stmts(body, &Ctx::Top);
+                    } else {
+                        self.deferred.push((id, body.to_vec()));
+                    }
+                }
+            }
             (Ctx::Top, "kotlin") => self.stmts(body, &Ctx::Kotlin),
             (Ctx::Top, "java") => self.stmts(body, &Ctx::Java),
             (Ctx::Java, "toolchain") => self.stmts(body, &Ctx::Java),
@@ -931,7 +945,8 @@ impl<'s> ScriptInterpreter<'s> {
                 self.add_src_dirs(&ss, e)
             }
             (Ctx::Kotlin, "jvmToolchain") => self.model.jvm_toolchain = first_str(),
-            (Ctx::Kotlin, "explicitApi") => self.model.explicit_api = true,
+            // Also inside `configure<KotlinProjectExtension> { }` (type arguments are not kept).
+            (_, "explicitApi" | "explicitApiWarning" | "kotlin.explicitApi" | "kotlin.explicitApiWarning") => self.model.explicit_api = true,
             (Ctx::Kotlin, "sourceSets") => self.stmts(body, &Ctx::KotlinSourceSets),
             (Ctx::Kotlin, "compilerOptions") | (Ctx::Kotlin, "kotlinOptions") | (Ctx::CompilerOptions, _) | (Ctx::Top, "kotlinOptions") => {
                 self.compiler_options(&name, args, body);
@@ -1050,9 +1065,13 @@ impl<'s> ScriptInterpreter<'s> {
     fn add_plugin(&mut self, id: String, version: Option<String>, apply: bool) {
         let id = canonical_plugin_id(&id);
         if let Some(existing) = self.model.plugins.iter_mut().find(|p| p.id == id) {
+            let newly_applied = apply && !existing.apply;
             existing.apply |= apply;
             if version.is_some() {
                 existing.version = version;
+            }
+            if newly_applied {
+                self.run_deferred(&id);
             }
             return;
         }
@@ -1061,6 +1080,17 @@ impl<'s> ScriptInterpreter<'s> {
             && let Some(script) = self.conventions.get(&id).cloned() {
                 self.run_file(&script);
             }
+        if apply {
+            self.run_deferred(&id);
+        }
+    }
+
+    fn run_deferred(&mut self, id: &str) {
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.deferred).into_iter().partition(|(d, _)| *d == id);
+        self.deferred = waiting;
+        for (_, body) in ready {
+            self.stmts(&body, &Ctx::Top);
+        }
     }
 
     fn notation(&self, e: &Expr, args: &[Arg]) -> Option<Notation> {

@@ -17,6 +17,8 @@ pub struct Config {
     pub cache_dir: Option<PathBuf>,
     pub project: ProjectConfig,
     pub diagnostics: DiagnosticsConfig,
+    /// Lint rules: `{ "enabled": true, "rules": { "<RuleId or category>": "warning" | "off" | ... } }`.
+    pub lint: crate::analysis::lints::LintConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -99,5 +101,9 @@ mod tests {
         assert!(c.diagnostics.enabled);
         assert_eq!(c.diagnostics.debounce_ms, 50);
         assert_eq!(Config::from_json(&serde_json::json!(null)), Config::default());
+        let c = Config::from_json(&serde_json::json!({ "lint": { "rules": { "UnusedImport": "error", "naming": "off" } } }));
+        assert!(c.lint.enabled);
+        assert_eq!(c.lint.level(&crate::analysis::lints::UNUSED_IMPORT), crate::analysis::lints::Level::Error);
+        assert_eq!(c.lint.level(&crate::analysis::lints::CLASS_NAME), crate::analysis::lints::Level::Off);
     }
 }

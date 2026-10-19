@@ -253,3 +253,40 @@ fn pull_diagnostics_and_plain_folders() {
     assert_eq!(report["items"].as_array().unwrap().len(), 1, "one error per line: {report}");
     c.shutdown();
 }
+
+#[test]
+fn lint_diagnostics_and_code_actions() {
+    let Some(stdlib) = stdlib() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let (project, mut options) = maven_fixture(tmp.path(), &stdlib);
+    options["kotlin"]["lint"] = json!({ "rules": { "CanBeVal": "off" } });
+    let mut c = Client::start(&project, options, false);
+    c.wait_for_import();
+
+    let app = project.join("src/main/kotlin/demo/Lints.kt");
+    let text = "package demo\n\nimport kotlin.math.max\n\nfun f(): Int {\n    var x = 1\n    return x;\n}\n";
+    write(&app, text);
+    let uri = path_to_uri(&app).as_str().to_string();
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": text } }));
+    let diags = c.diagnostics_for(&app, 1);
+    let codes: Vec<&str> = diags.iter().map(|d| d["code"].as_str().unwrap()).collect();
+    assert_eq!(codes, vec!["UnusedImport", "RedundantSemicolon"], "{diags:?}");
+    assert_eq!(diags[0]["severity"], 2);
+    assert_eq!(diags[0]["tags"], json!([1]));
+
+    // Quick fix + suppressions on the import line.
+    let range = json!({ "start": { "line": 2, "character": 3 }, "end": { "line": 2, "character": 3 } });
+    let actions = c.request("textDocument/codeAction", json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [] } }));
+    let titles: Vec<&str> = actions.as_array().unwrap().iter().map(|a| a["title"].as_str().unwrap()).collect();
+    assert_eq!(titles, vec!["Remove unused import", "Suppress 'UnusedImport' for file", "Fix all unused and redundant code"], "{actions:#}");
+    let edit = &actions[0]["edit"]["changes"][uri.as_str()][0];
+    assert_eq!(edit["range"], json!({ "start": { "line": 2, "character": 0 }, "end": { "line": 3, "character": 0 } }));
+    assert_eq!(edit["newText"], "");
+    assert_eq!(actions[0]["kind"], "quickfix");
+
+    // Source action on save: fix all.
+    let all = c.request("textDocument/codeAction", json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [], "only": ["source.fixAll"] } }));
+    assert_eq!(all.as_array().unwrap().len(), 1);
+    assert_eq!(all[0]["edit"]["changes"][uri.as_str()].as_array().unwrap().len(), 2);
+    c.shutdown();
+}

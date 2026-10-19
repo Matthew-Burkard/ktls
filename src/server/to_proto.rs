@@ -11,13 +11,14 @@ pub fn diagnostic(text: &str, index: &LineIndex, d: &Diagnostic, enc: Encoding) 
             Severity::Error => lsp_types::DiagnosticSeverity::ERROR,
             Severity::Warning => lsp_types::DiagnosticSeverity::WARNING,
             Severity::Info => lsp_types::DiagnosticSeverity::INFORMATION,
+            Severity::Hint => lsp_types::DiagnosticSeverity::HINT,
         }),
         code: Some(lsp_types::NumberOrString::String(d.code.to_string())),
         code_description: None,
         source: Some("kotlin".into()),
         message: d.message.clone(),
         related_information: None,
-        tags: None,
+        tags: d.unnecessary.then(|| vec![lsp_types::DiagnosticTag::UNNECESSARY]),
         data: None,
     }
 }

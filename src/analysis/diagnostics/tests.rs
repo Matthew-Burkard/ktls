@@ -56,6 +56,8 @@ impl Fixture {
         };
         let mut host = AnalysisHost::default();
         host.set_workspace(Workspace::new(vec![project], Some(jdk)));
+        // Lint rules have their own tests.
+        host.set_lint_config(crate::analysis::lints::LintConfig { enabled: false, ..Default::default() });
         Some(Fixture { host, root, _tmp: tmp })
     }
 

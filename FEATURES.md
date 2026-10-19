@@ -187,7 +187,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P2] Compiler plugin diagnostics (serialization: `SERIALIZER_NOT_FOUND`, Compose: `COMPOSABLE_INVOCATION`…)
 
 ### 5.2 Compiler warnings
-- [ ] [P0] `UNUSED_VARIABLE`, `UNUSED_PARAMETER`, `UNUSED_EXPRESSION`, `UNUSED_VALUE`, `ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE` (tag `Unnecessary`)
+- [~] [P0] `UNUSED_VARIABLE`, `UNUSED_PARAMETER`, `UNUSED_EXPRESSION`, `UNUSED_VALUE`, `ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE` (tag `Unnecessary`) — *partial: `UNUSED_VARIABLE`, `UNUSED_PARAMETER` (private and local functions), as lint rules*
 - [ ] [P0] `UNNECESSARY_SAFE_CALL`, `UNNECESSARY_NOT_NULL_ASSERTION`, `USELESS_ELVIS`, `SENSELESS_COMPARISON`
 - [ ] [P0] `DEPRECATION` (tag `Deprecated`)
 - [ ] [P1] `USELESS_CAST`, `USELESS_IS_CHECK`, `CAST_NEVER_SUCCEEDS`, `UNCHECKED_CAST`
@@ -195,69 +195,71 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `NAME_SHADOWING`, `VARIABLE_WITH_REDUNDANT_INITIALIZER`
 - [ ] [P1] `PLATFORM_CLASS_MAPPED_TO_KOTLIN`, `EXTENSION_SHADOWED_BY_MEMBER`
 - [ ] [P1] `NOTHING_TO_INLINE`, `REDUNDANT_PROJECTION`, `FINAL_UPPER_BOUND`
-- [ ] [P2] `-Werror` / `-Xsuppress-warning` / `@Suppress` awareness
+- [~] [P2] `-Werror` / `-Xsuppress-warning` / `@Suppress` awareness — *partial: `@Suppress`, `@file:Suppress` and `//noinspection` for lint rules*
 
 ### 5.3 Inspections (IntelliJ-style, beyond compiler; each configurable severity + `@Suppress("Id")`)
 
+*Implemented as lint rules (`src/analysis/lints/`): severity per rule or category via the `lint.rules` setting, `@Suppress`/`//noinspection` aware, quick fixes as code actions. Type-based rules run only when the module's dependencies resolved.*
+
 **Redundancy**
-- [ ] [P1] `RedundantSemicolon`
+- [x] [P1] `RedundantSemicolon`
 - [ ] [P1] `RemoveRedundantQualifierName`
-- [ ] [P1] `RedundantExplicitType` / `RedundantUnitReturnType`
-- [ ] [P1] `RedundantVisibilityModifier` (`public` default)
-- [ ] [P1] `RedundantModalityModifier` (`final` default, `open` in interface)
-- [ ] [P1] `RedundantUnitExpression`
-- [ ] [P1] `RedundantIf` (`if (x) true else false`)
+- [~] [P1] `RedundantExplicitType` / `RedundantUnitReturnType` — *partial: `RedundantUnitReturnType`*
+- [x] [P1] `RedundantVisibilityModifier` (`public` default; off in explicit API mode)
+- [x] [P1] `RedundantModalityModifier` (`final` default, `open` in interface)
+- [x] [P1] `RedundantUnitExpression`
+- [x] [P1] `RedundantIf` (`if (x) true else false`)
 - [ ] [P1] `RedundantLambdaArrow`, `RedundantLambdaOrAnonymousFunction`
 - [ ] [P1] `RedundantSuspendModifier`
-- [ ] [P1] `RemoveRedundantBackticks`
-- [ ] [P1] `RemoveEmptyParenthesesFromLambdaCall`, `RemoveEmptyClassBody`, `RemoveEmptyPrimaryConstructor`, `RemoveEmptySecondaryConstructorBody`
-- [ ] [P1] `RemoveCurlyBracesFromTemplate` (`${x}` → `$x`), `RemoveSingleExpressionStringTemplate`
+- [x] [P1] `RemoveRedundantBackticks`
+- [~] [P1] `RemoveEmptyParenthesesFromLambdaCall`, `RemoveEmptyClassBody`, `RemoveEmptyPrimaryConstructor`, `RemoveEmptySecondaryConstructorBody` — *partial: all but `RemoveEmptySecondaryConstructorBody`*
+- [x] [P1] `RemoveCurlyBracesFromTemplate` (`${x}` → `$x`), `RemoveSingleExpressionStringTemplate`
 - [ ] [P1] `RedundantCompanionReference`, `RedundantObjectTypeCheck`
-- [ ] [P1] `RedundantGetter` / `RedundantSetter`
-- [ ] [P1] `RedundantInnerClassModifier`, `RedundantEmptyInitializerBlock`
+- [x] [P1] `RedundantGetter` / `RedundantSetter`
+- [~] [P1] `RedundantInnerClassModifier`, `RedundantEmptyInitializerBlock` — *partial: `RedundantEmptyInitializerBlock`*
 - [ ] [P1] `RedundantNullableReturnType`, `RedundantRequireNotNullCall`
 - [ ] [P1] `RedundantWith`, `RedundantAsSequence`, `RedundantSamConstructor`
 - [ ] [P1] `RedundantElvisReturnNull`, `RedundantRunCatching`
 - [ ] [P1] `RedundantConstructorKeyword`, `RedundantEnumConstructorInvocation`
 - [ ] [P1] `RedundantLabelMigration`, `RedundantValueArgument` (arg equals default)
 - [ ] [P1] `RedundantExplicitTypeArguments` (`listOf<Int>(1)`)
-- [ ] [P1] `UnusedImport`, `UnusedSymbol` (unused private/internal declarations), `UnusedReceiverParameter`, `UnusedLambdaExpressionBody`, `UnusedUnaryOperator`
+- [~] [P1] `UnusedImport`, `UnusedSymbol` (unused private/internal declarations), `UnusedReceiverParameter`, `UnusedLambdaExpressionBody`, `UnusedUnaryOperator` — *partial: `UnusedImport`, `UnusedSymbol` for private and local declarations*
 - [ ] [P2] `RedundantOverride` (only calls super), `RedundantInterpolationPrefix`
 
 **Idiomatic Kotlin / style**
-- [ ] [P1] `CanBeVal` (`var` never reassigned)
+- [x] [P1] `CanBeVal` (`var` never reassigned)
 - [ ] [P1] `CanBeParameter` (constructor `val` used only in init)
 - [ ] [P1] `CanBePrimaryConstructorProperty`
 - [ ] [P1] `ConvertToStringTemplate` (string concatenation)
 - [ ] [P1] `LiftReturnOrAssignment` (out of `if`/`when`/`try`)
 - [ ] [P1] `CascadeIf` → `when`, `IntroduceWhenSubject`
-- [ ] [P1] `ReplaceGetOrSet` (`a.get(i)` → `a[i]`), `ReplaceCallWithBinaryOperator` (`a.plus(b)` → `a + b`)
-- [ ] [P1] `ReplaceRangeToWithUntil` / `ReplaceUntilWithRangeUntil` (`..<`)
-- [ ] [P1] `ReplaceSizeCheckWithIsNotEmpty`, `ReplaceSizeZeroCheckWithIsEmpty`, `ReplaceIsEmptyWithIfEmpty`
-- [ ] [P1] `UseExpressionBody` (single `return` block body)
+- [x] [P1] `ReplaceGetOrSet` (`a.get(i)` → `a[i]`), `ReplaceCallWithBinaryOperator` (`a.plus(b)` → `a + b`)
+- [~] [P1] `ReplaceRangeToWithUntil` / `ReplaceUntilWithRangeUntil` (`..<`) — *partial: `a..b - 1` (`ReplaceRangeToWithRangeUntil`)*
+- [~] [P1] `ReplaceSizeCheckWithIsNotEmpty`, `ReplaceSizeZeroCheckWithIsEmpty`, `ReplaceIsEmptyWithIfEmpty` — *partial: the size/length checks*
+- [x] [P1] `UseExpressionBody` (single `return` block body; a cursor action by default)
 - [ ] [P1] `IfThenToSafeAccess`, `IfThenToElvis`, `FoldInitializerAndIfToElvis`
 - [ ] [P1] `ReplaceNegatedIsEmptyWithIsNotEmpty`, `SimplifyNegatedBinaryExpression`, `SimplifyBooleanWithConstants`
-- [ ] [P1] `ConvertTwoComparisonsToRangeCheck`, `ConvertNaNEquality`
+- [~] [P1] `ConvertTwoComparisonsToRangeCheck`, `ConvertNaNEquality` — *partial: `ConvertNaNEquality`*
 - [ ] [P1] `ReplaceJavaStaticMethodWithKotlinAnalog` (`Math.max`, `System.out.println`, `Arrays.asList`…)
 - [ ] [P1] `ReplaceToStringWithStringTemplate`, `ReplaceSubstringWithTake/Drop/SubstringBefore/After`
-- [ ] [P1] `ReplaceManualRangeWithIndicesCalls` (`0 until list.size` → `list.indices`)
+- [x] [P1] `ReplaceManualRangeWithIndicesCalls` (`0 until list.size` → `list.indices`)
 - [ ] [P1] `ReplaceWithOperatorAssignment` (`x = x + 1` → `x += 1`)
 - [ ] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `ReplaceArrayOfWithLiteral` (annotations)
 - [ ] [P1] `ReplacePutWithAssignment` (`map.put(k, v)` → `map[k] = v`)
 - [ ] [P1] `ReplaceAssociateFunction`, `ReplaceMapIndexedWithListGenerator`
 - [ ] [P1] `JoinDeclarationAndAssignment`, `MoveVariableDeclarationIntoWhen`
-- [ ] [P1] `MayBeConstant` (`val` → `const val`)
+- [x] [P1] `MayBeConstant` (`val` → `const val`)
 - [ ] [P1] `ObjectLiteralToLambda`, `ConvertLambdaToReference`, `ConvertReferenceToLambda`
 - [ ] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate`
-- [ ] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda`
+- [~] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda` — *partial: `SelfAssignment` of local variables*
 - [ ] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`)
 - [ ] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals`
 - [ ] [P1] `ReplaceStringFormatWithLiteral`, `ReplaceReadLineWithReadln`, `ReplacePrintlnWithLogging`
 - [ ] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet`
-- [ ] [P1] `UnnecessaryVariable`, `UnnecessaryOptInAnnotation`
+- [~] [P1] `UnnecessaryVariable`, `UnnecessaryOptInAnnotation` — *partial: `UnnecessaryVariable` (`val x = e; return x`)*
 - [ ] [P1] `KotlinConstantConditions` (always true/false)
 - [ ] [P1] `ConvertSecondaryConstructorToPrimary`, `ConvertTryFinallyToUseCall`
-- [ ] [P1] `ControlFlowWithEmptyBody`, `EmptyRange`
+- [~] [P1] `ControlFlowWithEmptyBody`, `EmptyRange` — *partial: `ControlFlowWithEmptyBody`*
 - [ ] [P2] `DestructuringWrongName`, `UnusedDataClassCopyResult`
 - [ ] [P2] `ReplaceCollectionCountWithSize`, `PlatformExtensionReceiverOfInline`
 
@@ -271,16 +273,16 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P2] `JavaCollectionsStaticMethod`, `JavaMapForEach`
 
 **Naming & formatting conventions**
-- [ ] [P1] `ClassName`, `FunctionName`, `PropertyName`, `ConstPropertyName`, `PrivatePropertyName`, `ObjectPropertyName`, `LocalVariableName`, `EnumEntryName`, `PackageName`, `TestFunctionName`
-- [ ] [P1] `PackageDirectoryMismatch`
-- [ ] [P1] `MayBeConstant`, `TrailingComma` (missing/redundant per code style)
+- [x] [P1] `ClassName`, `FunctionName`, `PropertyName`, `ConstPropertyName`, `PrivatePropertyName`, `ObjectPropertyName`, `LocalVariableName`, `EnumEntryName`, `PackageName`, `TestFunctionName`
+- [x] [P1] `PackageDirectoryMismatch`
+- [~] [P1] `MayBeConstant`, `TrailingComma` (missing/redundant per code style) — *partial: `MayBeConstant`*
 - [ ] [P2] `KDocUnresolvedReference`, `KDocMissingDocumentation` (public API)
 - [ ] [P2] `FileNameMatchesClass` (single top-level class)
 
 **Probable bugs**
-- [ ] [P1] `EqualsOrHashCode` (one without the other)
+- [x] [P1] `EqualsOrHashCode` (one without the other)
 - [ ] [P1] `RecursivePropertyAccessor` / `RecursiveEqualsCall`
-- [ ] [P1] `ArrayInDataClass` (needs custom `equals`/`hashCode`)
+- [x] [P1] `ArrayInDataClass` (needs custom `equals`/`hashCode`)
 - [ ] [P1] `LeakingThis` (calling open member / passing `this` in constructor)
 - [ ] [P1] `SuspiciousVarProperty`, `SuspiciousCollectionReassignment` (`+=` on `var` read-only list)
 - [ ] [P1] `ImplicitNullableNothingType`, `ImplicitThis` (configurable)
@@ -293,8 +295,8 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `FlowCollectWithoutLaunch`, `GlobalCoroutineUsage` (`GlobalScope`)
 - [ ] [P1] `WarningOnMainUnusedParameterMigration`, `MainFunctionReturnUnit`
 - [ ] [P1] `OverridingDeprecatedMember`, `DeprecatedCallableAddReplaceWith`
-- [ ] [P1] `ConvertNaNEquality` (`x == Double.NaN`)
-- [ ] [P1] `ThrowableNotThrown` (`IllegalStateException()` without `throw`)
+- [x] [P1] `ConvertNaNEquality` (`x == Double.NaN`)
+- [x] [P1] `ThrowableNotThrown` (`IllegalStateException()` without `throw`)
 - [ ] [P1] `KotlinThrowsInspection` / `@Throws` mismatch for Java callers
 - [ ] [P1] `PublicApiImplicitType` (explicit API mode: `-Xexplicit-api`)
 - [ ] [P2] `SuspiciousCascadingIf`, `ProtectedInFinal`, `NonExhaustiveWhenStatementMigration`
@@ -324,7 +326,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P0] **Implement members** / **make class abstract**
 - [ ] [P0] **Add `override` modifier**, **remove `override`**, **make super member `open`**
 - [ ] [P0] **Add missing `when` branches** / **add `else` branch**
-- [ ] [P0] **Remove unused** variable/parameter/import/declaration
+- [~] [P0] **Remove unused** variable/parameter/import/declaration — *partial: variable, import, private/local declaration*
 - [ ] [P0] **Change `val` to `var`**
 - [ ] [P0] **Initialize property** / **make `lateinit`** / **make `abstract`** / **move to constructor**
 - [ ] [P0] **Add `suspend` modifier** to containing function / wrap in `runBlocking`/`launch`
@@ -335,10 +337,10 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P1] **Make visible** (change visibility of referenced declaration), **make `public`/`internal`/`private`/`protected`**
 - [ ] [P1] **Add `open`** to class/member, **remove `final`**
 - [ ] [P1] **Add `operator`/`infix`/`inline`/`reified`/`crossinline`/`noinline`/`tailrec`/`data`/`const` modifier**
-- [ ] [P1] **Remove incompatible / redundant modifier**
+- [~] [P1] **Remove incompatible / redundant modifier** — *partial: redundant `public`/`final`/`open`/`abstract`*
 - [ ] [P1] **Opt-in**: add `@OptIn(X::class)` to statement/function/class/file, or propagate `@X` marker, or add compiler arg
 - [ ] [P1] **Replace deprecated usage** (`@Deprecated(replaceWith = ReplaceWith(...))`) — single and whole project
-- [ ] [P1] **Suppress warning** for statement/function/class/file (`@Suppress("...")`)
+- [x] [P1] **Suppress warning** for statement/function/class/file (`@Suppress("...")`) — *for lint rules: innermost declaration or file*
 - [ ] [P1] **Add `@Throws`**, **add `@JvmStatic`/`@JvmOverloads`/`@JvmField`/`@JvmName`**
 - [ ] [P1] **Create `actual`** declarations for `expect` (per target), **create `expect`** for `actual`
 - [ ] [P1] **Convert to block body** to allow multiple statements
@@ -349,13 +351,13 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P1] **Add `init` block / initializer**, **add constructor parameters / supertype constructor call**
 - [ ] [P1] **Add missing `getValue`/`setValue`/`provideDelegate`** for delegates
 - [ ] [P1] **Add Gradle/Maven dependency** for unresolved well-known library symbol
-- [ ] [P1] **Apply inspection fix** for every inspection in §5.3 (one-to-one)
-- [ ] [P2] **Fix all of this type in file / project** (`source.fixAll` + per-kind batch)
+- [~] [P1] **Apply inspection fix** for every inspection in §5.3 (one-to-one) — *partial: the implemented rules that have a safe fix*
+- [~] [P2] **Fix all of this type in file / project** (`source.fixAll` + per-kind batch) — *partial: `source.fixAll` for unused/redundant code in the file*
 - [ ] [P2] **Upgrade language/API version** / **enable language feature** in build file
 
 ### 6.2 Source actions
 - [ ] [P0] `source.organizeImports` — remove unused, sort per code style, collapse to `*` per threshold, handle aliases
-- [ ] [P1] `source.fixAll` — apply all safe fixes
+- [~] [P1] `source.fixAll` — apply all safe fixes — *partial: unused and redundant code*
 - [ ] [P1] **Generate**: `equals()`/`hashCode()`, `toString()`, secondary constructor, KDoc stub, test class/method, `serialVersionUID`
 - [ ] [P1] **Implement members…** / **Override members…** (with selection)
 - [ ] [P1] **Add missing imports** for whole file (on paste / on save)
@@ -363,7 +365,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 
 ### 6.3 Intentions / refactor.rewrite (cursor-context actions)
 **Declarations**
-- [ ] [P1] Convert to expression body ↔ block body
+- [~] [P1] Convert to expression body ↔ block body — *partial: to expression body (`UseExpressionBody`)*
 - [ ] [P1] Specify type explicitly ↔ remove explicit type
 - [ ] [P1] Convert property to function ↔ function to property
 - [ ] [P1] Convert property initializer to getter ↔ getter to initializer

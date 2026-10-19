@@ -332,9 +332,13 @@ fn cache_path(root: &Path, opts: &LoadOptions) -> PathBuf {
     opts.cache_dir.join("models").join(format!("{}.json", crate::util::short_hash(&root.display().to_string())))
 }
 
+/// Bump when the importer's output changes, so cached models are recomputed.
+const IMPORTER_REVISION: &str = "2";
+
 fn fingerprint(files: &[PathBuf]) -> String {
     let mut h = sha1_smol::Sha1::new();
     h.update(env!("CARGO_PKG_VERSION").as_bytes());
+    h.update(IMPORTER_REVISION.as_bytes());
     for f in files {
         h.update(f.display().to_string().as_bytes());
         if let Ok(bytes) = std::fs::read(f) {
