@@ -6,6 +6,7 @@
 //! all of them stay silent rather than guess.
 
 mod bugs;
+mod compiler;
 mod naming;
 mod redundant;
 mod style;
@@ -40,6 +41,8 @@ pub enum Level {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
+    /// Compiler errors and warnings (always run; `lint.enabled` does not apply).
+    Compiler,
     Unused,
     Redundancy,
     Style,
@@ -50,6 +53,7 @@ pub enum Category {
 impl Category {
     pub fn name(self) -> &'static str {
         match self {
+            Category::Compiler => "compiler",
             Category::Unused => "unused",
             Category::Redundancy => "redundancy",
             Category::Style => "style",
@@ -88,6 +92,62 @@ macro_rules! rules {
 }
 
 rules! {
+    // Compiler errors.
+    UNRESOLVED_REFERENCE_EXPR = "UNRESOLVED_REFERENCE", Compiler, Error, false, [], "Name that does not resolve to any declaration";
+    VAL_REASSIGNMENT = "VAL_REASSIGNMENT", Compiler, Error, false, [], "Assignment to a 'val' or parameter";
+    NO_RETURN = "NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY", Compiler, Error, false, [], "Function with a return type whose block body has no 'return'";
+    ABSTRACT_MEMBER_NOT_IMPLEMENTED = "ABSTRACT_MEMBER_NOT_IMPLEMENTED", Compiler, Error, false, [], "Concrete class missing an implementation of an interface member";
+    ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED = "ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED", Compiler, Error, false, [], "Concrete class missing an implementation of an abstract class member";
+    NOTHING_TO_OVERRIDE = "NOTHING_TO_OVERRIDE", Compiler, Error, false, [], "'override' of a member no supertype declares";
+    NO_ELSE_IN_WHEN = "NO_ELSE_IN_WHEN", Compiler, Error, false, [], "'when' that is not exhaustive";
+    REPEATED_MODIFIER = "REPEATED_MODIFIER", Compiler, Error, false, [], "The same modifier twice";
+    INCOMPATIBLE_MODIFIERS = "INCOMPATIBLE_MODIFIERS", Compiler, Error, false, [], "Modifiers that cannot be combined";
+    INAPPLICABLE_LATEINIT_MODIFIER = "INAPPLICABLE_LATEINIT_MODIFIER", Compiler, Error, false, [], "'lateinit' on a val, nullable or primitive type, or with an initializer";
+    WRONG_MODIFIER_TARGET = "WRONG_MODIFIER_TARGET", Compiler, Error, false, [], "Modifier not applicable to this declaration";
+    CONST_VAL_NOT_TOP_LEVEL_OR_OBJECT = "CONST_VAL_NOT_TOP_LEVEL_OR_OBJECT", Compiler, Error, false, [], "'const val' inside a class";
+    CONST_VAL_WITHOUT_INITIALIZER = "CONST_VAL_WITHOUT_INITIALIZER", Compiler, Error, false, [], "'const val' without a value";
+    CONST_VAL_WITH_GETTER = "CONST_VAL_WITH_GETTER", Compiler, Error, false, [], "'const val' with a getter";
+    ABSTRACT_FUNCTION_WITH_BODY = "ABSTRACT_FUNCTION_WITH_BODY", Compiler, Error, false, [], "Abstract function with a body";
+    NON_ABSTRACT_FUNCTION_WITH_NO_BODY = "NON_ABSTRACT_FUNCTION_WITH_NO_BODY", Compiler, Error, false, [], "Member function without a body that is not abstract";
+    NON_MEMBER_FUNCTION_NO_BODY = "NON_MEMBER_FUNCTION_NO_BODY", Compiler, Error, false, [], "Top-level or local function without a body";
+    ABSTRACT_PROPERTY_WITH_INITIALIZER = "ABSTRACT_PROPERTY_WITH_INITIALIZER", Compiler, Error, false, [], "Abstract property with an initializer";
+    ABSTRACT_PROPERTY_WITH_GETTER = "ABSTRACT_PROPERTY_WITH_GETTER", Compiler, Error, false, [], "Abstract property with a getter body";
+    ABSTRACT_FUNCTION_IN_NON_ABSTRACT_CLASS = "ABSTRACT_FUNCTION_IN_NON_ABSTRACT_CLASS", Compiler, Error, false, [], "Abstract function in a concrete class or object";
+    ABSTRACT_PROPERTY_IN_NON_ABSTRACT_CLASS = "ABSTRACT_PROPERTY_IN_NON_ABSTRACT_CLASS", Compiler, Error, false, [], "Abstract property in a concrete class or object";
+    MUST_BE_INITIALIZED = "MUST_BE_INITIALIZED", Compiler, Error, false, [], "Top-level property without an initializer";
+    MUST_BE_INITIALIZED_OR_BE_ABSTRACT = "MUST_BE_INITIALIZED_OR_BE_ABSTRACT", Compiler, Error, false, [], "Member property that is never initialized";
+    DATA_CLASS_WITHOUT_PARAMETERS = "DATA_CLASS_WITHOUT_PARAMETERS", Compiler, Error, false, [], "Data class with no constructor parameters";
+    DATA_CLASS_NOT_PROPERTY_PARAMETER = "DATA_CLASS_NOT_PROPERTY_PARAMETER", Compiler, Error, false, [], "Data class constructor parameter without 'val'/'var'";
+    CONSTRUCTOR_IN_INTERFACE = "CONSTRUCTOR_IN_INTERFACE", Compiler, Error, false, [], "Interface with a constructor";
+    CONSTRUCTOR_IN_OBJECT = "CONSTRUCTOR_IN_OBJECT", Compiler, Error, false, [], "Object with a constructor";
+    ANONYMOUS_INITIALIZER_IN_INTERFACE = "ANONYMOUS_INITIALIZER_IN_INTERFACE", Compiler, Error, false, [], "Interface with an 'init' block";
+    PROPERTY_INITIALIZER_IN_INTERFACE = "PROPERTY_INITIALIZER_IN_INTERFACE", Compiler, Error, false, [], "Interface property with an initializer";
+    SUPERTYPE_INITIALIZED_IN_INTERFACE = "SUPERTYPE_INITIALIZED_IN_INTERFACE", Compiler, Error, false, [], "Interface calling a supertype constructor";
+    INTERFACE_WITH_SUPERCLASS = "INTERFACE_WITH_SUPERCLASS", Compiler, Error, false, [], "Interface extending a class";
+    SUPERTYPE_NOT_INITIALIZED = "SUPERTYPE_NOT_INITIALIZED", Compiler, Error, false, [], "Superclass constructor not called";
+    MANY_CLASSES_IN_SUPERTYPE_LIST = "MANY_CLASSES_IN_SUPERTYPE_LIST", Compiler, Error, false, [], "More than one superclass";
+    FINAL_SUPERTYPE = "FINAL_SUPERTYPE", Compiler, Error, false, [], "Extending a final class";
+    REDECLARATION_LOCAL = "REDECLARATION", Compiler, Error, false, [], "Two declarations with the same name in one scope";
+    CONFLICTING_OVERLOADS = "CONFLICTING_OVERLOADS", Compiler, Error, false, [], "Two functions with the same signature in one scope";
+    INITIALIZER_TYPE_MISMATCH = "INITIALIZER_TYPE_MISMATCH", Compiler, Error, false, [], "Literal of the wrong type as an initializer or default value";
+    RETURN_TYPE_MISMATCH = "RETURN_TYPE_MISMATCH", Compiler, Error, false, [], "Literal of the wrong type returned";
+    NULL_FOR_NONNULL_TYPE = "NULL_FOR_NONNULL_TYPE", Compiler, Error, false, [], "'null' for a non-null type";
+    TOO_MANY_ARGUMENTS = "TOO_MANY_ARGUMENTS", Compiler, Error, false, [], "More arguments than parameters";
+    NO_VALUE_FOR_PARAMETER = "NO_VALUE_FOR_PARAMETER", Compiler, Error, false, [], "Required parameter without an argument";
+    NAMED_PARAMETER_NOT_FOUND = "NAMED_PARAMETER_NOT_FOUND", Compiler, Error, false, [], "Named argument for a parameter that does not exist";
+    NONE_APPLICABLE = "NONE_APPLICABLE", Compiler, Error, false, [], "No overload accepts these arguments";
+    // Compiler warnings.
+    UNNECESSARY_SAFE_CALL = "UNNECESSARY_SAFE_CALL", Compiler, Warning, true, [], "'?.' on a non-null receiver";
+    UNNECESSARY_NOT_NULL_ASSERTION = "UNNECESSARY_NOT_NULL_ASSERTION", Compiler, Warning, true, [], "'!!' on a non-null value";
+    USELESS_ELVIS = "USELESS_ELVIS", Compiler, Warning, true, [], "'?:' after a non-null value";
+    SENSELESS_COMPARISON = "SENSELESS_COMPARISON", Compiler, Warning, false, [], "Comparing a non-null value with null";
+    DEPRECATION = "DEPRECATION", Compiler, Warning, false, [], "Use of a deprecated declaration";
+    REDUNDANT_ELSE_IN_WHEN = "REDUNDANT_ELSE_IN_WHEN", Compiler, Warning, true, [], "'else' in a 'when' that is already exhaustive";
+    NAME_SHADOWING = "NAME_SHADOWING", Compiler, Warning, false, [], "Local declaration hiding an outer one";
+    UNREACHABLE_CODE = "UNREACHABLE_CODE", Compiler, Warning, true, [], "Code after 'return', 'throw', 'break' or 'continue'";
+    NON_FINAL_MEMBER_IN_FINAL_CLASS = "NON_FINAL_MEMBER_IN_FINAL_CLASS", Compiler, Warning, false, [], "'open' member of a final class";
+    NON_FINAL_MEMBER_IN_OBJECT = "NON_FINAL_MEMBER_IN_OBJECT", Compiler, Warning, false, [], "'open' member of an object";
+
     UNUSED_IMPORT = "UnusedImport", Unused, Warning, true, ["unused"], "Import directive that nothing in the file uses";
     UNUSED_VARIABLE = "UNUSED_VARIABLE", Unused, Warning, true, ["unused", "UnusedVariable"], "Local variable that is never read";
     UNUSED_PARAMETER = "UNUSED_PARAMETER", Unused, Warning, true, ["unused", "UnusedParameter"], "Parameter of a private or local function that is never used";
@@ -266,7 +326,7 @@ impl Sink<'_> {
 /// Run every enabled rule on `path`. `full`: the file is fully analysable (types available).
 pub fn lint_file(snap: &Snapshot, path: &Path, full: bool) -> Vec<Lint> {
     let Some(file) = snap.file(path) else { return Vec::new() };
-    if file.language != Language::Kotlin || !snap.lints.enabled {
+    if file.language != Language::Kotlin {
         return Vec::new();
     }
     let ctx = snap.context_of(path);
@@ -288,11 +348,14 @@ pub fn lint_file(snap: &Snapshot, path: &Path, full: bool) -> Vec<Lint> {
         engine: OnceCell::new(),
     };
     let mut sink = Sink { config: &snap.lints, lints: Vec::new() };
-    unused::check(&cx, &mut sink);
-    redundant::check(&cx, &mut sink);
-    style::check(&cx, &mut sink);
-    bugs::check(&cx, &mut sink);
-    naming::check(&cx, &mut sink);
+    compiler::check(&cx, &mut sink);
+    if snap.lints.enabled {
+        unused::check(&cx, &mut sink);
+        redundant::check(&cx, &mut sink);
+        style::check(&cx, &mut sink);
+        bugs::check(&cx, &mut sink);
+        naming::check(&cx, &mut sink);
+    }
     let suppressions = Suppressions::collect(&cx.root);
     let mut lints = sink.lints;
     lints.retain(|l| !suppressions.suppressed(l));

@@ -38,11 +38,10 @@ pub enum Coverage {
 /// Compiler diagnostics plus the enabled lint rules.
 pub fn file_diagnostics(snap: &Snapshot, path: &Path) -> (Vec<Diagnostic>, Coverage) {
     let (mut out, coverage) = compiler_diagnostics(snap, path);
-    if snap.lints.enabled {
-        let lints = super::lints::lint_file(snap, path, coverage == Coverage::Full);
-        out.extend(lints.iter().filter(|l| l.level != super::lints::Level::Action).map(|l| l.diagnostic()));
-        out.sort_by_key(|d| (d.range.start(), d.range.end()));
-    }
+    let lints = super::lints::lint_file(snap, path, coverage == Coverage::Full);
+    out.extend(lints.iter().filter(|l| l.level != super::lints::Level::Action).map(|l| l.diagnostic()));
+    out.sort_by_key(|d| (d.range.start(), d.range.end()));
+    out.dedup();
     (out, coverage)
 }
 

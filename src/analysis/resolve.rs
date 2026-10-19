@@ -1,7 +1,7 @@
 //! Name resolution for imports and type references.
 
-use std::cell::Cell;
-use std::collections::HashSet;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -79,6 +79,12 @@ pub struct Resolver<'s> {
     pub classpath: Arc<ClasspathIndex>,
     summary: Option<Arc<FileSummary>>,
     path: PathBuf,
+    /// Package → its source top-level declarations visible here (by name).
+    source_top_level: RefCell<HashMap<String, Arc<HashMap<String, Vec<Symbol>>>>>,
+    /// `(owner, name)` → nested classifier found through the owner's supertypes.
+    nested_cache: RefCell<HashMap<(String, String), Option<Classifier>>>,
+    /// Resolvers of other files (for supertypes declared there).
+    others: RefCell<HashMap<PathBuf, std::rc::Rc<Resolver<'s>>>>,
 }
 
 thread_local! {
@@ -92,7 +98,17 @@ impl<'s> Resolver<'s> {
         let visible = ctx.map(|c| snap.workspace.visible_contexts(c)).unwrap_or_default();
         let classpath = snap.workspace.classpath(ctx);
         let summary = snap.file(path).map(|f| f.summary());
-        Resolver { snap, ctx, visible, classpath, summary, path: path.to_path_buf() }
+        Resolver {
+            snap,
+            ctx,
+            visible,
+            classpath,
+            summary,
+            path: path.to_path_buf(),
+            source_top_level: RefCell::new(HashMap::new()),
+            nested_cache: RefCell::new(HashMap::new()),
+            others: RefCell::new(HashMap::new()),
+        }
     }
 
     fn is_visible(&self, other: Option<FileContext>) -> bool {
@@ -227,7 +243,21 @@ impl<'s> Resolver<'s> {
 
     /// Top-level callables named `name` in `pkg` (sources + libraries).
     pub fn top_level_callables(&self, pkg: &str, name: &str) -> Vec<Symbol> {
-        let mut out: Vec<Symbol> = self.classpath.package_members(pkg).iter().filter(|m| m.name == name && m.kind != SymbolKind::TypeAlias).cloned().collect();
+        let mut out: Vec<Symbol> = self.classpath.package_members_named(pkg, name);
+        out.retain(|m| m.kind != SymbolKind::TypeAlias);
+        if let Some(found) = self.source_top_level(pkg).get(name) {
+            out.extend(found.iter().filter(|s| s.kind.is_callable()).cloned());
+        }
+        out
+    }
+
+    /// Source top-level declarations of `pkg` by name (this file's own summary included),
+    /// computed once per package.
+    fn source_top_level(&self, pkg: &str) -> Arc<HashMap<String, Vec<Symbol>>> {
+        if let Some(hit) = self.source_top_level.borrow().get(pkg) {
+            return hit.clone();
+        }
+        let mut map: HashMap<String, Vec<Symbol>> = HashMap::new();
         let visible = self.visible_fn();
         let own = self.summary().filter(|s| s.package == pkg);
         let mut seen_paths = HashSet::new();
@@ -235,17 +265,20 @@ impl<'s> Resolver<'s> {
             seen_paths.insert(loc.path.clone());
             if let Some(f) = self.snap.file(&loc.path) {
                 let s = f.summary();
-                if let Some(d) = loc.resolve(&s)
-                    && d.symbol.name == name && d.symbol.kind.is_callable() {
-                        out.push(d.symbol.clone());
-                    }
+                if let Some(d) = loc.resolve(&s) {
+                    map.entry(d.symbol.name.clone()).or_default().push(d.symbol.clone());
+                }
             }
         }
         if let Some(s) = own
             && !seen_paths.iter().any(|p| **p == *self.path.as_path()) {
-                out.extend(s.decls.iter().filter(|d| d.symbol.name == name && d.symbol.kind.is_callable()).map(|d| d.symbol.clone()));
+                for d in &s.decls {
+                    map.entry(d.symbol.name.clone()).or_default().push(d.symbol.clone());
+                }
             }
-        out
+        let map = Arc::new(map);
+        self.source_top_level.borrow_mut().insert(pkg.to_string(), map.clone());
+        map
     }
 
     /// Members (callables + nested classifiers) of a classifier named `name`.
@@ -404,12 +437,30 @@ impl<'s> Resolver<'s> {
 
     /// A nested classifier `name` in `owner` or in any of its supertypes.
     fn nested_in_hierarchy(&self, owner: &str, name: &str, seen: &mut HashSet<String>, depth: u32) -> Option<Classifier> {
+        let key = (owner.to_string(), name.to_string());
+        if let Some(hit) = self.nested_cache.borrow().get(&key) {
+            return hit.clone();
+        }
         if depth > 6 || !seen.insert(owner.to_string()) || HIERARCHY_DEPTH.get() > 12 {
             return None;
         }
         HIERARCHY_DEPTH.set(HIERARCHY_DEPTH.get() + 1);
         let r = self.nested_in_hierarchy_inner(owner, name, seen, depth);
         HIERARCHY_DEPTH.set(HIERARCHY_DEPTH.get() - 1);
+        // Only top-level searches are complete (deeper ones depend on `seen`).
+        if depth == 0 {
+            self.nested_cache.borrow_mut().insert(key, r.clone());
+        }
+        r
+    }
+
+    /// The resolver of another file, created once.
+    fn resolver_of(&self, file: &Path) -> std::rc::Rc<Resolver<'s>> {
+        if let Some(r) = self.others.borrow().get(file) {
+            return r.clone();
+        }
+        let r = std::rc::Rc::new(Resolver::new(self.snap, file));
+        self.others.borrow_mut().insert(file.to_path_buf(), r.clone());
         r
     }
 
@@ -424,10 +475,10 @@ impl<'s> Resolver<'s> {
         let supertypes: Vec<TypeRef> = cls.symbol().supertypes.clone();
         // Source supertypes are unresolved names: resolve them in the declaring file.
         let owner_resolver = match &cls.symbol().origin {
-            crate::symbols::Origin::Source { file, .. } if *file != self.path => Some(Resolver::new(self.snap, file)),
+            crate::symbols::Origin::Source { file, .. } if *file != self.path => Some(self.resolver_of(file)),
             _ => None,
         };
-        let r = owner_resolver.as_ref().unwrap_or(self);
+        let r = owner_resolver.as_deref().unwrap_or(self);
         for st in supertypes {
             let fq = match &st {
                 TypeRef::Named { fq: Some(fq), .. } => Some(fq.to_string()),

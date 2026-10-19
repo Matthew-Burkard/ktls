@@ -162,37 +162,37 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 
 ### 5.1 Compiler errors (subset of the K2 compiler diagnostic set)
 - [x] [P0] Syntax errors (expecting X, unexpected token, unclosed string/comment)
-- [~] [P0] `UNRESOLVED_REFERENCE`, `UNRESOLVED_IMPORT` — *partial: imports and type references*
-- [ ] [P0] `TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`, `RETURN_TYPE_MISMATCH`, `INITIALIZER_TYPE_MISMATCH`
-- [ ] [P0] `NONE_APPLICABLE`, `OVERLOAD_RESOLUTION_AMBIGUITY`, `TOO_MANY_ARGUMENTS`, `NO_VALUE_FOR_PARAMETER`, `NAMED_PARAMETER_NOT_FOUND`
-- [ ] [P0] Null safety: `UNSAFE_CALL`, `UNSAFE_OPERATOR_CALL`, `UNSAFE_IMPLICIT_INVOKE_CALL`, `NULL_FOR_NONNULL_TYPE`
-- [ ] [P0] `VAL_REASSIGNMENT`, `UNINITIALIZED_VARIABLE`, `MUST_BE_INITIALIZED`, `MUST_BE_INITIALIZED_OR_BE_ABSTRACT`
-- [ ] [P0] `NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY`, `RETURN_NOT_ALLOWED`
-- [ ] [P0] `ABSTRACT_MEMBER_NOT_IMPLEMENTED`, `ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED`, `MANY_IMPL_MEMBER_NOT_IMPLEMENTED`
-- [ ] [P0] `NOTHING_TO_OVERRIDE`, `VIRTUAL_MEMBER_HIDDEN` (missing `override`), `OVERRIDING_FINAL_MEMBER`, `FINAL_SUPERTYPE`
+- [~] [P0] `UNRESOLVED_REFERENCE`, `UNRESOLVED_IMPORT` — *partial: imports, types, and expression names that exist nowhere (typos, deleted declarations)*
+- [~] [P0] `TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`, `RETURN_TYPE_MISMATCH`, `INITIALIZER_TYPE_MISMATCH` — *partial: literals as initializers, default values and return values*
+- [~] [P0] `NONE_APPLICABLE`, `OVERLOAD_RESOLUTION_AMBIGUITY`, `TOO_MANY_ARGUMENTS`, `NO_VALUE_FOR_PARAMETER`, `NAMED_PARAMETER_NOT_FOUND` — *partial: argument counts and names (not types), all overloads considered; no ambiguity*
+- [~] [P0] Null safety: `UNSAFE_CALL`, `UNSAFE_OPERATOR_CALL`, `UNSAFE_IMPLICIT_INVOKE_CALL`, `NULL_FOR_NONNULL_TYPE` — *partial: `NULL_FOR_NONNULL_TYPE` for literal `null`; no unsafe-call analysis (needs smart casts)*
+- [~] [P0] `VAL_REASSIGNMENT`, `UNINITIALIZED_VARIABLE`, `MUST_BE_INITIALIZED`, `MUST_BE_INITIALIZED_OR_BE_ABSTRACT` — *partial: all but `UNINITIALIZED_VARIABLE`*
+- [~] [P0] `NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY`, `RETURN_NOT_ALLOWED` — *partial: `NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY` (no `return`/`throw` anywhere)*
+- [~] [P0] `ABSTRACT_MEMBER_NOT_IMPLEMENTED`, `ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED`, `MANY_IMPL_MEMBER_NOT_IMPLEMENTED` — *partial: the first two, with an "Implement members" fix*
+- [~] [P0] `NOTHING_TO_OVERRIDE`, `VIRTUAL_MEMBER_HIDDEN` (missing `override`), `OVERRIDING_FINAL_MEMBER`, `FINAL_SUPERTYPE` — *partial: `NOTHING_TO_OVERRIDE`, `FINAL_SUPERTYPE`*
 - [ ] [P0] Visibility: `INVISIBLE_REFERENCE`, `INVISIBLE_MEMBER`, `EXPOSED_*` (exposed visibility)
-- [ ] [P0] `NO_ELSE_IN_WHEN` / `WHEN_ON_SEALED_*` non-exhaustive
+- [x] [P0] `NO_ELSE_IN_WHEN` / `WHEN_ON_SEALED_*` non-exhaustive (enum, Boolean, nullable, source sealed hierarchies; "Add remaining branches" fix)
 - [ ] [P0] `ILLEGAL_SUSPEND_FUNCTION_CALL`, `NON_LOCAL_SUSPENSION_POINT`
-- [~] [P0] `CONFLICTING_OVERLOADS`, `REDECLARATION`, `PACKAGE_OR_CLASSIFIER_REDECLARATION` — *partial: classifier redeclarations*
+- [~] [P0] `CONFLICTING_OVERLOADS`, `REDECLARATION`, `PACKAGE_OR_CLASSIFIER_REDECLARATION` — *partial: classifiers, members and locals in one scope*
 - [ ] [P1] Generics: `UPPER_BOUND_VIOLATED`, `WRONG_NUMBER_OF_TYPE_ARGUMENTS`, `TYPE_VARIANCE_CONFLICT`, `CANNOT_INFER_PARAMETER_TYPE`, `NEW_INFERENCE_NO_INFORMATION_FOR_PARAMETER`
-- [ ] [P1] Modifiers: `INCOMPATIBLE_MODIFIERS`, `REDUNDANT_MODIFIER`, `WRONG_MODIFIER_TARGET`, `REPEATED_MODIFIER`
+- [~] [P1] Modifiers: `INCOMPATIBLE_MODIFIERS`, `REDUNDANT_MODIFIER`, `WRONG_MODIFIER_TARGET`, `REPEATED_MODIFIER` — *partial: all but `REDUNDANT_MODIFIER`*
 - [ ] [P1] Annotations: `WRONG_ANNOTATION_TARGET`, `ANNOTATION_ARGUMENT_MUST_BE_CONST`, opt-in (`OPT_IN_USAGE`, `OPT_IN_USAGE_ERROR`)
-- [ ] [P1] Data/value/sealed/enum class rule violations (`DATA_CLASS_WITHOUT_PARAMETERS`, `VALUE_CLASS_*`, `SEALED_SUPERTYPE*`)
+- [~] [P1] Data/value/sealed/enum class rule violations (`DATA_CLASS_WITHOUT_PARAMETERS`, `VALUE_CLASS_*`, `SEALED_SUPERTYPE*`) — *partial: data classes, interface/object constructors and initializers*
 - [ ] [P1] `expect`/`actual`: `NO_ACTUAL_FOR_EXPECT`, `ACTUAL_WITHOUT_EXPECT`, `ACTUAL_MISSING`, incompatible signatures
-- [ ] [P1] `CONST_VAL_*`, `LATEINIT_*`, `DELEGATE_SPECIAL_FUNCTION_*` (missing `getValue`/`setValue`)
+- [~] [P1] `CONST_VAL_*`, `LATEINIT_*`, `DELEGATE_SPECIAL_FUNCTION_*` (missing `getValue`/`setValue`) — *partial: `const` and `lateinit` rules*
 - [ ] [P1] `OPERATOR_MODIFIER_REQUIRED`, `INFIX_MODIFIER_REQUIRED`
-- [ ] [P1] `SUPERTYPE_NOT_INITIALIZED`, `SUPERTYPE_INITIALIZED_IN_INTERFACE`, `CYCLIC_INHERITANCE_HIERARCHY`
+- [~] [P1] `SUPERTYPE_NOT_INITIALIZED`, `SUPERTYPE_INITIALIZED_IN_INTERFACE`, `CYCLIC_INHERITANCE_HIERARCHY` — *partial: the first two, plus `MANY_CLASSES_IN_SUPERTYPE_LIST`, `INTERFACE_WITH_SUPERCLASS`*
 - [ ] [P1] `DEPRECATION_ERROR`, `API_NOT_AVAILABLE` (api-version)
 - [ ] [P1] Platform-specific: `JVM_*` clashes (`CONFLICTING_JVM_DECLARATIONS`, `ACCIDENTAL_OVERRIDE`), JS/Native target errors
 - [ ] [P2] Compiler plugin diagnostics (serialization: `SERIALIZER_NOT_FOUND`, Compose: `COMPOSABLE_INVOCATION`…)
 
 ### 5.2 Compiler warnings
 - [~] [P0] `UNUSED_VARIABLE`, `UNUSED_PARAMETER`, `UNUSED_EXPRESSION`, `UNUSED_VALUE`, `ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE` (tag `Unnecessary`) — *partial: `UNUSED_VARIABLE`, `UNUSED_PARAMETER` (private and local functions), as lint rules*
-- [ ] [P0] `UNNECESSARY_SAFE_CALL`, `UNNECESSARY_NOT_NULL_ASSERTION`, `USELESS_ELVIS`, `SENSELESS_COMPARISON`
-- [ ] [P0] `DEPRECATION` (tag `Deprecated`)
+- [x] [P0] `UNNECESSARY_SAFE_CALL`, `UNNECESSARY_NOT_NULL_ASSERTION`, `USELESS_ELVIS`, `SENSELESS_COMPARISON` (receivers with declared non-null types)
+- [x] [P0] `DEPRECATION` (tag `Deprecated`)
 - [ ] [P1] `USELESS_CAST`, `USELESS_IS_CHECK`, `CAST_NEVER_SUCCEEDS`, `UNCHECKED_CAST`
-- [ ] [P1] `UNREACHABLE_CODE`, `REDUNDANT_ELSE_IN_WHEN`, `DUPLICATE_LABEL_IN_WHEN`
-- [ ] [P1] `NAME_SHADOWING`, `VARIABLE_WITH_REDUNDANT_INITIALIZER`
+- [~] [P1] `UNREACHABLE_CODE`, `REDUNDANT_ELSE_IN_WHEN`, `DUPLICATE_LABEL_IN_WHEN` — *partial: the first two*
+- [~] [P1] `NAME_SHADOWING`, `VARIABLE_WITH_REDUNDANT_INITIALIZER` — *partial: `NAME_SHADOWING`*
 - [ ] [P1] `PLATFORM_CLASS_MAPPED_TO_KOTLIN`, `EXTENSION_SHADOWED_BY_MEMBER`
 - [ ] [P1] `NOTHING_TO_INLINE`, `REDUNDANT_PROJECTION`, `FINAL_UPPER_BOUND`
 - [~] [P2] `-Werror` / `-Xsuppress-warning` / `@Suppress` awareness — *partial: `@Suppress`, `@file:Suppress` and `//noinspection` for lint rules*

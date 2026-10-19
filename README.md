@@ -56,12 +56,75 @@ module's dependencies resolved, and every rule prefers silence over guessing.
 
 Suppress with `@Suppress("RuleId")` (also `@file:Suppress`, the aliases such as `unused`, and
 IntelliJ's `//noinspection RuleId` comment). Configure levels with `lint.rules`; keys are rule
-ids, categories (`unused`, `redundancy`, `style`, `bugs`, `naming`) or `all`, values `error`,
+ids, categories (`compiler`, `unused`, `redundancy`, `style`, `bugs`, `naming`) or `all`, values `error`,
 `warning`, `info`, `hint`, `action` (no diagnostic, only a code action at the cursor) or `off`:
 
 ```lua
 init_options = { kotlin = { lint = { rules = { naming = "off", UnusedImport = "error" } } } }
 ```
+
+**Compiler errors and warnings** (`compiler`)
+
+Beyond syntax and unresolved imports/types (always reported). These run even with
+`lint.enabled = false`; type-based ones only when the module's dependencies resolved, and
+each stays silent when it cannot be sure (smart casts, unknown DSL receivers, unresolved
+supertypes, generated code).
+
+| Rule | Default | Flags |
+|---|---|---|
+| `UNRESOLVED_REFERENCE` | error | Name that does not resolve to any declaration |
+| `VAL_REASSIGNMENT` | error | Assignment to a 'val' or parameter |
+| `NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY` | error | Function with a return type whose block body has no 'return' |
+| `ABSTRACT_MEMBER_NOT_IMPLEMENTED` | error | Concrete class missing an implementation of an interface member |
+| `ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED` | error | Concrete class missing an implementation of an abstract class member |
+| `NOTHING_TO_OVERRIDE` | error | 'override' of a member no supertype declares |
+| `NO_ELSE_IN_WHEN` | error | 'when' that is not exhaustive |
+| `REPEATED_MODIFIER` | error | The same modifier twice |
+| `INCOMPATIBLE_MODIFIERS` | error | Modifiers that cannot be combined |
+| `INAPPLICABLE_LATEINIT_MODIFIER` | error | 'lateinit' on a val, nullable or primitive type, or with an initializer |
+| `WRONG_MODIFIER_TARGET` | error | Modifier not applicable to this declaration |
+| `CONST_VAL_NOT_TOP_LEVEL_OR_OBJECT` | error | 'const val' inside a class |
+| `CONST_VAL_WITHOUT_INITIALIZER` | error | 'const val' without a value |
+| `CONST_VAL_WITH_GETTER` | error | 'const val' with a getter |
+| `ABSTRACT_FUNCTION_WITH_BODY` | error | Abstract function with a body |
+| `NON_ABSTRACT_FUNCTION_WITH_NO_BODY` | error | Member function without a body that is not abstract |
+| `NON_MEMBER_FUNCTION_NO_BODY` | error | Top-level or local function without a body |
+| `ABSTRACT_PROPERTY_WITH_INITIALIZER` | error | Abstract property with an initializer |
+| `ABSTRACT_PROPERTY_WITH_GETTER` | error | Abstract property with a getter body |
+| `ABSTRACT_FUNCTION_IN_NON_ABSTRACT_CLASS` | error | Abstract function in a concrete class or object |
+| `ABSTRACT_PROPERTY_IN_NON_ABSTRACT_CLASS` | error | Abstract property in a concrete class or object |
+| `MUST_BE_INITIALIZED` | error | Top-level property without an initializer |
+| `MUST_BE_INITIALIZED_OR_BE_ABSTRACT` | error | Member property that is never initialized |
+| `DATA_CLASS_WITHOUT_PARAMETERS` | error | Data class with no constructor parameters |
+| `DATA_CLASS_NOT_PROPERTY_PARAMETER` | error | Data class constructor parameter without 'val'/'var' |
+| `CONSTRUCTOR_IN_INTERFACE` | error | Interface with a constructor |
+| `CONSTRUCTOR_IN_OBJECT` | error | Object with a constructor |
+| `ANONYMOUS_INITIALIZER_IN_INTERFACE` | error | Interface with an 'init' block |
+| `PROPERTY_INITIALIZER_IN_INTERFACE` | error | Interface property with an initializer |
+| `SUPERTYPE_INITIALIZED_IN_INTERFACE` | error | Interface calling a supertype constructor |
+| `INTERFACE_WITH_SUPERCLASS` | error | Interface extending a class |
+| `SUPERTYPE_NOT_INITIALIZED` | error | Superclass constructor not called |
+| `MANY_CLASSES_IN_SUPERTYPE_LIST` | error | More than one superclass |
+| `FINAL_SUPERTYPE` | error | Extending a final class |
+| `REDECLARATION` | error | Two declarations with the same name in one scope |
+| `CONFLICTING_OVERLOADS` | error | Two functions with the same signature in one scope |
+| `INITIALIZER_TYPE_MISMATCH` | error | Literal of the wrong type as an initializer or default value |
+| `RETURN_TYPE_MISMATCH` | error | Literal of the wrong type returned |
+| `NULL_FOR_NONNULL_TYPE` | error | 'null' for a non-null type |
+| `TOO_MANY_ARGUMENTS` | error | More arguments than parameters |
+| `NO_VALUE_FOR_PARAMETER` | error | Required parameter without an argument |
+| `NAMED_PARAMETER_NOT_FOUND` | error | Named argument for a parameter that does not exist |
+| `NONE_APPLICABLE` | error | No overload accepts these arguments |
+| `UNNECESSARY_SAFE_CALL` | warning | '?.' on a non-null receiver |
+| `UNNECESSARY_NOT_NULL_ASSERTION` | warning | '!!' on a non-null value |
+| `USELESS_ELVIS` | warning | '?:' after a non-null value |
+| `SENSELESS_COMPARISON` | warning | Comparing a non-null value with null |
+| `DEPRECATION` | warning | Use of a deprecated declaration |
+| `REDUNDANT_ELSE_IN_WHEN` | warning | 'else' in a 'when' that is already exhaustive |
+| `NAME_SHADOWING` | warning | Local declaration hiding an outer one |
+| `UNREACHABLE_CODE` | warning | Code after 'return', 'throw', 'break' or 'continue' |
+| `NON_FINAL_MEMBER_IN_FINAL_CLASS` | warning | 'open' member of a final class |
+| `NON_FINAL_MEMBER_IN_OBJECT` | warning | 'open' member of an object |
 
 **Unused code** (`unused`)
 

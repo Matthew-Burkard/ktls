@@ -64,6 +64,12 @@ pub fn debug_tree(node: &SyntaxNode) -> String {
     out
 }
 
+/// The smallest element covering `range`, or `None` if `range` is outside `root` (e.g. a
+/// range from another file, or from a Java file whose Kotlin tree is empty).
+pub fn covering(root: &SyntaxNode, range: TextRange) -> Option<SyntaxElement> {
+    root.text_range().contains_range(range).then(|| root.covering_element(range))
+}
+
 /// Parse a `.kt` file (`script = false`) or a `.kts` script.
 pub fn parse(text: &str, script: bool) -> Parse {
     let tokens = lexer::lex(text);

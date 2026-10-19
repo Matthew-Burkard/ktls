@@ -684,24 +684,8 @@ impl Collector<'_, '_> {
         let indent = crate::analysis::lints::indent_at(&self.file.text, start.unwrap_or(self.offset));
         let range = start.map(|s| TextRange::new(s, self.offset));
         for (m, s) in self.e.overridable_members(&t) {
-            let ty = |t: &TypeRef| strip_platform(&substitute(&self.e.resolve_declared(&m, t), &s).display());
-            let params: Vec<String> = m.params.iter().map(|p| format!("{}{}: {}", if p.vararg { "vararg " } else { "" }, p.name, ty(&p.ty))).collect();
-            let ret = m.ty.as_ref().map(ty);
-            let suspend = if m.modifiers.has(Modifiers::SUSPEND) { "suspend " } else { "" };
-            let (label, text) = match m.kind {
-                SymbolKind::Function => {
-                    let ret_text = ret.as_deref().filter(|r| *r != "Unit").map(|r| format!(": {r}")).unwrap_or_default();
-                    let head = format!("override {suspend}fun {}({}){ret_text}", m.name, params.join(", "));
-                    let body = format!("{head} {{\n{indent}    TODO(\"Not yet implemented\")\n{indent}}}");
-                    (head, body)
-                }
-                _ => {
-                    let kw = if m.modifiers.has(Modifiers::VAR) { "var" } else { "val" };
-                    let head = format!("override {kw} {}: {}", m.name, ret.clone().unwrap_or_else(|| "Any".into()));
-                    let body = format!("{head}\n{indent}    get() = TODO(\"Not yet implemented\")");
-                    (head, body)
-                }
-            };
+            let label = override_signature(self.e, &m, &s);
+            let text = override_stub(self.e, &m, &s, &indent);
             let mut item = Self::item(&label, ItemKind::Snippet, 1);
             item.filter = Some(m.name.clone());
             item.detail = Some(m.signature());
@@ -797,4 +781,30 @@ pub fn import_edit(file: &FileData, fq: &str) -> (TextRange, String) {
         return (TextRange::empty(pkg.text_range().end()), format!("\n\n{line}"));
     }
     (TextRange::empty(TextSize::from(0)), format!("{line}\n\n"))
+}
+
+/// `override fun name(p: T): R` / `override val name: T` for implementing `m`.
+pub fn override_signature(e: &Engine, m: &Symbol, s: &Subst) -> String {
+    let ty = |t: &TypeRef| strip_platform(&substitute(&e.resolve_declared(m, t), s).display());
+    match m.kind {
+        SymbolKind::Function => {
+            let params: Vec<String> = m.params.iter().map(|p| format!("{}{}: {}", if p.vararg { "vararg " } else { "" }, p.name, ty(&p.ty))).collect();
+            let ret = m.ty.as_ref().map(ty).filter(|r| r != "Unit").map(|r| format!(": {r}")).unwrap_or_default();
+            let suspend = if m.modifiers.has(Modifiers::SUSPEND) { "suspend " } else { "" };
+            format!("override {suspend}fun {}({}){ret}", m.name, params.join(", "))
+        }
+        _ => {
+            let kw = if m.modifiers.has(Modifiers::VAR) { "var" } else { "val" };
+            format!("override {kw} {}: {}", m.name, m.ty.as_ref().map(ty).unwrap_or_else(|| "Any".into()))
+        }
+    }
+}
+
+/// An implementation stub of `m` (`TODO()` body); `indent` is the member's indentation.
+pub fn override_stub(e: &Engine, m: &Symbol, s: &Subst, indent: &str) -> String {
+    let head = override_signature(e, m, s);
+    match m.kind {
+        SymbolKind::Function => format!("{head} {{\n{indent}    TODO(\"Not yet implemented\")\n{indent}}}"),
+        _ => format!("{head}\n{indent}    get() = TODO(\"Not yet implemented\")"),
+    }
 }

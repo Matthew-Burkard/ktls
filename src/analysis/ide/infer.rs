@@ -279,8 +279,12 @@ pub struct Engine<'s> {
     anon: RefCell<HashMap<String, TextRange>>,
     /// Memoized supertype closures (member lookup recomputes them constantly).
     closures: RefCell<HashMap<TypeRef, Rc<Vec<TypeRef>>>>,
-    /// Memoized members of source classifiers, by FQ name.
+    /// Memoized members of classifiers, by FQ name.
     source_members: RefCell<HashMap<String, Rc<Vec<Symbol>>>>,
+    /// Memoized explicitly imported callables, by imported name.
+    imported: RefCell<HashMap<String, Vec<Symbol>>>,
+    /// Memoized lambda signatures, by lambda range.
+    lambdas: RefCell<HashMap<TextRange, Option<(Option<TypeRef>, Vec<TypeRef>)>>>,
 }
 
 impl<'s> Engine<'s> {
@@ -300,6 +304,8 @@ impl<'s> Engine<'s> {
             anon: RefCell::new(HashMap::new()),
             closures: RefCell::new(HashMap::new()),
             source_members: RefCell::new(HashMap::new()),
+            imported: RefCell::new(HashMap::new()),
+            lambdas: RefCell::new(HashMap::new()),
         })
     }
 
@@ -390,7 +396,7 @@ impl<'s> Engine<'s> {
 
     fn anon_node(&self, fq: &str) -> Option<SyntaxNode> {
         let range = *self.anon.borrow().get(fq)?;
-        let el = self.root.covering_element(range);
+        let el = crate::syntax::covering(&self.root, range)?;
         let node = match el {
             rowan::NodeOrToken::Node(n) => n,
             rowan::NodeOrToken::Token(t) => t.parent()?,
@@ -422,19 +428,34 @@ impl<'s> Engine<'s> {
     }
 
     fn members_of(&self, c: &Classifier) -> Vec<Symbol> {
-        match c {
-            Classifier::Library(lc) => lc.members.clone(),
-            Classifier::Source(s) => {
-                let Origin::Source { file, .. } = &s.origin else { return Vec::new() };
-                if let Some(m) = self.source_members.borrow().get(&s.fq_name) {
-                    return m.to_vec();
+        self.members_ref(c).to_vec()
+    }
+
+    /// Members of a classifier (shared, computed once per classifier).
+    fn members_ref(&self, c: &Classifier) -> Rc<Vec<Symbol>> {
+        let fq = &c.symbol().fq_name;
+        if let Some(m) = self.source_members.borrow().get(fq) {
+            return m.clone();
+        }
+        let m = match c {
+            Classifier::Library(lc) => {
+                let mut m = lc.members.clone();
+                if lc.is_kotlin && lc.symbol.kind == SymbolKind::Enum {
+                    m.extend(enum_statics(&lc.symbol, &m));
                 }
-                let m = self.resolver_for(file).source_members(s);
-                self.source_members.borrow_mut().insert(s.fq_name.clone(), Rc::new(m.clone()));
+                m
+            }
+            Classifier::Source(s) => {
+                let Origin::Source { file, .. } = &s.origin else { return Rc::new(Vec::new()) };
+                let mut m = self.resolver_for(file).source_members(s);
+                m.extend(synthesized_members(s, &m));
                 m
             }
             Classifier::LibraryAlias(_) => Vec::new(),
-        }
+        };
+        let m = Rc::new(m);
+        self.source_members.borrow_mut().insert(fq.clone(), m.clone());
+        m
     }
 
     /// The topmost declaration (among project sources) that `sym` overrides, and the FQ
@@ -484,6 +505,16 @@ impl<'s> Engine<'s> {
         }
     }
 
+    /// The class a type alias stands for (`fq` itself otherwise).
+    fn expand_alias(&self, fq: &str) -> String {
+        match self.res.find_classifier(fq) {
+            Some(Classifier::LibraryAlias(a)) | Some(Classifier::Source(a)) if a.kind == SymbolKind::TypeAlias => {
+                a.ty.as_ref().map(|t| self.resolve_declared(&a, t)).and_then(|t| fq_of(&t).map(str::to_string)).unwrap_or_else(|| fq.to_string())
+            }
+            _ => fq.to_string(),
+        }
+    }
+
     fn type_subst(&self, c: &Classifier, args: &[TypeArg]) -> Subst {
         c.symbol().type_params.iter().zip(args.iter()).map(|(tp, a)| (tp.name.clone(), arg_type(a))).collect()
     }
@@ -491,8 +522,12 @@ impl<'s> Engine<'s> {
     fn supertypes_of(&self, c: &Classifier, s: &Subst) -> Vec<TypeRef> {
         let sym = c.symbol();
         let mut out: Vec<TypeRef> = sym.supertypes.iter().map(|t| substitute(&self.resolve_declared(sym, t), s)).collect();
+        // Enums extend `Enum<E>` even when they implement interfaces.
+        if sym.kind == SymbolKind::Enum && !out.iter().any(|t| fq_of(t) == Some("kotlin.Enum")) {
+            out.insert(0, TypeRef::with_args("kotlin.Enum", vec![TypeArg::Type { variance: crate::symbols::Variance::Invariant, ty: class_type(sym) }]));
+        }
         if out.is_empty() && sym.fq_name != "kotlin.Any" {
-            out.push(TypeRef::named(if sym.kind == SymbolKind::Enum { "kotlin.Enum" } else { "kotlin.Any" }));
+            out.push(TypeRef::named("kotlin.Any"));
         }
         out
     }
@@ -560,10 +595,10 @@ impl<'s> Engine<'s> {
             let args = if alias_args.is_empty() { args_of(&st).to_vec() } else { alias_args };
             let s = self.type_subst(&c, &args);
             let found: Vec<(Symbol, Subst)> = self
-                .members_of(&c)
-                .into_iter()
+                .members_ref(&c)
+                .iter()
                 .filter(|m| m.name == name && m.kind != SymbolKind::Constructor && !m.modifiers.has(Modifiers::STATIC) && keep(m))
-                .map(|m| (m, s.clone()))
+                .map(|m| (m.clone(), s.clone()))
                 .collect();
             if !found.is_empty() {
                 return found;
@@ -594,10 +629,11 @@ impl<'s> Engine<'s> {
             return vec![Def::symbol(n.symbol().clone())];
         }
         let own: Vec<Def> = self
-            .members_of(c)
-            .into_iter()
+            .members_ref(c)
+            .iter()
             .filter(|m| m.name == name)
             .filter(|m| sym.kind == SymbolKind::Object || m.kind == SymbolKind::EnumEntry || m.modifiers.has(Modifiers::STATIC))
+            .cloned()
             .map(Def::symbol)
             .collect();
         if !own.is_empty() {
@@ -631,6 +667,9 @@ impl<'s> Engine<'s> {
 
     /// Callables imported explicitly under `name`.
     fn imported_callables(&self, name: &str) -> Vec<Symbol> {
+        if let Some(hit) = self.imported.borrow().get(name) {
+            return hit.clone();
+        }
         let Some(s) = self.res.summary() else { return Vec::new() };
         let mut out = Vec::new();
         for imp in &s.imports {
@@ -639,6 +678,7 @@ impl<'s> Engine<'s> {
                     out.extend(c);
                 }
         }
+        self.imported.borrow_mut().insert(name.to_string(), out.clone());
         out
     }
 
@@ -697,8 +737,10 @@ impl<'s> Engine<'s> {
                     true
                 }
                 TypeRef::Named { fq: Some(fq), .. } => {
+                    // Receivers declared through a type alias (`kotlin.text.StringBuilder`).
+                    let target = self.expand_alias(fq);
                     let fq: &str = fq;
-                    fq == "kotlin.Any" || closure.iter().any(|c| fq_of(c) == Some(fq))
+                    fq == "kotlin.Any" || closure.iter().any(|c| fq_of(c) == Some(fq) || fq_of(c) == Some(target.as_str()))
                 }
                 _ => false,
             };
@@ -899,8 +941,11 @@ impl<'s> Engine<'s> {
                             }
                 }
                 SyntaxKind::CLASS => {
-                    // Plain constructor parameters are visible in initializers.
+                    // Plain constructor parameters are visible in initializers: `init` blocks,
+                    // property initializers (not accessors), supertype arguments and default
+                    // values; not in member functions or nested classes.
                     if let Some(pc) = anc.children().find(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR)
+                        && ctor_params_visible(at, &anc)
                         && let Some(list) = pc.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER_LIST) {
                             for p in list.children().filter(|p| token_at(p, SyntaxKind::VAL_KW).is_none() && token_at(p, SyntaxKind::VAR_KW).is_none()) {
                                 if let Some(d) = self.param_def(&p, name, LocalKind::Parameter) {
@@ -927,6 +972,20 @@ impl<'s> Engine<'s> {
 
     /// The expected (receiver, parameter types) of a lambda from its call site.
     pub fn lambda_signature(&self, lambda: &SyntaxNode) -> Option<(Option<TypeRef>, Vec<TypeRef>)> {
+        let key = lambda.text_range();
+        if let Some(hit) = self.lambdas.borrow().get(&key) {
+            return hit.clone();
+        }
+        // Results cut short by the recursion guard are not cached.
+        let complete = DEPTH.get() < 40;
+        let r = self.compute_lambda_signature(lambda);
+        if complete {
+            self.lambdas.borrow_mut().insert(key, r.clone());
+        }
+        r
+    }
+
+    fn compute_lambda_signature(&self, lambda: &SyntaxNode) -> Option<(Option<TypeRef>, Vec<TypeRef>)> {
         let _g = Guard::enter()?;
         let mut node = lambda.clone();
         let mut parent = node.parent()?;
@@ -1592,13 +1651,12 @@ impl<'s> Engine<'s> {
             }
             _ => return None,
         };
-        let name = format!("component{}", index + 1);
-        let defs = self.operator_call(&decl, &value_ty, &[name.as_str()], None, Some(0));
-        if !defs.is_empty() {
-            return Some(defs);
-        }
         // Source data classes: the synthesized componentN maps to a constructor property.
-        Some(self.data_component_property(&value_ty, index).map(|sym| Def::Symbol { sym, subst: Subst::new() }).into_iter().collect())
+        if let Some(sym) = self.data_component_property(&value_ty, index) {
+            return Some(vec![Def::Symbol { sym, subst: Subst::new() }]);
+        }
+        let name = format!("component{}", index + 1);
+        Some(self.operator_call(&decl, &value_ty, &[name.as_str()], None, Some(0)))
     }
 
     /// The `i`-th primary-constructor property of a source data class.
@@ -1959,4 +2017,304 @@ fn java_property_name(method: &str) -> Option<String> {
         return Some(first.to_lowercase().chain(c).collect());
     }
     method.strip_prefix("is").filter(|r| r.chars().next().is_some_and(char::is_uppercase)).map(|_| method.to_string())
+}
+
+/// Members the compiler generates for a source class: `copy`/`componentN` of data
+/// classes, `values`/`valueOf`/`entries` of enums.
+fn synthesized_members(class: &Symbol, members: &[Symbol]) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    if class.kind == SymbolKind::Enum {
+        out.extend(enum_statics(class, members));
+    }
+    if class.modifiers.has(Modifiers::DATA) {
+        let ctor = members.iter().find(|m| m.kind == SymbolKind::Constructor);
+        let props: Vec<&Symbol> = match ctor.map(|c| &c.origin) {
+            Some(Origin::Source { range: ctor_range, .. }) => members
+                .iter()
+                .filter(|m| m.kind == SymbolKind::Property && matches!(&m.origin, Origin::Source { range, .. } if ctor_range.contains_range(*range)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let synth = |name: &str, kind: SymbolKind| {
+            let mut s = Symbol::new(kind, name, format!("{}.{name}", class.fq_name), class.origin.clone());
+            s.modifiers.set(Modifiers::SYNTHETIC);
+            s
+        };
+        if !members.iter().any(|m| m.name == "copy") {
+            let mut copy = synth("copy", SymbolKind::Function);
+            copy.params = props.iter().map(|p| crate::symbols::Param { name: p.name.clone(), ty: p.ty.clone().unwrap_or(TypeRef::Error), has_default: true, vararg: false }).collect();
+            copy.ty = Some(class_type(class));
+            out.push(copy);
+        }
+        for (i, p) in props.iter().enumerate() {
+            let name = format!("component{}", i + 1);
+            if !members.iter().any(|m| m.name == name) {
+                let mut c = synth(&name, SymbolKind::Function);
+                c.modifiers.set(Modifiers::OPERATOR);
+                c.ty = p.ty.clone();
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+fn enum_statics(class: &Symbol, members: &[Symbol]) -> Vec<Symbol> {
+    let t = class_type(class);
+    let arg = |ty: TypeRef| TypeArg::Type { variance: crate::symbols::Variance::Invariant, ty };
+    let mut out = Vec::new();
+    let mut add = |name: &str, kind: SymbolKind, ty: TypeRef, params: Vec<crate::symbols::Param>| {
+        if !members.iter().any(|m| m.name == name) {
+            let mut s = Symbol::new(kind, name, format!("{}.{name}", class.fq_name), class.origin.clone());
+            s.modifiers.set(Modifiers::STATIC);
+            s.modifiers.set(Modifiers::SYNTHETIC);
+            s.ty = Some(ty);
+            s.params = params;
+            out.push(s);
+        }
+    };
+    add("values", SymbolKind::Function, TypeRef::with_args("kotlin.Array", vec![arg(t.clone())]), Vec::new());
+    add(
+        "valueOf",
+        SymbolKind::Function,
+        t.clone(),
+        vec![crate::symbols::Param { name: "value".into(), ty: TypeRef::named("kotlin.String"), has_default: false, vararg: false }],
+    );
+    add("entries", SymbolKind::Property, TypeRef::with_args("kotlin.enums.EnumEntries", vec![arg(t)]), Vec::new());
+    out
+}
+
+// ------------------------------------------------------------ checks (diagnostics)
+
+/// A member a concrete subclass must implement.
+pub struct AbstractMember {
+    pub symbol: Symbol,
+    pub subst: Subst,
+    /// Declared in an interface (rather than an abstract class).
+    pub from_interface: bool,
+}
+
+impl<'s> Engine<'s> {
+    pub fn classifier(&self, fq: &str) -> Option<Classifier> {
+        self.classifier_for(fq).map(|(c, _)| c)
+    }
+
+    /// Supertype closure of `t` without `t` itself, or `None` if some supertype declared in
+    /// sources does not resolve (members would be unknown).
+    fn known_supertypes(&self, t: &TypeRef) -> Option<Vec<TypeRef>> {
+        let closure = self.supertype_closure(t);
+        for st in &closure {
+            let fq = fq_of(st)?;
+            if self.anon_members(fq).is_some() {
+                continue;
+            }
+            let (c, _) = self.classifier_for(fq)?;
+            if let Classifier::Source(sym) = &c {
+                // Every declared supertype must be found.
+                for d in &sym.supertypes {
+                    let r = self.resolve_declared(sym, d);
+                    if fq_of(&r).is_none_or(|f| self.classifier_for(f).is_none()) {
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(closure.into_iter().skip(1).collect())
+    }
+
+    /// Abstract members of `t`'s supertypes that neither `t` nor any supertype implements.
+    /// Members of `java.lang`/`java.util` types are skipped (Kotlin maps them to its own
+    /// collection and string types, with other names). `None`: the hierarchy is not fully known.
+    pub fn unimplemented_members(&self, t: &TypeRef) -> Option<Vec<AbstractMember>> {
+        let supers = self.known_supertypes(t)?;
+        // Delegation (`: I by d`) and Java classes (implementing Kotlin's mapped collection
+        // members under Java names) make implementations invisible here.
+        for st in &supers {
+            match fq_of(st).and_then(|fq| self.classifier_for(fq)).map(|(c, _)| c) {
+                Some(Classifier::Library(lc)) if !lc.is_kotlin && lc.symbol.fq_name != "java.lang.Object" => return None,
+                Some(Classifier::Source(sym)) if self.delegates(&sym) => return None,
+                _ => {}
+            }
+        }
+        let own_fq = fq_of(t)?.to_string();
+        let own: Vec<Symbol> = match self.anon_members(&own_fq) {
+            Some(m) => m,
+            None => self.members_of(&self.classifier_for(&own_fq)?.0),
+        };
+        let mut implemented: HashSet<String> = own.iter().map(|m| m.name.clone()).collect();
+        implemented.extend(["equals", "hashCode", "toString"].map(String::from));
+        let mut abstract_members: Vec<AbstractMember> = Vec::new();
+        for st in &supers {
+            let Some(fq) = fq_of(st) else { continue };
+            let Some((c, alias_args)) = self.classifier_for(fq) else { continue };
+            let args = if alias_args.is_empty() { args_of(st).to_vec() } else { alias_args };
+            let subst = self.type_subst(&c, &args);
+            let interface = c.symbol().kind == SymbolKind::Interface;
+            let mapped = fq.starts_with("java.lang.") || fq.starts_with("java.util.");
+            for m in self.members_of(&c) {
+                if !matches!(m.kind, SymbolKind::Function | SymbolKind::Property) || m.modifiers.has(Modifiers::STATIC) {
+                    continue;
+                }
+                if m.modifiers.has(Modifiers::ABSTRACT) {
+                    if !mapped {
+                        abstract_members.push(AbstractMember { symbol: m, subst: subst.clone(), from_interface: interface });
+                    }
+                } else {
+                    implemented.insert(m.name.clone());
+                }
+            }
+        }
+        let mut seen = HashSet::new();
+        Some(abstract_members.into_iter().filter(|a| !implemented.contains(&a.symbol.name) && seen.insert(a.symbol.name.clone())).collect())
+    }
+
+    /// A source class with a delegated supertype (`: I by d`).
+    fn delegates(&self, sym: &Symbol) -> bool {
+        let Origin::Source { file, range, .. } = &sym.origin else { return false };
+        let Some(f) = self.snap.file(file) else { return false };
+        let root = f.parse().syntax();
+        let Some(decl) = crate::syntax::covering(&root, *range) else { return false };
+        let node = match decl {
+            rowan::NodeOrToken::Node(n) => n,
+            rowan::NodeOrToken::Token(t) => match t.parent() {
+                Some(p) => p,
+                None => return false,
+            },
+        };
+        node.ancestors()
+            .find(|a| matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION))
+            .is_some_and(|c| c.children().filter(|l| l.kind() == SyntaxKind::SUPER_TYPE_LIST).any(|l| l.children().any(|e| e.kind() == SyntaxKind::DELEGATED_SUPER_TYPE_ENTRY)))
+    }
+
+    /// Names of all members of `t`'s supertypes, or `None` if the hierarchy is not fully known.
+    pub fn supertype_member_names(&self, t: &TypeRef) -> Option<HashSet<String>> {
+        let supers = self.known_supertypes(t)?;
+        let mut out = HashSet::new();
+        for st in &supers {
+            let Some(fq) = fq_of(st) else { continue };
+            if let Some(members) = self.anon_members(fq) {
+                out.extend(members.into_iter().map(|m| m.name));
+                continue;
+            }
+            let (c, _) = self.classifier_for(fq)?;
+            out.extend(self.members_of(&c).into_iter().map(|m| m.name));
+        }
+        Some(out)
+    }
+
+    /// Every function a call through `callee` (the call's NAME_REF) could resolve to, over
+    /// all resolution levels (Kotlin falls through to outer levels when no inner candidate
+    /// applies). `None` when the candidates are not fully known: local functions, values
+    /// that may be invoked, unknown receivers, SAM constructors.
+    pub fn call_candidates(&self, callee: &SyntaxNode) -> Option<Vec<(Symbol, Subst)>> {
+        let tok = token_at(callee, SyntaxKind::IDENT)?;
+        let name = ast::ident_text(&tok);
+        let call = callee.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR)?;
+        let mut out: Vec<(Symbol, Subst)> = Vec::new();
+        let functions = |v: Vec<(Symbol, Subst)>| -> Option<Vec<(Symbol, Subst)>> {
+            // A property of that name could be invoked (`invoke` operator).
+            if v.iter().any(|(s, _)| !matches!(s.kind, SymbolKind::Function | SymbolKind::Constructor)) {
+                return None;
+            }
+            Some(v)
+        };
+        match call.parent() {
+            Some(outer) if matches!(outer.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && first_expr_child(&outer).as_ref() != Some(&call) => {
+                let recv = first_expr_child(&outer)?;
+                match self.resolve_qualifier(&recv) {
+                    Qualifier::Value(t) => {
+                        fq_of(&t)?;
+                        out.extend(functions(self.members_named(&t, &name))?);
+                        out.extend(functions(self.member_extensions(&recv, &t, &name))?);
+                        out.extend(functions(self.extensions(&t, &name))?);
+                    }
+                    Qualifier::Static(c) => {
+                        // Nested class constructors and companion/static functions of that name.
+                        let (nested, members) = self.all_static_members(&c);
+                        for (_, fq) in nested.iter().filter(|(n, _)| *n == name) {
+                            let cls = self.res.find_classifier(fq)?;
+                            out.extend(self.constructor_candidates(cls.symbol())?);
+                        }
+                        for (m, s) in members.into_iter().filter(|(m, _)| m.name == name) {
+                            if !matches!(m.kind, SymbolKind::Function | SymbolKind::Constructor) {
+                                return None;
+                            }
+                            out.push((m, s));
+                        }
+                    }
+                    Qualifier::Package(p) => {
+                        let fq = format!("{p}.{name}");
+                        if let Some(c) = self.res.find_classifier(&fq) {
+                            out.extend(self.constructor_candidates(c.symbol())?);
+                        } else {
+                            out.extend(functions(self.res.top_level_callables(&p, &name).into_iter().map(|s| (s, Subst::new())).collect())?);
+                        }
+                    }
+                    Qualifier::Unknown => return None,
+                }
+            }
+            Some(outer) if outer.kind() == SyntaxKind::CALLABLE_REFERENCE => return None,
+            _ => {
+                if self.find_local(callee, &name).is_some() {
+                    return None;
+                }
+                for (recv, cls) in self.implicit_receivers(callee) {
+                    out.extend(functions(self.members_named(&recv, &name))?);
+                    if let Some(c) = &cls {
+                        for d in self.static_members(c, &name) {
+                            match d {
+                                Def::Symbol { sym, subst } if matches!(sym.kind, SymbolKind::Function | SymbolKind::Constructor) => out.push((sym, subst)),
+                                _ => return None,
+                            }
+                        }
+                    }
+                    out.extend(functions(self.member_extensions(callee, &recv, &name))?);
+                    out.extend(functions(self.extensions(&recv, &name))?);
+                }
+                let mut top = self.imported_callables(&name);
+                for pkg in self.callable_packages() {
+                    top.extend(self.res.top_level_callables(&pkg, &name));
+                }
+                out.extend(functions(top.into_iter().filter(|s| s.receiver.is_none()).map(|s| (s, Subst::new())).collect())?);
+                let scope = scope_at(callee, &self.package(), &mut self.locals_cache.borrow_mut());
+                match self.res.resolve_type_name(&[name.as_str()], &scope) {
+                    Ok(Resolved::Classifier(c)) => out.extend(self.constructor_candidates(c.symbol())?),
+                    Ok(Resolved::Local(_)) | Ok(Resolved::TypeParameter(_)) => return None,
+                    _ => {}
+                }
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// Constructors of a class used as a call; `None` for interfaces (SAM constructors),
+    /// aliases and classes whose constructors are not known.
+    fn constructor_candidates(&self, sym: &Symbol) -> Option<Vec<(Symbol, Subst)>> {
+        if !matches!(sym.kind, SymbolKind::Class | SymbolKind::Enum) {
+            return None;
+        }
+        // `Foo { }` may call the companion's `operator fun invoke`.
+        let c = self.res.find_classifier(&sym.fq_name)?;
+        if self.all_static_members(&c).1.iter().any(|(m, _)| m.name == "invoke") {
+            return None;
+        }
+        let ctors = self.constructors(&sym.fq_name);
+        if ctors.is_empty() {
+            return None;
+        }
+        Some(ctors.into_iter().map(|c| (c, Subst::new())).collect())
+    }
+}
+
+/// Whether `at` (inside `class`) sees the primary constructor's plain parameters.
+fn ctor_params_visible(at: &SyntaxNode, class: &SyntaxNode) -> bool {
+    let path: Vec<SyntaxNode> = at.ancestors().take_while(|a| a != class).collect();
+    // The class member containing `at`, if `at` is in the body.
+    let Some(i) = path.iter().position(|a| a.parent().is_some_and(|p| p.kind() == SyntaxKind::CLASS_BODY && p.parent().as_ref() == Some(class))) else { return true };
+    let member = &path[i];
+    match member.kind() {
+        SyntaxKind::CLASS_INITIALIZER => true,
+        SyntaxKind::PROPERTY => !path[..i].iter().any(|a| a.kind() == SyntaxKind::PROPERTY_ACCESSOR),
+        _ => false,
+    }
 }

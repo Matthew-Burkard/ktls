@@ -153,6 +153,8 @@ pub struct ClasspathIndex {
     builtin_packages: std::collections::HashSet<String>,
     class_cache: RwLock<HashMap<Box<str>, Option<Arc<LibClass>>>>,
     package_cache: RwLock<HashMap<Box<str>, Arc<Vec<Symbol>>>>,
+    /// `package_members` grouped by name.
+    package_names_cache: RwLock<HashMap<Box<str>, Arc<HashMap<String, Vec<Symbol>>>>>,
     /// Kotlin package → facade classes declared in a different JVM package
     /// (`@file:JvmPackageName`, e.g. kotlin-test's `kotlin.test` annotations).
     relocated_facades: HashMap<String, Vec<Box<str>>>,
@@ -225,6 +227,7 @@ impl ClasspathIndex {
             builtin_packages: Default::default(),
             class_cache: RwLock::new(HashMap::new()),
             package_cache: RwLock::new(HashMap::new()),
+            package_names_cache: RwLock::new(HashMap::new()),
             relocated_facades: HashMap::new(),
             problems,
         };
@@ -427,6 +430,20 @@ impl ClasspathIndex {
         let members = Arc::new(members);
         self.package_cache.write().insert(pkg.into(), members.clone());
         members
+    }
+
+    /// Top-level declarations of `pkg` named `name` (indexed by name on first use).
+    pub fn package_members_named(&self, pkg: &str, name: &str) -> Vec<Symbol> {
+        if let Some(hit) = self.package_names_cache.read().get(pkg) {
+            return hit.get(name).cloned().unwrap_or_default();
+        }
+        let mut map: HashMap<String, Vec<Symbol>> = HashMap::new();
+        for m in self.package_members(pkg).iter() {
+            map.entry(m.name.clone()).or_default().push(m.clone());
+        }
+        let found = map.get(name).cloned().unwrap_or_default();
+        self.package_names_cache.write().insert(pkg.into(), Arc::new(map));
+        found
     }
 
     /// Classes and top-level declarations named `name` in `pkg`.

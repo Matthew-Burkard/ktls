@@ -18,7 +18,11 @@ pub fn diagnostic(text: &str, index: &LineIndex, d: &Diagnostic, enc: Encoding) 
         source: Some("kotlin".into()),
         message: d.message.clone(),
         related_information: None,
-        tags: d.unnecessary.then(|| vec![lsp_types::DiagnosticTag::UNNECESSARY]),
+        tags: if d.code == "DEPRECATION" {
+            Some(vec![lsp_types::DiagnosticTag::DEPRECATED])
+        } else {
+            d.unnecessary.then(|| vec![lsp_types::DiagnosticTag::UNNECESSARY])
+        },
         data: None,
     }
 }

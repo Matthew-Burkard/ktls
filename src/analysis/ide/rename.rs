@@ -151,7 +151,7 @@ fn parameter_of_named_argument(e: &Engine, tok: &crate::syntax::SyntaxToken) -> 
         let Def::Symbol { sym, .. } = &d else { continue };
         let Origin::Source { file, name_range, .. } = &sym.origin else { return Err(format!("'{}' is declared in a library", sym.name)) };
         let Some(root) = tree(e.snap, file) else { continue };
-        let decl = root.covering_element(*name_range).ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::CLASS));
+        let decl = crate::syntax::covering(&root, *name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::CLASS));
         let Some(decl) = decl else { continue };
         let list = match decl.kind() {
             SyntaxKind::CLASS => decl.children().find(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR).and_then(|c| c.children().find(|l| l.kind() == SyntaxKind::VALUE_PARAMETER_LIST)),
@@ -195,7 +195,7 @@ fn tree(snap: &Snapshot, path: &Path) -> Option<SyntaxNode> {
 /// `f(old = 1)` / `Owner(old = 1)` / `@Ann(old = 1)` for a parameter declared at `decl`.
 fn named_arguments(snap: &Snapshot, decl: &NavTarget, old: &str, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<Vec<NavTarget>, String> {
     let Some(root) = tree(snap, &decl.path) else { return Ok(Vec::new()) };
-    let tok = root.covering_element(decl.range);
+    let Some(tok) = crate::syntax::covering(&root, decl.range) else { return Ok(Vec::new()) };
     let Some(param) = tok.ancestors().find(|a| a.kind() == SyntaxKind::VALUE_PARAMETER) else { return Ok(Vec::new()) };
     let Some(owner) = param.parent().filter(|l| l.kind() == SyntaxKind::VALUE_PARAMETER_LIST).and_then(|l| l.parent()) else { return Ok(Vec::new()) };
     // The callable whose calls pass this parameter: a function, or a class (constructors).
@@ -211,7 +211,7 @@ fn named_arguments(snap: &Snapshot, decl: &NavTarget, old: &str, cancelled: &(dy
     let mut out = Vec::new();
     for call in calls {
         let Some(root) = tree(snap, &call.path) else { continue };
-        let el = root.covering_element(call.range);
+        let Some(el) = crate::syntax::covering(&root, call.range) else { continue };
         // The nearest call-like node (call, annotation, super/delegation call) must have
         // this occurrence as its callee, not inside a type or value argument.
         let Some(node) = el.ancestors().find(|a| a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST)) else { continue };
@@ -264,7 +264,7 @@ fn kdoc_links(snap: &Snapshot, path: &Path, old: &str) -> Vec<TextRange> {
 /// The declaration whose parameter list declares `decl`, and its file.
 fn parameter_owner(snap: &Snapshot, decl: &NavTarget) -> Option<(PathBuf, SyntaxNode)> {
     let root = tree(snap, &decl.path)?;
-    let el = root.covering_element(decl.range);
+    let el = crate::syntax::covering(&root, decl.range)?;
     let param = el.ancestors().find(|a| a.kind() == SyntaxKind::VALUE_PARAMETER)?;
     let owner = param.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::CLASS | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::LAMBDA_EXPR | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::CATCH_CLAUSE | SyntaxKind::FOR_EXPR))?;
     Some((decl.path.clone(), owner))

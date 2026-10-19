@@ -456,3 +456,353 @@ fn rule_ids_are_unique() {
         assert!(seen.insert(r.id), "duplicate {}", r.id);
     }
 }
+
+// ---------------------------------------------------------------- compiler checks
+
+/// Only compiler-category findings.
+fn compiler(text: &str) -> Vec<String> {
+    let (lints, text) = Fixture::new().run("src/main/kotlin/a/A.kt", text);
+    lints
+        .iter()
+        .filter(|l| l.rule.category == Category::Compiler)
+        .map(|l| format!("{}: {}", l.rule.id, &text[usize::from(l.range.start())..usize::from(l.range.end())]))
+        .collect()
+}
+
+#[test]
+fn compiler_declaration_errors() {
+    let found = compiler(
+        r#"package a
+
+private private fun twice() {}
+abstract final class Both
+class Lates {
+    lateinit val a: String
+    lateinit var b: Int
+    lateinit var c: String?
+    lateinit var d: String
+        private set
+    const val e = 1
+    abstract fun f()
+    abstract val g: Int = 1
+    fun noBody()
+}
+interface I constructor() {
+    init {}
+    val p: Int = 1
+}
+interface J : Any()
+data class Empty()
+data class NotProp(val a: Int, b: Int)
+fun topNoBody()
+val uninitialized: Int
+class Members {
+    val missing: Int
+    val assigned: Int
+    init { assigned = 1 }
+}
+class Dup {
+    val x = 1
+    val x = 2
+    fun f(a: Int) {}
+    fun f(a: Int) {}
+    fun <T : CharSequence> g(t: T) {}
+    fun <T : Number> g(t: T) {}
+}
+object Obj { open fun o() {} }
+abstract class WithBody { abstract fun body() {} }
+"#,
+    );
+    has(&found, "REPEATED_MODIFIER: private");
+    has(&found, "INCOMPATIBLE_MODIFIERS: final");
+    has(&found, "INAPPLICABLE_LATEINIT_MODIFIER: lateinit");
+    assert_eq!(found.iter().filter(|f| f.starts_with("INAPPLICABLE_LATEINIT")).count(), 3, "{found:#?}");
+    has(&found, "CONST_VAL_NOT_TOP_LEVEL_OR_OBJECT: e");
+    has(&found, "ABSTRACT_FUNCTION_IN_NON_ABSTRACT_CLASS: f");
+    has(&found, "ABSTRACT_PROPERTY_WITH_INITIALIZER: g");
+    has(&found, "ABSTRACT_PROPERTY_IN_NON_ABSTRACT_CLASS: g");
+    has(&found, "NON_ABSTRACT_FUNCTION_WITH_NO_BODY: noBody");
+    has(&found, "CONSTRUCTOR_IN_INTERFACE: constructor()");
+    has(&found, "ANONYMOUS_INITIALIZER_IN_INTERFACE: init");
+    has(&found, "PROPERTY_INITIALIZER_IN_INTERFACE: p");
+    has(&found, "SUPERTYPE_INITIALIZED_IN_INTERFACE: Any()");
+    has(&found, "DATA_CLASS_WITHOUT_PARAMETERS: Empty");
+    has(&found, "DATA_CLASS_NOT_PROPERTY_PARAMETER: b");
+    has(&found, "NON_MEMBER_FUNCTION_NO_BODY: topNoBody");
+    has(&found, "MUST_BE_INITIALIZED: uninitialized");
+    has(&found, "MUST_BE_INITIALIZED_OR_BE_ABSTRACT: missing");
+    has(&found, "REDECLARATION: x");
+    has(&found, "CONFLICTING_OVERLOADS: f");
+    has(&found, "NON_FINAL_MEMBER_IN_OBJECT: open");
+    has(&found, "ABSTRACT_FUNCTION_WITH_BODY: body");
+    for ok in ["assigned", "d", "g"] {
+        assert!(!found.iter().any(|f| f.starts_with("MUST_BE") && f.ends_with(&format!(": {ok}"))), "{ok}: {found:#?}");
+    }
+    assert!(!found.iter().any(|f| f == "CONFLICTING_OVERLOADS: g"), "{found:#?}");
+}
+
+#[test]
+fn compiler_class_hierarchy_errors() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+class Final
+open class Base(val x: Int)
+interface Shape { fun area(): Double; val name: String }
+abstract class Animal { abstract fun sound(): String; open fun legs() = 4 }
+
+class A : Final()
+class B : Base
+class C : Base(1), Animal()
+interface D : Base
+class Square : Shape {
+    override fun area() = 1.0
+}
+class Dog : Animal()
+object Cat : Animal() {
+    override fun sound() = "meow"
+    override fun purr() {}
+}
+class Delegated(s: Shape) : Shape by s
+"#,
+    );
+    has(&found, "FINAL_SUPERTYPE: Final");
+    has(&found, "SUPERTYPE_NOT_INITIALIZED: Base");
+    has(&found, "MANY_CLASSES_IN_SUPERTYPE_LIST: Animal");
+    has(&found, "INTERFACE_WITH_SUPERCLASS: Base");
+    has(&found, "ABSTRACT_MEMBER_NOT_IMPLEMENTED: Square");
+    has(&found, "ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED: Dog");
+    has(&found, "NOTHING_TO_OVERRIDE: purr");
+    assert!(!found.iter().any(|f| f.contains("Delegated") || f.contains("Cat") && f.starts_with("ABSTRACT")), "{found:#?}");
+
+    // The fix implements the missing members.
+    let text = "package a\n\ninterface Shape { fun area(): Double }\nclass Square : Shape {\n}\n";
+    assert_eq!(
+        fixed(text, "ABSTRACT_MEMBER_NOT_IMPLEMENTED"),
+        "package a\n\ninterface Shape { fun area(): Double }\nclass Square : Shape {\n    override fun area(): Double {\n        TODO(\"Not yet implemented\")\n    }\n}\n"
+    );
+}
+
+#[test]
+fn compiler_expression_errors() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+class Box(val size: Int) {
+    val doubled = size * 2
+    var label = ""
+}
+
+@Deprecated("use other")
+fun old() = 1
+
+fun f(p: Int, box: Box, s: String) {
+    prnitln("typo")
+    val n = s.lenght
+    val v = 1
+    v = 2
+    p = 3
+    box.size = 4
+    box.label = "ok"
+    old()
+    s?.length
+    s!!.length
+    val e = s ?: "x"
+    if (s == null) println()
+    two(1)
+    two(1, 2, 3)
+    two(1, c = 2)
+    val i: Int = "text"
+    val t: String = null
+    val l: Long = 1
+    val any: Any = 1
+    val num: Number = 2.5
+}
+
+fun two(a: Int, b: Int) = a + b
+fun str(): String = 1
+"#,
+    );
+    has(&found, "UNRESOLVED_REFERENCE: prnitln");
+    has(&found, "UNRESOLVED_REFERENCE: lenght");
+    has(&found, "VAL_REASSIGNMENT: v");
+    has(&found, "VAL_REASSIGNMENT: p");
+    has(&found, "VAL_REASSIGNMENT: box.size");
+    has(&found, "DEPRECATION: old");
+    has(&found, "UNNECESSARY_SAFE_CALL: ?.");
+    has(&found, "UNNECESSARY_NOT_NULL_ASSERTION: !!");
+    has(&found, "USELESS_ELVIS: ?: \"x\"");
+    has(&found, "SENSELESS_COMPARISON: s == null");
+    has(&found, "NO_VALUE_FOR_PARAMETER: )");
+    has(&found, "TOO_MANY_ARGUMENTS: 3");
+    has(&found, "NAMED_PARAMETER_NOT_FOUND: c");
+    has(&found, "INITIALIZER_TYPE_MISMATCH: \"text\"");
+    has(&found, "NULL_FOR_NONNULL_TYPE: null");
+    has(&found, "RETURN_TYPE_MISMATCH: 1");
+    assert!(!found.iter().any(|f| f.contains("label") || f.contains("size *") || f.contains(": 1\n") || f.ends_with(": 2.5")), "{found:#?}");
+    assert_eq!(found.iter().filter(|f| f.starts_with("INITIALIZER_TYPE_MISMATCH")).count(), 1, "{found:#?}");
+    assert_eq!(fixed("fun f() {\n    val v = 1\n    v = 2\n}\n", "VAL_REASSIGNMENT"), "fun f() {\n    var v = 1\n    v = 2\n}\n");
+    assert_eq!(fixed("fun f(s: String) = s?.length\n", "UNNECESSARY_SAFE_CALL"), "fun f(s: String) = s.length\n");
+}
+
+#[test]
+fn compiler_checks_stay_quiet_when_unsure() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+open class Shape
+class Circle(val radius: Double) : Shape()
+
+class Holder(param: Int) {
+    val fromParam = param + 1
+    init { println(param) }
+}
+
+fun area(s: Shape): Double {
+    if (s is Circle) return s.radius * s.radius
+    return 0.0
+}
+
+fun dsl() = buildString {
+    appendLine("x")
+    append(length)
+}
+
+fun calls() = unknownDsl { whatever() }
+
+fun deferred(c: Boolean): Int {
+    val x: Int
+    if (c) x = 1 else x = 2
+    return x
+}
+
+data class P(val a: Int, val b: Int)
+fun destructure(p: P): Int {
+    val (a, b) = p
+    return p.copy(a = 2).component1() + a + b
+}
+
+enum class Color { RED, GREEN }
+fun names() = Color.values().map { it.name } + Color.entries.map { it.ordinal.toString() }
+"#,
+    );
+    // Inside a lambda passed to an unknown function only the function is reported.
+    assert_eq!(found, vec!["UNRESOLVED_REFERENCE: unknownDsl"]);
+}
+
+#[test]
+fn compiler_flow_checks() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+fun noReturn(x: Int): Int {
+    println(x)
+}
+
+fun unreachable(): Int {
+    return 1
+    println("never")
+}
+
+fun shadow(x: Int) {
+    val y = 1
+    run {
+        val y = 2
+        println(y)
+    }
+    listOf(1).forEach { x -> println(x) }
+    val y = 3
+}
+
+fun throws(): Int {
+    throw IllegalStateException()
+}
+
+fun todo(): Int {
+    TODO()
+}
+"#,
+    );
+    has(&found, "NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY: }");
+    assert_eq!(found.iter().filter(|f| f.starts_with("NO_RETURN")).count(), 1, "{found:#?}");
+    has(&found, "UNREACHABLE_CODE: println(\"never\")");
+    has(&found, "NAME_SHADOWING: y");
+    has(&found, "NAME_SHADOWING: x");
+    has(&found, "REDECLARATION: y");
+}
+
+#[test]
+fn compiler_when_exhaustiveness() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+enum class Color { RED, GREEN, BLUE }
+sealed interface Result
+data class Ok(val v: Int) : Result
+object Failed : Result
+sealed class Nested : Result { class A : Nested(); class B : Nested() }
+
+fun name(c: Color) = when (c) {
+    Color.RED -> "r"
+    Color.GREEN -> "g"
+}
+
+fun all(c: Color) = when (c) {
+    Color.RED, Color.GREEN, Color.BLUE -> 1
+    else -> 2
+}
+
+fun result(r: Result) = when (r) {
+    is Ok -> 1
+    Failed -> 2
+    is Nested.A -> 3
+}
+
+fun covered(r: Result) = when (r) {
+    is Ok -> 1
+    Failed -> 2
+    is Nested -> 3
+}
+
+fun flag(b: Boolean?) = when (b) {
+    true -> 1
+    false -> 0
+}
+
+fun noSubject(x: Int) = when {
+    x > 0 -> "pos"
+    x < 0 -> "neg"
+}
+
+fun ranges(x: Int) = when (x) {
+    in 0..10 -> 1
+    else -> 0
+}
+"#,
+    );
+    has(&found, "NO_ELSE_IN_WHEN: when");
+    assert_eq!(found.iter().filter(|f| f.starts_with("NO_ELSE_IN_WHEN")).count(), 4, "{found:#?}");
+    has(&found, "REDUNDANT_ELSE_IN_WHEN: else");
+    assert_eq!(found.iter().filter(|f| f.starts_with("REDUNDANT_ELSE")).count(), 1, "{found:#?}");
+
+    let text = "package a\n\nenum class Color { RED, GREEN, BLUE }\nfun name(c: Color) = when (c) {\n    Color.RED -> \"r\"\n}\n";
+    assert_eq!(
+        fixed(text, "NO_ELSE_IN_WHEN"),
+        "package a\n\nenum class Color { RED, GREEN, BLUE }\nfun name(c: Color) = when (c) {\n    Color.RED -> \"r\"\n    Color.GREEN -> TODO()\n    Color.BLUE -> TODO()\n}\n"
+    );
+}

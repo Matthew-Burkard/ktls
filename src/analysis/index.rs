@@ -36,6 +36,8 @@ pub struct SourceIndex {
     /// package → contexts declaring it (including parent packages)
     packages: HashMap<String, HashSet<Option<FileContext>>>,
     shapes: HashMap<PathBuf, u64>,
+    /// Every name declared in project sources (declarations, members, parameters).
+    names: HashSet<String>,
     pub file_count: usize,
 }
 
@@ -57,6 +59,12 @@ impl SourceIndex {
             if !s.package.is_empty() {
                 idx.packages.entry(String::new()).or_default().insert(*ctx);
             }
+            fn names(d: &SourceDecl, out: &mut HashSet<String>) {
+                out.insert(d.symbol.name.clone());
+                out.extend(d.symbol.params.iter().map(|p| p.name.clone()));
+                d.children.iter().for_each(|c| names(c, out));
+            }
+            s.decls.iter().for_each(|d| names(d, &mut idx.names));
             for (i, d) in s.decls.iter().enumerate() {
                 let loc = DeclLoc { path: path.clone(), decl: vec![i as u32], ctx: *ctx };
                 idx.top_level.entry(s.package.clone()).or_default().push(loc.clone());
@@ -77,6 +85,11 @@ impl SourceIndex {
                 self.add_classifiers(c, l);
             }
         }
+    }
+
+    /// Some project source declares something called `name`.
+    pub fn declares_name(&self, name: &str) -> bool {
+        self.names.contains(name)
     }
 
     pub fn shape(&self, path: &Path) -> Option<u64> {

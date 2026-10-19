@@ -418,6 +418,10 @@ impl Lowerer {
                     if p.is_var() {
                         sym.modifiers.set(Modifiers::VAR);
                     }
+                    // Interface properties without an initializer or accessors are abstract.
+                    if in_interface && !p.has_initializer() && !p.has_delegate() && p.accessors().next().is_none() {
+                        sym.modifiers.set(Modifiers::ABSTRACT);
+                    }
                     sym.type_params = type_params;
                     sym.receiver = p.receiver().map(|r| this.ty(&r));
                     sym.ty = p.type_ref().map(|t| this.ty(&t));

@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 
 use crate::classpath::ClasspathIndex;
@@ -46,6 +46,8 @@ pub struct Workspace {
     pub projects: Vec<Project>,
     pub jdk: Option<Jdk>,
     classpaths: Mutex<HashMap<Vec<PathBuf>, Arc<OnceLock<Arc<ClasspathIndex>>>>>,
+    /// `classpath(ctx)` results (computing the entry list is not free).
+    by_context: RwLock<HashMap<Option<FileContext>, Arc<ClasspathIndex>>>,
     /// Source roots sorted by depth (deepest first) for file → module lookup.
     roots: Vec<(PathBuf, FileContext)>,
     /// Where library sources / stubs for navigation are written.
@@ -65,7 +67,15 @@ impl Workspace {
             }
         }
         roots.sort_by_key(|(p, _)| std::cmp::Reverse(p.components().count()));
-        Workspace { projects, jdk, classpaths: Mutex::new(HashMap::new()), roots, cache_dir: crate::util::default_cache_dir(), offline: false }
+        Workspace {
+            projects,
+            jdk,
+            classpaths: Mutex::new(HashMap::new()),
+            by_context: RwLock::new(HashMap::new()),
+            roots,
+            cache_dir: crate::util::default_cache_dir(),
+            offline: false,
+        }
     }
 
     /// Set the cache directory and network policy (from the server configuration).
@@ -130,6 +140,15 @@ impl Workspace {
 
     /// Classpath index for a file context (JDK + binary dependencies).
     pub fn classpath(&self, ctx: Option<FileContext>) -> Arc<ClasspathIndex> {
+        if let Some(hit) = self.by_context.read().get(&ctx) {
+            return hit.clone();
+        }
+        let index = self.build_classpath(ctx);
+        self.by_context.write().insert(ctx, index.clone());
+        index
+    }
+
+    fn build_classpath(&self, ctx: Option<FileContext>) -> Arc<ClasspathIndex> {
         let entries = match ctx {
             Some(c) => self.module(c.module).classpath(c.kind),
             None => Vec::new(),
