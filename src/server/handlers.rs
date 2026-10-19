@@ -20,6 +20,20 @@ pub struct Cancelled;
 
 pub type Result<T> = std::result::Result<T, Cancelled>;
 
+/// How a request handler can fail.
+#[derive(Debug)]
+pub enum RequestError {
+    Cancelled,
+    /// Shown to the user (e.g. why a rename is not possible).
+    Failed(String),
+}
+
+impl From<Cancelled> for RequestError {
+    fn from(_: Cancelled) -> Self {
+        RequestError::Cancelled
+    }
+}
+
 pub struct Ctx<'a> {
     pub snap: &'a Snapshot,
     pub enc: Encoding,
@@ -281,6 +295,59 @@ pub fn references(cx: &Ctx, path: &Path, pos: lsp_types::Position, include_decla
         out.push(Location { uri: path_to_uri(&t.path), range: index.range(&f.text, t.range, cx.enc) });
     }
     Ok(out)
+}
+
+pub fn prepare_rename(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> std::result::Result<Option<lsp_types::PrepareRenameResponse>, RequestError> {
+    let Some((file, offset)) = offset_of(cx, path, pos) else { return Ok(None) };
+    let (range, placeholder) = crate::analysis::ide::rename::prepare_rename(cx.snap, path, offset).map_err(RequestError::Failed)?;
+    cx.check()?;
+    let index = LineIndex::new(&file.text);
+    Ok(Some(lsp_types::PrepareRenameResponse::RangeWithPlaceholder { range: index.range(&file.text, range, cx.enc), placeholder }))
+}
+
+/// `rename_files`: the client accepts `RenameFile` operations.
+pub fn rename(cx: &Ctx, path: &Path, pos: lsp_types::Position, new_name: &str, rename_files: bool) -> std::result::Result<lsp_types::WorkspaceEdit, RequestError> {
+    use lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, ResourceOp, TextDocumentEdit, TextEdit};
+    let Some((_, offset)) = offset_of(cx, path, pos) else { return Err(RequestError::Failed("file is not loaded".into())) };
+    let cancelled = || cx.cancelled.load(Ordering::Relaxed);
+    let result = crate::analysis::ide::rename::rename(cx.snap, path, offset, new_name, &cancelled).map_err(RequestError::Failed)?;
+    cx.check()?;
+    let Some(r) = result else { return Err(RequestError::Cancelled) };
+    // Group edits per file, in order.
+    let mut files: Vec<(std::path::PathBuf, Vec<TextEdit>)> = Vec::new();
+    let mut index: Option<(std::path::PathBuf, LineIndex)> = None;
+    for (p, range, text) in &r.edits {
+        let Some(f) = cx.snap.file(p) else { continue };
+        if index.as_ref().is_none_or(|(ip, _)| ip != p) {
+            index = Some((p.clone(), LineIndex::new(&f.text)));
+            files.push((p.clone(), Vec::new()));
+        }
+        let li = &index.as_ref().unwrap().1;
+        files.last_mut().unwrap().1.push(TextEdit { range: li.range(&f.text, *range, cx.enc), new_text: text.clone() });
+    }
+    match r.file_rename.filter(|_| rename_files) {
+        None => Ok(lsp_types::WorkspaceEdit { changes: Some(files.into_iter().map(|(p, e)| (path_to_uri(&p), e)).collect()), ..Default::default() }),
+        Some((from, to)) => {
+            // Text edits address the old file name, so they go first.
+            let mut ops: Vec<DocumentChangeOperation> = files
+                .into_iter()
+                .map(|(p, e)| {
+                    let version = cx.snap.file(&p).and_then(|f| f.version);
+                    DocumentChangeOperation::Edit(TextDocumentEdit {
+                        text_document: OptionalVersionedTextDocumentIdentifier { uri: path_to_uri(&p), version },
+                        edits: e.into_iter().map(OneOf::Left).collect(),
+                    })
+                })
+                .collect();
+            ops.push(DocumentChangeOperation::Op(ResourceOp::Rename(lsp_types::RenameFile {
+                old_uri: path_to_uri(&from),
+                new_uri: path_to_uri(&to),
+                options: None,
+                annotation_id: None,
+            })));
+            Ok(lsp_types::WorkspaceEdit { document_changes: Some(DocumentChanges::Operations(ops)), ..Default::default() })
+        }
+    }
 }
 
 pub fn hover(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Option<lsp_types::Hover>> {

@@ -449,3 +449,102 @@ fn operator_conventions() {
     assert!(h.contains("operator fun plus(other: Int): Int"), "{h}");
 }
 
+
+impl Fx {
+    /// Rename at the `$0` marker of `text` (opened as Main.kt); the changed files' new texts.
+    fn rename(&mut self, text: &str, new_name: &str) -> Result<(Vec<(String, String)>, Option<(String, String)>), String> {
+        let (path, offset) = self.open(text);
+        let snap = self.host.snapshot();
+        let r = rename::rename(&snap, &path, offset, new_name, &|| false)?.unwrap();
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut files: Vec<&PathBuf> = r.edits.iter().map(|(p, ..)| p).collect();
+        files.dedup();
+        for f in files {
+            let mut t = snap.file(f).unwrap().text.to_string();
+            for (_, range, new) in r.edits.iter().filter(|(p, ..)| p == f).rev() {
+                t.replace_range(usize::from(range.start())..usize::from(range.end()), new);
+            }
+            out.push((f.file_name().unwrap().to_string_lossy().into_owned(), t));
+        }
+        let name = |p: &PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+        Ok((out, r.file_rename.map(|(a, b)| (name(&a), name(&b)))))
+    }
+}
+
+fn file<'a>(files: &'a [(String, String)], name: &str) -> &'a str {
+    &files.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("{name} not changed: {files:#?}")).1
+}
+
+#[test]
+fn rename_class_and_members() {
+    let Some(mut fx) = fixture() else { return };
+    let main = format!("{HEADER}/** See [User], [app.model.User] and [User.greet]; not [UserX] or [Users]. */\nfun run(u: Use$0r): User {{\n    val (n, a) = u\n    return User(name = n + a)\n}}\n");
+    let (files, moved) = fx.rename(&main, "Person").unwrap();
+    assert_eq!(moved, None, "Model.kt is not named after the class");
+    let m = file(&files, "Main.kt");
+    assert!(m.contains("import app.model.Person\n") && m.contains("fun run(u: Person): Person {") && m.contains("return Person(name = n + a)"), "{m}");
+    assert!(m.contains("/** See [Person], [app.model.Person] and [Person.greet]; not [UserX] or [Users]. */"), "{m}");
+    let model = file(&files, "Model.kt");
+    assert!(model.contains("data class Person(") && model.contains("fun create(): Person = Person(\"default\")"), "{model}");
+
+    // A constructor property: declaration, member uses, string templates, KDoc and
+    // named arguments; destructuring entries are other variables.
+    let main = format!("{HEADER}fun run(u: User): String {{\n    val (n, _) = u\n    println(n)\n    return User(na$0me = \"x\").name + u.name\n}}\n");
+    let (files, _) = fx.rename(&main, "displayName").unwrap();
+    let m = file(&files, "Main.kt");
+    assert!(m.contains("User(displayName = \"x\").displayName + u.displayName") && m.contains("val (n, _) = u"), "{m}");
+    let model = file(&files, "Model.kt");
+    assert!(model.contains("@param displayName the display name") && model.contains("(val displayName: String,") && model.contains("\"$prefix $displayName\""), "{model}");
+
+    // A function parameter with named arguments at call sites.
+    let main = format!("{HEADER}fun run() {{\n    Registry.register(name = \"a\")\n    Registry.reg$0ister(\"b\")\n}}\n");
+    let (files, _) = fx.rename(&main, "add").unwrap();
+    assert!(file(&files, "Main.kt").contains("Registry.add(name = \"a\")\n    Registry.add(\"b\")"));
+    let main = format!("{HEADER}fun greet(who$0: String, times: Int = who.length) = who.repeat(times)\nfun run() = greet(who = \"a\")\n");
+    let (files, _) = fx.rename(&main, "person").unwrap();
+    assert_eq!(file(&files, "Main.kt"), format!("{HEADER}fun greet(person: String, times: Int = person.length) = person.repeat(times)\nfun run() = greet(person = \"a\")\n"));
+
+    // Locals.
+    let main = format!("{HEADER}fun run() {{\n    val cou$0nt = 1\n    println(\"$count ${{count + 1}}\")\n}}\n");
+    let (files, _) = fx.rename(&main, "total").unwrap();
+    assert!(file(&files, "Main.kt").contains("val total = 1\n    println(\"$total ${total + 1}\")"));
+}
+
+#[test]
+fn rename_override_family_and_files() {
+    let Some(mut fx) = fixture() else { return };
+    let main = format!("{HEADER}class Repo : Repository<User> {{\n    override fun a$0ll(): List<User> = emptyList()\n}}\nfun run(r: Repository<User>) = r.all()\n");
+    let (files, _) = fx.rename(&main, "everything").unwrap();
+    assert!(file(&files, "Model.kt").contains("fun everything(): List<T>"));
+    let m = file(&files, "Main.kt");
+    assert!(m.contains("override fun everything()") && m.contains("r.everything()"), "{m}");
+
+    // A top-level class in a file named after it moves along.
+    fx.host.set_file(fx.root.join("src/app/Account.kt"), Arc::from("package app\n\nclass Account\n"), Some(1));
+    let (files, moved) = fx.rename(&format!("{HEADER}fun run(a: Acc$0ount) = a\n"), "Customer").unwrap();
+    assert_eq!(moved, Some(("Account.kt".to_string(), "Customer.kt".to_string())));
+    assert_eq!(file(&files, "Account.kt"), "package app\n\nclass Customer\n");
+
+    // Type parameters.
+    let (files, _) = fx.rename(&format!("{HEADER}fun <T$0 : Any> id(x: T): List<T> = listOf(x)\n"), "E").unwrap();
+    assert!(file(&files, "Main.kt").contains("fun <E : Any> id(x: E): List<E> = listOf(x)"));
+
+    // Names that need backticks get them.
+    let (files, _) = fx.rename(&format!("{HEADER}fun run() {{\n    val x$0 = 1\n    println(x)\n}}\n"), "object").unwrap();
+    assert!(file(&files, "Main.kt").contains("val `object` = 1\n    println(`object`)"));
+}
+
+#[test]
+fn rename_refusals() {
+    let Some(mut fx) = fixture() else { return };
+    let err = |fx: &mut Fx, text: &str, name: &str| fx.rename(text, name).unwrap_err();
+    assert!(err(&mut fx, &format!("{HEADER}fun run() = print$0ln(1)\n"), "out").contains("library"));
+    assert!(err(&mut fx, &format!("{HEADER}class A {{ override fun toStr$0ing() = \"\" }}\n"), "x").contains("overrides a library"));
+    assert!(err(&mut fx, &format!("{HEADER}fun run() = listOf(1).map {{ i$0t + 1 }}\n"), "x").contains("implicit"));
+    assert!(err(&mut fx, &format!("{HEADER}fun run() {{\n    val x$0 = 1\n}}\n"), "a.b").contains("not a valid"));
+    let (path, offset) = fx.open(&format!("{HEADER}fun run(u: User) = u.na$0me\n"));
+    let snap = fx.host.snapshot();
+    let (range, name) = rename::prepare_rename(&snap, &path, offset).unwrap();
+    assert_eq!(name, "name");
+    assert_eq!(&snap.file(&path).unwrap().text[usize::from(range.start())..usize::from(range.end())], "name");
+}

@@ -25,7 +25,7 @@ use lsp_types::{
 };
 
 use self::config::Config;
-use self::handlers::Cancelled;
+use self::handlers::{Cancelled, RequestError};
 use self::line_index::Encoding;
 use self::loader::{Loaded, ProgressEvent};
 use crate::analysis::diagnostics::Coverage;
@@ -80,7 +80,7 @@ pub struct Server {
     shutdown: bool,
 }
 
-pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool) -> ServerCapabilities {
+pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_rename: bool) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(match encoding {
             Encoding::Utf8 => PositionEncodingKind::UTF8,
@@ -96,6 +96,11 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool) -> Server
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         references_provider: Some(lsp_types::OneOf::Left(true)),
+        rename_provider: Some(if prepare_rename {
+            lsp_types::OneOf::Right(lsp_types::RenameOptions { prepare_provider: Some(true), work_done_progress_options: Default::default() })
+        } else {
+            lsp_types::OneOf::Left(true)
+        }),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(lsp_types::CodeActionOptions {
             code_action_kinds: Some(vec![
@@ -140,7 +145,11 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
     };
     let pull = init.capabilities.text_document.as_ref().is_some_and(|t| t.diagnostic.is_some());
     let result = InitializeResult {
-        capabilities: server_capabilities(encoding, pull),
+        capabilities: server_capabilities(
+            encoding,
+            pull,
+            init.capabilities.text_document.as_ref().and_then(|t| t.rename.as_ref()).and_then(|r| r.prepare_support).unwrap_or(false),
+        ),
         server_info: Some(ServerInfo { name: "kotlin-lsp-rust".into(), version: Some(env!("CARGO_PKG_VERSION").into()) }),
     };
     connection.initialize_finish(id, serde_json::to_value(result)?)?;
@@ -288,6 +297,30 @@ impl Server {
                     Ok(serde_json::to_value(handlers::references(cx, &path, tdp.position, include)?).unwrap())
                 });
             }
+            PrepareRenameRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::TextDocumentPositionParams>(PrepareRenameRequest::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::prepare_rename(cx, &path, params.position)?).unwrap())
+                });
+            }
+            Rename::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::RenameParams>(Rename::METHOD) else { return };
+                let tdp = params.text_document_position;
+                let path = self.path_of(&tdp.text_document.uri);
+                let rename_files = self
+                    .caps
+                    .workspace
+                    .as_ref()
+                    .and_then(|w| w.workspace_edit.as_ref())
+                    .and_then(|e| e.resource_operations.as_ref())
+                    .is_some_and(|ops| ops.contains(&lsp_types::ResourceOperationKind::Rename));
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::rename(cx, &path, tdp.position, &params.new_name, rename_files)?).unwrap())
+                });
+            }
             HoverRequest::METHOD => {
                 let Ok((id, params)) = req.extract::<lsp_types::HoverParams>(HoverRequest::METHOD) else { return };
                 let tdp = params.text_document_position_params;
@@ -353,7 +386,7 @@ impl Server {
     }
 
     /// Run `f` on a worker with a fresh snapshot; the result is sent unless cancelled.
-    fn spawn(&mut self, id: RequestId, f: impl FnOnce(&handlers::Ctx) -> Result<serde_json::Value, Cancelled> + Send + 'static) {
+    fn spawn(&mut self, id: RequestId, f: impl FnOnce(&handlers::Ctx) -> Result<serde_json::Value, RequestError> + Send + 'static) {
         let snap = self.host.snapshot();
         let flag = handlers::new_flag();
         self.in_flight.insert(id.clone(), flag.clone());
@@ -365,10 +398,11 @@ impl Server {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&cx)));
             let resp = match result {
                 Ok(Ok(v)) => Response::new_ok(id, v),
-                Ok(Err(Cancelled)) if snapshot_flag.load(Ordering::Relaxed) => {
+                Ok(Err(RequestError::Cancelled)) if snapshot_flag.load(Ordering::Relaxed) => {
                     Response::new_err(id, ErrorCode::ContentModified as i32, "content modified".into())
                 }
-                Ok(Err(Cancelled)) => Response::new_err(id, ErrorCode::RequestCanceled as i32, "cancelled".into()),
+                Ok(Err(RequestError::Cancelled)) => Response::new_err(id, ErrorCode::RequestCanceled as i32, "cancelled".into()),
+                Ok(Err(RequestError::Failed(msg))) => Response::new_err(id, ErrorCode::RequestFailed as i32, msg),
                 Err(panic) => {
                     let msg = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
                     log::error!("request handler panicked: {msg}");

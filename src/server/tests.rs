@@ -23,11 +23,17 @@ impl Client {
         let mut c = Client { conn: client_conn, server: Some(server), next_id: 0, notifications: Vec::new() };
         let mut caps = json!({
             "window": { "workDoneProgress": true },
-            "workspace": { "configuration": true, "didChangeWatchedFiles": { "dynamicRegistration": true }, "workspaceFolders": true },
+            "workspace": {
+                "configuration": true,
+                "didChangeWatchedFiles": { "dynamicRegistration": true },
+                "workspaceFolders": true,
+                "workspaceEdit": { "documentChanges": true, "resourceOperations": ["create", "rename", "delete"] },
+            },
             "general": { "positionEncodings": ["utf-16"] },
+            "textDocument": { "rename": { "prepareSupport": true } },
         });
         if pull {
-            caps["textDocument"] = json!({ "diagnostic": { "dynamicRegistration": false } });
+            caps["textDocument"]["diagnostic"] = json!({ "dynamicRegistration": false });
         }
         let result = c.request(
             "initialize",
@@ -288,5 +294,50 @@ fn lint_diagnostics_and_code_actions() {
     let all = c.request("textDocument/codeAction", json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [], "only": ["source.fixAll"] } }));
     assert_eq!(all.as_array().unwrap().len(), 1);
     assert_eq!(all[0]["edit"]["changes"][uri.as_str()].as_array().unwrap().len(), 2);
+    c.shutdown();
+}
+
+#[test]
+fn rename_across_files() {
+    let Some(stdlib) = stdlib() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let (project, options) = maven_fixture(tmp.path(), &stdlib);
+    // `User` lives in Model.kt; give it a file of its own so the file moves too.
+    write(&project.join("src/main/kotlin/demo/Model.kt"), "package demo\n\ninterface Repository<T> { fun all(): List<T> }\n");
+    write(&project.join("src/main/kotlin/demo/User.kt"), "package demo\n\ndata class User(val name: String)\n");
+    let mut c = Client::start(&project, options, false);
+    c.wait_for_import();
+    let app = project.join("src/main/kotlin/demo/App.kt");
+    let text = "package demo\n\nfun users(repo: Repository<User>): List<User> = repo.all()\n";
+    write(&app, text);
+    let uri = path_to_uri(&app).as_str().to_string();
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": text } }));
+
+    let pos = json!({ "line": 2, "character": 31 }); // right after `User`
+    let prep = c.request("textDocument/prepareRename", json!({ "textDocument": { "uri": uri }, "position": pos }));
+    assert_eq!(prep["placeholder"], "User");
+    assert_eq!(prep["range"], json!({ "start": { "line": 2, "character": 27 }, "end": { "line": 2, "character": 31 } }));
+
+    let edit = c.request("textDocument/rename", json!({ "textDocument": { "uri": uri }, "position": pos, "newName": "Member" }));
+    let ops = edit["documentChanges"].as_array().unwrap();
+    let user_uri = path_to_uri(&project.join("src/main/kotlin/demo/User.kt")).as_str().to_string();
+    assert_eq!(ops.len(), 3, "{edit:#}");
+    assert_eq!(ops[0]["textDocument"]["uri"], uri.as_str());
+    assert_eq!(ops[0]["textDocument"]["version"], 1);
+    assert_eq!(ops[0]["edits"].as_array().unwrap().len(), 2);
+    assert_eq!(ops[1]["textDocument"]["uri"], user_uri.as_str());
+    assert_eq!(ops[1]["edits"][0]["newText"], "Member");
+    assert_eq!(ops[2]["kind"], "rename");
+    assert_eq!(ops[2]["oldUri"], user_uri.as_str());
+    assert!(ops[2]["newUri"].as_str().unwrap().ends_with("/Member.kt"));
+
+    // Library declarations (`List`) cannot be renamed: an error the editor shows.
+    let id = c.send_request("textDocument/rename", json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 36 }, "newName": "X" }));
+    let err = c.pump(Duration::from_secs(10), |m, _| match m {
+        Message::Response(r) if r.id == id => Some(r.response_result.clone().unwrap_err()),
+        _ => None,
+    });
+    assert_eq!(err.code, lsp_server::ErrorCode::RequestFailed as i32);
+    assert!(err.message.contains("library"), "{}", err.message);
     c.shutdown();
 }

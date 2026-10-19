@@ -1,7 +1,8 @@
-//! IDE features built on the analysis: go to definition and hover.
+//! IDE features built on the analysis: definition, hover, references and rename.
 
 pub mod infer;
 pub mod library;
+pub mod rename;
 
 use std::path::{Path, PathBuf};
 

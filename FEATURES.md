@@ -432,12 +432,12 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 ## 7. Refactorings (`refactor`, `refactor.extract`, `refactor.inline`, plus rename)
 
 ### 7.1 Rename (`textDocument/prepareRename`, `textDocument/rename`)
-- [ ] [P0] Locals, parameters, properties, functions, classes, type params, labels
-- [ ] [P0] Cross-file and cross-module (incl. Java usages, `@JvmName` aware)
-- [ ] [P1] Rename overriding/overridden members together; rename `expect` + all `actual`s
-- [ ] [P1] Rename class → rename file; rename package → move directory (`workspace/willRenameFiles`)
-- [ ] [P1] Rename named-argument usages and `component`/`getX` Java accessors
-- [ ] [P1] Rename in KDoc references, string literals/comments (opt-in), `@Suppress` IDs
+- [~] [P0] Locals, parameters, properties, functions, classes, type params, labels — *partial: all but labels; library, Java, operator and library-override declarations are refused with a reason*
+- [~] [P0] Cross-file and cross-module (incl. Java usages, `@JvmName` aware) — *partial: Kotlin files of the workspace; Java usages are not updated*
+- [~] [P1] Rename overriding/overridden members together; rename `expect` + all `actual`s — *partial: the override family*
+- [~] [P1] Rename class → rename file; rename package → move directory (`workspace/willRenameFiles`) — *partial: a top-level class's file named after it (when the client supports `RenameFile`)*
+- [~] [P1] Rename named-argument usages and `component`/`getX` Java accessors — *partial: named arguments (calls, constructors, annotations); destructuring is left alone*
+- [~] [P1] Rename in KDoc references, string literals/comments (opt-in), `@Suppress` IDs — *partial: KDoc links and `@param`/`@property`*
 - [ ] [P1] Conflict detection (shadowing, redeclaration, visibility)
 - [ ] [P2] Rename backing field / accessor pair, rename test along with subject
 

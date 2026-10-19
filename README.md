@@ -4,7 +4,7 @@ A Kotlin language server written in Rust. This is the core infrastructure: proto
 handling, an error-tolerant parser, Gradle/Maven import with native dependency
 resolution, binary classpath indexing (jars, the JDK image, Kotlin metadata), a
 module-aware declaration index, import/type resolution with diagnostics, navigation
-(definition, hover, references) and lint rules with quick fixes.
+(definition, hover, references, rename) and lint rules with quick fixes.
 
 See [FEATURES.md](FEATURES.md) for the full feature catalog and what is implemented.
 
@@ -148,7 +148,7 @@ src/
                protobuf decoding (+ .kotlin_builtins), lazy per-class/per-package index
   analysis/    file summaries (Kotlin + Java), source index, name resolution, diagnostics,
                snapshot-based database (AnalysisHost → Snapshot)
-    ide/       expression typing, definition, hover, references
+    ide/       expression typing, definition, hover, references, rename
     lints/     lint rules with quick fixes and suppression
   server/      LSP main loop, document sync, scheduling/debouncing, cancellation, progress
 ```
