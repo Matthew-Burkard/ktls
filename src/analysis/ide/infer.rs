@@ -56,7 +56,7 @@ impl Def {
 }
 
 /// What the left side of a `.` denotes.
-enum Qualifier {
+pub enum Qualifier {
     Value(TypeRef),
     Static(Classifier),
     Package(String),
@@ -303,7 +303,7 @@ impl<'s> Engine<'s> {
         })
     }
 
-    fn package(&self) -> String {
+    pub fn package(&self) -> String {
         self.res.summary().map(|s| s.package.clone()).unwrap_or_default()
     }
 
@@ -964,7 +964,7 @@ impl<'s> Engine<'s> {
     // ------------------------------------------------------ resolution
 
     /// Implicit receivers at `at`: lambda receivers and enclosing classes, innermost first.
-    fn implicit_receivers(&self, at: &SyntaxNode) -> Vec<(TypeRef, Option<Classifier>)> {
+    pub fn implicit_receivers(&self, at: &SyntaxNode) -> Vec<(TypeRef, Option<Classifier>)> {
         let mut out = Vec::new();
         let package = self.package();
         for anc in at.ancestors().skip(1) {
@@ -1045,7 +1045,7 @@ impl<'s> Engine<'s> {
         if fitting.is_empty() { defs } else { fitting }
     }
 
-    fn resolve_qualifier(&self, e: &SyntaxNode) -> Qualifier {
+    pub fn resolve_qualifier(&self, e: &SyntaxNode) -> Qualifier {
         match e.kind() {
             SyntaxKind::NAME_REF => {
                 let Some(tok) = token_at(e, SyntaxKind::IDENT) else { return Qualifier::Unknown };
@@ -1683,4 +1683,280 @@ fn resolve_names(t: &TypeRef, r: &Resolver, scope: &TypeScope) -> TypeRef {
         TypeRef::Platform(inner) => TypeRef::Platform(Box::new(resolve_names(inner, r, scope))),
         other => other.clone(),
     }
+}
+
+// ------------------------------------------------------------ enumeration (completion)
+
+impl<'s> Engine<'s> {
+    /// Every instance member of `t` (nearest declaration of each signature first), with
+    /// Java getters also offered as properties (`getName()` → `name`).
+    pub fn all_members(&self, t: &TypeRef) -> Vec<(Symbol, Subst)> {
+        let mut out: Vec<(Symbol, Subst)> = Vec::new();
+        let mut seen: HashSet<(String, bool, usize)> = HashSet::new();
+        let mut push = |m: Symbol, s: &Subst, out: &mut Vec<(Symbol, Subst)>| {
+            let key = (m.name.clone(), m.kind == SymbolKind::Function, m.params.len());
+            if seen.insert(key) {
+                out.push((m, s.clone()));
+            }
+        };
+        for st in self.supertype_closure(t) {
+            let Some(fq) = fq_of(&st) else { continue };
+            if let Some(members) = self.anon_members(fq) {
+                for m in members {
+                    push(m, &Subst::new(), &mut out);
+                }
+                continue;
+            }
+            let Some((c, alias_args)) = self.classifier_for(fq) else { continue };
+            let args = if alias_args.is_empty() { args_of(&st).to_vec() } else { alias_args };
+            let s = self.type_subst(&c, &args);
+            let java = matches!(&c, Classifier::Library(lc) if !lc.is_kotlin);
+            for m in self.members_of(&c) {
+                if m.kind == SymbolKind::Constructor || m.kind.is_classifier() || m.modifiers.has(Modifiers::STATIC) || !self.accessible(&m) {
+                    continue;
+                }
+                if java && m.kind == SymbolKind::Function && m.params.is_empty() && m.type_params.is_empty()
+                    && let Some(prop) = java_property_name(&m.name)
+                {
+                    let mut p = m.clone();
+                    p.kind = SymbolKind::Property;
+                    p.name = prop;
+                    push(p, &s, &mut out);
+                }
+                push(m, &s, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Private members are only visible from the file that declares them.
+    fn accessible(&self, m: &Symbol) -> bool {
+        m.visibility != crate::symbols::Visibility::Private || matches!(&m.origin, Origin::Source { file, .. } if *file == self.path)
+    }
+
+    /// Extension callables applicable to a receiver of type `t` at `at`: member extensions
+    /// of implicit receivers, explicitly imported ones, and those of the packages in scope.
+    pub fn all_extensions(&self, at: &SyntaxNode, t: &TypeRef) -> Vec<(Symbol, Subst)> {
+        let candidates = self.extension_candidates(at);
+        self.applicable_to(candidates, t)
+    }
+
+    /// Extensions callable at `at` before checking receivers (compute once, then filter
+    /// per receiver with [`Engine::applicable_to`]).
+    pub fn extension_candidates(&self, at: &SyntaxNode) -> Vec<(Symbol, Subst)> {
+        let mut candidates: Vec<(Symbol, Subst)> = Vec::new();
+        for (r, _) in self.implicit_receivers(at) {
+            candidates.extend(self.all_members(&r).into_iter().filter(|(m, _)| m.receiver.is_some()));
+        }
+        for sym in self.imported_symbols().1 {
+            if sym.receiver.is_some() {
+                candidates.push((sym, Subst::new()));
+            }
+        }
+        for pkg in self.callable_packages() {
+            let (_, callables) = self.res.package_contents(&pkg);
+            candidates.extend(callables.into_iter().filter(|s| s.receiver.is_some()).map(|s| (s, Subst::new())));
+        }
+        candidates.retain(|(s, _)| self.accessible(s));
+        candidates
+    }
+
+    /// The candidates whose receiver accepts `t`, most specific first.
+    pub fn applicable_to(&self, candidates: Vec<(Symbol, Subst)>, t: &TypeRef) -> Vec<(Symbol, Subst)> {
+        self.applicable_extensions(candidates, t)
+    }
+
+    /// Constructors of the classifier `fq`.
+    pub fn constructors(&self, fq: &str) -> Vec<Symbol> {
+        let Some((c, _)) = self.classifier_for(fq) else { return Vec::new() };
+        self.members_of(&c).into_iter().filter(|m| m.kind == SymbolKind::Constructor).collect()
+    }
+
+    /// Members of `t`'s supertypes that a subclass may override and does not yet:
+    /// abstract and open members, interface members, non-final Java methods.
+    pub fn overridable_members(&self, t: &TypeRef) -> Vec<(Symbol, Subst)> {
+        let closure = self.supertype_closure(t);
+        let own: Vec<Symbol> = closure
+            .first()
+            .and_then(fq_of)
+            .and_then(|fq| self.anon_members(fq).or_else(|| self.classifier_for(fq).map(|(c, _)| self.members_of(&c))))
+            .unwrap_or_default();
+        let declared = |m: &Symbol| own.iter().any(|o| o.name == m.name && o.kind == m.kind && o.params.len() == m.params.len());
+        let mut out: Vec<(Symbol, Subst)> = Vec::new();
+        let mut seen: HashSet<(String, usize)> = HashSet::new();
+        for st in closure.iter().skip(1) {
+            let Some(fq) = fq_of(st) else { continue };
+            let Some((c, alias_args)) = self.classifier_for(fq) else { continue };
+            let args = if alias_args.is_empty() { args_of(st).to_vec() } else { alias_args };
+            let s = self.type_subst(&c, &args);
+            let interface = c.symbol().kind == SymbolKind::Interface;
+            let java = matches!(&c, Classifier::Library(lc) if !lc.is_kotlin);
+            for m in self.members_of(&c) {
+                if !matches!(m.kind, SymbolKind::Function | SymbolKind::Property) || m.modifiers.has(Modifiers::STATIC) || m.modifiers.has(Modifiers::FINAL) {
+                    continue;
+                }
+                if m.visibility == crate::symbols::Visibility::Private || m.receiver.is_some() && !interface && !m.modifiers.has(Modifiers::OPEN | Modifiers::ABSTRACT) {
+                    continue;
+                }
+                let open = interface || java || m.modifiers.has(Modifiers::OPEN) || m.modifiers.has(Modifiers::ABSTRACT) || m.modifiers.has(Modifiers::OVERRIDE);
+                if !open || declared(&m) || !seen.insert((m.name.clone(), m.params.len())) {
+                    continue;
+                }
+                out.push((m, s.clone()));
+            }
+        }
+        out
+    }
+
+    /// Explicitly imported names: classifiers `(name, FQ)` and callables (aliases applied).
+    pub fn imported_symbols(&self) -> (Vec<(String, String)>, Vec<Symbol>) {
+        let (mut classes, mut callables) = (Vec::new(), Vec::new());
+        let Some(s) = self.res.summary() else { return (classes, callables) };
+        for imp in &s.imports {
+            let Some(name) = imp.imported_name() else { continue };
+            match self.res.resolve_import(imp) {
+                Ok(Resolved::Classifier(c)) => classes.push((name.to_string(), c.fq_name().to_string())),
+                Ok(Resolved::Callables(cs)) => callables.extend(cs.into_iter().map(|mut c| {
+                    c.name = name.to_string();
+                    c
+                })),
+                _ => {}
+            }
+        }
+        (classes, callables)
+    }
+
+    /// Packages whose top-level declarations are in scope without an import, in priority
+    /// order: this file's package, star imports, default imports.
+    pub fn scope_packages(&self) -> Vec<String> {
+        self.callable_packages()
+    }
+
+    /// What a classifier name gives access to: nested classifiers (`(name, FQ)`) and
+    /// enum entries, object members, Java statics and companion members.
+    pub fn all_static_members(&self, c: &Classifier) -> (Vec<(String, String)>, Vec<(Symbol, Subst)>) {
+        let sym = c.symbol();
+        let mut nested: Vec<(String, String)> = Vec::new();
+        let mut members: Vec<(Symbol, Subst)> = Vec::new();
+        match c {
+            Classifier::Library(lc) => nested.extend(lc.nested.iter().map(|n| (n.clone(), format!("{}.{n}", sym.fq_name)))),
+            Classifier::Source(_) => {
+                nested.extend(self.members_of(c).into_iter().filter(|m| m.kind.is_classifier()).map(|m| (m.name.clone(), m.fq_name.clone())))
+            }
+            Classifier::LibraryAlias(_) => {}
+        }
+        for m in self.members_of(c) {
+            if !m.kind.is_classifier() && (m.kind == SymbolKind::EnumEntry || m.modifiers.has(Modifiers::STATIC)) && self.accessible(&m) {
+                members.push((m, Subst::new()));
+            }
+        }
+        if sym.kind == SymbolKind::Object {
+            members.extend(self.all_members(&class_type(sym)));
+        } else {
+            let companion = match c {
+                Classifier::Library(lc) => lc.companion.clone(),
+                _ => None,
+            }
+            .unwrap_or_else(|| "Companion".into());
+            if let Some(comp) = self.res.find_classifier(&format!("{}.{companion}", sym.fq_name)) {
+                members.extend(self.all_members(&class_type(comp.symbol())));
+                nested.retain(|(n, _)| *n != companion);
+            }
+        }
+        (nested, members)
+    }
+
+    /// Names of locals (variables, parameters, local functions and classes) declared
+    /// syntactically before `at` in an enclosing scope, innermost first, resolved with
+    /// the same rules as name lookup (shadowing respected).
+    pub fn locals_at(&self, at: &SyntaxNode) -> Vec<LocalDef> {
+        let mut names: Vec<String> = Vec::new();
+        let before = at.text_range().start();
+        let ident = |n: &SyntaxNode| token_at(n, SyntaxKind::IDENT).map(|t| ast::ident_text(&t));
+        let params = |list: &SyntaxNode, names: &mut Vec<String>| {
+            for p in list.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER) {
+                names.extend(ident(&p));
+                for d in p.children().filter(|c| c.kind() == SyntaxKind::DESTRUCTURING_DECLARATION) {
+                    names.extend(d.children().filter(|e| e.kind() == SyntaxKind::DESTRUCTURING_ENTRY).filter_map(|e| ident(&e)));
+                }
+            }
+        };
+        for anc in at.ancestors().skip(1) {
+            match anc.kind() {
+                SyntaxKind::BLOCK => {
+                    for st in anc.children().filter(|s| s.text_range().end() <= before) {
+                        match st.kind() {
+                            SyntaxKind::PROPERTY => {
+                                names.extend(ident(&st));
+                                for d in st.children().filter(|c| c.kind() == SyntaxKind::DESTRUCTURING_DECLARATION) {
+                                    names.extend(d.children().filter(|e| e.kind() == SyntaxKind::DESTRUCTURING_ENTRY).filter_map(|e| ident(&e)));
+                                }
+                            }
+                            SyntaxKind::FUN | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION => names.extend(ident(&st)),
+                            _ => {}
+                        }
+                    }
+                }
+                SyntaxKind::LAMBDA_EXPR => match anc.children().find(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) {
+                    Some(list) => params(&list, &mut names),
+                    None => names.push("it".into()),
+                },
+                SyntaxKind::FUN | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::CATCH_CLAUSE | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::ANONYMOUS_FUNCTION => {
+                    if let Some(list) = anc.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER_LIST) {
+                        params(&list, &mut names);
+                    }
+                    if anc.kind() == SyntaxKind::PROPERTY_ACCESSOR {
+                        names.push("field".into());
+                    }
+                }
+                SyntaxKind::FOR_EXPR => {
+                    for p in anc.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER) {
+                        names.extend(ident(&p));
+                    }
+                    for d in anc.children().filter(|c| c.kind() == SyntaxKind::DESTRUCTURING_DECLARATION) {
+                        names.extend(d.children().filter(|e| e.kind() == SyntaxKind::DESTRUCTURING_ENTRY).filter_map(|e| ident(&e)));
+                    }
+                }
+                SyntaxKind::WHEN_EXPR => {
+                    if let Some(subject) = anc.children().find(|c| c.kind() == SyntaxKind::WHEN_SUBJECT)
+                        && let Some(p) = subject.children().find(|c| c.kind() == SyntaxKind::PROPERTY)
+                    {
+                        names.extend(ident(&p));
+                    }
+                }
+                // Constructor parameters are visible in initializers and property initializers.
+                SyntaxKind::CLASS => {
+                    if let Some(list) = anc
+                        .children()
+                        .find(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR)
+                        .and_then(|c| c.children().find(|l| l.kind() == SyntaxKind::VALUE_PARAMETER_LIST))
+                    {
+                        let in_init = at.ancestors().any(|a| a.kind() == SyntaxKind::CLASS_INITIALIZER)
+                            || at.ancestors().take_while(|a| a != &anc).any(|a| a.kind() == SyntaxKind::PROPERTY && a.parent().is_some_and(|p| p.kind() == SyntaxKind::CLASS_BODY));
+                        if in_init {
+                            params(&list, &mut names);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut seen = HashSet::new();
+        names
+            .into_iter()
+            .filter(|n| !n.is_empty() && n != "_" && seen.insert(n.clone()))
+            .filter_map(|n| self.find_local(at, &n))
+            .collect()
+    }
+}
+
+/// `getName` → `name`, `isEnabled` → `isEnabled` (Kotlin's synthetic Java properties).
+fn java_property_name(method: &str) -> Option<String> {
+    let rest = method.strip_prefix("get").filter(|r| r.chars().next().is_some_and(char::is_uppercase));
+    if let Some(r) = rest {
+        let mut c = r.chars();
+        let first = c.next()?;
+        return Some(first.to_lowercase().chain(c).collect());
+    }
+    method.strip_prefix("is").filter(|r| r.chars().next().is_some_and(char::is_uppercase)).map(|_| method.to_string())
 }

@@ -548,3 +548,117 @@ fn rename_refusals() {
     assert_eq!(name, "name");
     assert_eq!(&snap.file(&path).unwrap().text[usize::from(range.start())..usize::from(range.end())], "name");
 }
+
+impl Fx {
+    fn complete(&mut self, text: &str) -> completion::Completion {
+        let (path, offset) = self.open(text);
+        let snap = self.host.snapshot();
+        completion::complete(&snap, &path, offset, completion::Options { snippets: true }).expect("no completion")
+    }
+
+    fn labels(&mut self, text: &str) -> Vec<String> {
+        self.complete(text).items.into_iter().map(|i| i.label).collect()
+    }
+}
+
+#[track_caller]
+fn has_all(labels: &[String], expected: &[&str]) {
+    for e in expected {
+        assert!(labels.iter().any(|l| l == e), "missing {e:?} in {labels:?}");
+    }
+}
+
+#[test]
+fn completes_members_and_extensions() {
+    let Some(mut fx) = fixture() else { return };
+    let src = |body: &str| format!("{HEADER}fun run(u: User, xs: List<User>) {{\n{body}\n}}\n");
+    let labels = fx.labels(&src("    u.$0"));
+    has_all(&labels, &["name", "age", "greet", "toString", "hashCode"]);
+    assert!(!labels.iter().any(|l| l == "shout"), "String extension offered on User");
+    // Prefix filtering, stdlib extensions with substituted types.
+    let c = fx.complete(&src("    xs.fi$0"));
+    let first = c.items.iter().find(|i| i.label == "first" && i.label_detail.as_deref() == Some("() for List<User>")).expect("first()");
+    assert_eq!(first.description.as_deref(), Some("User"));
+    assert!(c.items.iter().any(|i| i.label == "filter"));
+    assert!(c.items.iter().all(|i| completion::matches("fi", &i.label)), "{:?}", c.items.iter().map(|i| &i.label).collect::<Vec<_>>());
+    // Members sort before extensions; calls get parentheses.
+    let c = fx.complete(&src("    u.gr$0"));
+    assert_eq!(c.items[0].label, "greet");
+    assert_eq!(c.items[0].insert.as_deref(), Some("greet($0)"));
+    assert!(c.items[0].snippet);
+    let labels = fx.labels(&src("    \"x\".sho$0"));
+    has_all(&labels, &["shout"]);
+    // Companion and object members through the class name.
+    has_all(&fx.labels(&src("    User.$0")), &["create"]);
+    has_all(&fx.labels(&src("    Registry.$0")), &["register"]);
+    // Java getters as properties.
+    has_all(&fx.labels(&src("    java.io.File(\"a\").$0")), &["name", "getName", "absolutePath"]);
+}
+
+#[test]
+fn completes_scope_types_and_imports() {
+    let Some(mut fx) = fixture() else { return };
+    let src = |body: &str| format!("{HEADER}fun run(param: Int) {{\n    val count = 1\n{body}\n}}\n");
+    let c = fx.complete(&src("    co$0"));
+    assert_eq!(c.items[0].label, "count");
+    let labels = fx.labels(&src("    $0"));
+    has_all(&labels, &["count", "param", "run", "listOf", "println", "User", "val", "return"]);
+    has_all(&fx.labels(&src("    listOf(1).map { i$0 }")), &["it"]);
+    // Inside a class: members of `this`.
+    has_all(&fx.labels(&format!("{HEADER}class Box(val size: Int) {{\n    fun f() = si$0\n}}\n")), &["size"]);
+
+    // Types.
+    let labels = fx.labels(&format!("{HEADER}fun <T> f(x: Us$0) {{}}\n"));
+    has_all(&labels, &["User"]);
+    has_all(&fx.labels(&format!("{HEADER}fun <Elem> f(x: El$0) {{}}\n")), &["Elem"]);
+    has_all(&fx.labels(&format!("{HEADER}fun f(x: Map.$0) {{}}\n")), &["Entry"]);
+
+    // A class that needs an import.
+    let c = fx.complete(&format!("{HEADER}fun f(x: UUI$0) {{}}\n"));
+    let uuid = c.items.iter().find(|i| i.label == "UUID").expect("UUID");
+    assert_eq!(uuid.description.as_deref(), Some("java.util"));
+    assert_eq!(uuid.additional.len(), 1);
+    assert_eq!(uuid.additional[0].1, "\nimport java.util.UUID");
+
+    // Named arguments.
+    let c = fx.complete(&format!("{HEADER}fun f() = User(na$0"));
+    assert_eq!(c.items[0].label, "name =");
+    assert_eq!(c.items[0].insert.as_deref(), Some("name = "));
+
+    // Import paths.
+    has_all(&fx.labels("package app\n\nimport app.mo$0\n"), &["model"]);
+    has_all(&fx.labels("package app\n\nimport app.model.$0\n"), &["User", "Repository", "shout"]);
+    has_all(&fx.labels("package app\n\nimport kotlin.coll$0\n"), &["collections"]);
+}
+
+#[test]
+fn completes_overrides_and_keywords() {
+    let Some(mut fx) = fixture() else { return };
+    let c = fx.complete(&format!("{HEADER}class Repo : Repository<User> {{\n    $0\n}}\n"));
+    let all = c.items.iter().find(|i| i.label == "override fun all(): List<User>").expect("override item");
+    assert_eq!(all.insert.as_deref(), Some("override fun all(): List<User> {\n        TODO(\"Not yet implemented\")\n    }"));
+    has_all(&c.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>(), &["fun", "val", "override fun toString(): String"]);
+    // `override` already typed: the item replaces it.
+    let c = fx.complete(&format!("{HEADER}class Repo : Repository<User> {{\n    override a$0\n}}\n"));
+    let all = c.items.iter().find(|i| i.label.starts_with("override fun all")).expect("override item");
+    let range = all.range.unwrap();
+    let text = format!("{HEADER}class Repo : Repository<User> {{\n    override a\n}}\n");
+    assert_eq!(&text[usize::from(range.start())..usize::from(range.end())], "override a");
+    // Already implemented members are not offered again.
+    let labels = fx.labels(&format!("{HEADER}class Repo : Repository<User> {{\n    override fun all() = emptyList<User>()\n    $0\n}}\n"));
+    assert!(!labels.iter().any(|l| l.starts_with("override fun all")), "{labels:?}");
+    // Nothing inside strings and declaration names.
+    let (path, offset) = fx.open(&format!("{HEADER}val s = \"ab$0c\"\n"));
+    assert!(completion::complete(&fx.host.snapshot(), &path, offset, completion::Options::default()).is_none());
+}
+
+#[test]
+fn completion_matching() {
+    use completion::matches;
+    for (p, n) in [("", "x"), ("fi", "first"), ("fBN", "findByName"), ("fbn", "findByName"), ("Jo", "Join"), ("aL", "arrayListOf"), ("str", "String"), ("ut8", "utf8")] {
+        assert!(matches(p, n), "{p} should match {n}");
+    }
+    for (p, n) in [("Jo", "JvmOverloads"), ("Jo", "JsonColumnMarker"), ("x", "first"), ("firstx", "first"), ("ft", "first")] {
+        assert!(!matches(p, n), "{p} should not match {n}");
+    }
+}

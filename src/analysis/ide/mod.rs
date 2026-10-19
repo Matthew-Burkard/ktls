@@ -1,5 +1,6 @@
-//! IDE features built on the analysis: definition, hover, references and rename.
+//! IDE features built on the analysis: completion, definition, hover, references and rename.
 
+pub mod completion;
 pub mod infer;
 pub mod library;
 pub mod rename;

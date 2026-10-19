@@ -30,7 +30,7 @@ impl Client {
                 "workspaceEdit": { "documentChanges": true, "resourceOperations": ["create", "rename", "delete"] },
             },
             "general": { "positionEncodings": ["utf-16"] },
-            "textDocument": { "rename": { "prepareSupport": true } },
+            "textDocument": { "rename": { "prepareSupport": true }, "completion": { "completionItem": { "snippetSupport": true } } },
         });
         if pull {
             caps["textDocument"]["diagnostic"] = json!({ "dynamicRegistration": false });
@@ -339,5 +339,31 @@ fn rename_across_files() {
     });
     assert_eq!(err.code, lsp_server::ErrorCode::RequestFailed as i32);
     assert!(err.message.contains("library"), "{}", err.message);
+    c.shutdown();
+}
+
+#[test]
+fn completion_session() {
+    let Some(stdlib) = stdlib() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let (project, options) = maven_fixture(tmp.path(), &stdlib);
+    let mut c = Client::start(&project, options, false);
+    c.wait_for_import();
+    let app = project.join("src/main/kotlin/demo/App.kt");
+    let text = "package demo\n\nfun f(u: User) {\n    u.na\n    val id: UUI\n}\n";
+    write(&app, text);
+    let uri = path_to_uri(&app).as_str().to_string();
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": text } }));
+
+    let r = c.request("textDocument/completion", json!({ "textDocument": { "uri": uri }, "position": { "line": 3, "character": 8 } }));
+    let name = r["items"].as_array().unwrap().iter().find(|i| i["label"] == "name").expect("name");
+    assert_eq!(name["kind"], 10); // Property
+    assert_eq!(name["labelDetails"]["description"], "String");
+    assert_eq!(name["textEdit"]["range"], json!({ "start": { "line": 3, "character": 6 }, "end": { "line": 3, "character": 8 } }));
+
+    let r = c.request("textDocument/completion", json!({ "textDocument": { "uri": uri }, "position": { "line": 4, "character": 15 } }));
+    let uuid = r["items"].as_array().unwrap().iter().find(|i| i["label"] == "UUID").expect("UUID");
+    assert_eq!(uuid["additionalTextEdits"][0]["newText"], "\n\nimport java.util.UUID");
+    assert_eq!(uuid["additionalTextEdits"][0]["range"]["start"], json!({ "line": 0, "character": 12 }));
     c.shutdown();
 }

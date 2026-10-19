@@ -147,6 +147,84 @@ impl<'s> Resolver<'s> {
             || self.classpath.has_package(pkg)
     }
 
+    /// Every top-level declaration of `pkg` visible here: classifiers as `(simple name, FQ)`
+    /// (library classes are not parsed) and callables (functions, properties).
+    pub fn package_contents(&self, pkg: &str) -> (Vec<(String, String)>, Vec<Symbol>) {
+        let fq = |n: &str| if pkg.is_empty() { n.to_string() } else { format!("{pkg}.{n}") };
+        let mut classes: Vec<(String, String)> = self.classpath.package_classes(pkg).into_iter().map(|n| (n.clone(), fq(&n))).collect();
+        let mut callables: Vec<Symbol> = Vec::new();
+        for m in self.classpath.package_members(pkg).iter() {
+            if m.kind == SymbolKind::TypeAlias {
+                classes.push((m.name.clone(), m.fq_name.clone()));
+            } else {
+                callables.push(m.clone());
+            }
+        }
+        let mut add = |d: &super::source::SourceDecl| {
+            if d.symbol.kind.is_classifier() {
+                classes.push((d.symbol.name.clone(), d.symbol.fq_name.clone()));
+            } else if d.symbol.kind.is_callable() {
+                callables.push(d.symbol.clone());
+            }
+        };
+        // The current file's own (fresher) summary instead of its indexed one.
+        let visible = self.visible_fn();
+        for loc in self.snap.index.top_level(pkg, &visible) {
+            if *loc.path == *self.path.as_path() {
+                continue;
+            }
+            if let Some(f) = self.snap.file(&loc.path)
+                && let Some(d) = loc.resolve(&f.summary()) {
+                    add(d);
+                }
+        }
+        if let Some(s) = self.summary().filter(|s| s.package == pkg) {
+            s.decls.iter().for_each(&mut add);
+        }
+        classes.sort();
+        classes.dedup();
+        (classes, callables)
+    }
+
+    /// Direct subpackages of `pkg` (sources and libraries).
+    pub fn subpackages(&self, pkg: &str) -> Vec<String> {
+        let visible = self.visible_fn();
+        let mut out = self.classpath.subpackages(pkg);
+        out.extend(self.snap.index.subpackages(pkg, &visible));
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Project classifiers visible here whose simple name satisfies `keep`: `(simple, FQ)`.
+    pub fn source_classifiers_where(&self, keep: &dyn Fn(&str) -> bool) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (fq, locs) in self.snap.index.all_classifiers() {
+            let simple = fq.rsplit('.').next().unwrap_or(fq);
+            if keep(simple) && locs.iter().any(|l| self.is_visible(l.ctx) || *l.path == *self.path.as_path()) {
+                out.push((simple.to_string(), fq.clone()));
+            }
+        }
+        out
+    }
+
+    /// Project top-level callables visible here whose name satisfies `keep`.
+    pub fn source_top_level_where(&self, keep: &dyn Fn(&str) -> bool) -> Vec<Symbol> {
+        let mut out = Vec::new();
+        for (_, locs) in self.snap.index.all_top_level() {
+            for l in locs.iter().filter(|l| self.is_visible(l.ctx)) {
+                if let Some(f) = self.snap.file(&l.path)
+                    && let Some(d) = l.resolve(&f.summary())
+                    && d.symbol.kind.is_callable()
+                    && keep(&d.symbol.name)
+                {
+                    out.push(d.symbol.clone());
+                }
+            }
+        }
+        out
+    }
+
     /// Top-level callables named `name` in `pkg` (sources + libraries).
     pub fn top_level_callables(&self, pkg: &str, name: &str) -> Vec<Symbol> {
         let mut out: Vec<Symbol> = self.classpath.package_members(pkg).iter().filter(|m| m.name == name && m.kind != SymbolKind::TypeAlias).cloned().collect();

@@ -131,28 +131,28 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 
 ## 4. Completion (`textDocument/completion`, `completionItem/resolve`)
 
-- [ ] [P0] Scope members: locals, parameters, members, top-levels, imported symbols
-- [ ] [P0] Member completion after `.` and `?.` (incl. extensions applicable to receiver type)
-- [ ] [P0] Keyword completion (context-aware: `override`, `return@label`, `when` branches…)
-- [ ] [P0] Auto-import: unimported classes, top-level functions, extensions (adds `import` via `additionalTextEdits`)
-- [ ] [P1] Smart/type-aware ranking (expected type first, recently used, same module)
-- [ ] [P1] Named argument completion (`param =`)
-- [ ] [P1] Override/implement member completion (generates full signature + body)
+- [x] [P0] Scope members: locals, parameters, members, top-levels, imported symbols
+- [x] [P0] Member completion after `.` and `?.` (incl. extensions applicable to receiver type; Java getters as properties)
+- [~] [P0] Keyword completion (context-aware: `override`, `return@label`, `when` branches…) — *partial: statement, expression, top-level and class-body keyword sets; no labels*
+- [~] [P0] Auto-import: unimported classes, top-level functions, extensions (adds `import` via `additionalTextEdits`) — *partial: classes (libraries + project) and project top-level functions; not library functions/extensions*
+- [~] [P1] Smart/type-aware ranking (expected type first, recently used, same module) — *partial: locals → members → extensions → package/imports → defaults → keywords → imports needed; case-matching first; no expected type*
+- [x] [P1] Named argument completion (`param =`)
+- [x] [P1] Override/implement member completion (generates full signature + body)
 - [ ] [P1] `when` exhaustive branch completion (sealed/enum)
 - [ ] [P1] Snippets / postfix templates: `.if`, `.not`, `.for`, `.val`, `.var`, `.return`, `.let`, `.notnull`, `.null`, `.try`, `.par`, `.sout`, `.when`, `.arg`, `.spread`
 - [ ] [P1] Live templates: `main`, `fun0/1/2`, `sout`, `iter`, `ifn`, `inn`, `void`, `closure`, `object`, `interface`, `exfun`, `exval`
 - [ ] [P1] Lambda parameter completion (`{ a, b -> }` from expected function type)
-- [ ] [P1] Completion in string templates (`$` / `${`)
+- [x] [P1] Completion in string templates (`$` / `${`)
 - [ ] [P1] Completion in KDoc (`[Symbol]`, tags)
-- [ ] [P1] Annotation completion (incl. use-site targets)
-- [ ] [P1] Package / import statement completion
-- [ ] [P2] Static member completion through companion without qualifier, enum entry completion without class prefix
-- [ ] [P2] Callable references (`::fn`, `Type::member`)
+- [~] [P1] Annotation completion (incl. use-site targets) — *partial: annotation classes, no use-site targets*
+- [x] [P1] Package / import statement completion
+- [~] [P2] Static member completion through companion without qualifier, enum entry completion without class prefix — *partial: companion/nested members of enclosing classes*
+- [x] [P2] Callable references (`::fn`, `Type::member`)
 - [ ] [P2] Variable name suggestions from type (`val user: User` → `user`)
 - [ ] [P2] Chained completion (`users.first().` → suggests via expected-type chains)
 - [ ] [P2] Gradle Kotlin DSL completion (dependencies, plugin IDs, task names)
-- [ ] [P2] Commit characters, `insertReplace` ranges, label details, deprecation strike-through
-- [ ] [P2] Snippet tab-stops for function arguments
+- [~] [P2] Commit characters, `insertReplace` ranges, label details, deprecation strike-through — *partial: label details, deprecation tags*
+- [~] [P2] Snippet tab-stops for function arguments — *partial: cursor inside `()` / trailing lambda `{ }`*
 
 ---
 

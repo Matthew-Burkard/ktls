@@ -102,6 +102,12 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
             lsp_types::OneOf::Left(true)
         }),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+        completion_provider: Some(lsp_types::CompletionOptions {
+            trigger_characters: Some(vec![".".into(), ":".into(), "@".into()]),
+            resolve_provider: Some(false),
+            completion_item: Some(lsp_types::CompletionOptionsCompletionItem { label_details_support: Some(true) }),
+            ..Default::default()
+        }),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(lsp_types::CodeActionOptions {
             code_action_kinds: Some(vec![
                 lsp_types::CodeActionKind::QUICKFIX,
@@ -295,6 +301,23 @@ impl Server {
                 self.spawn(id, move |cx| {
                     let path = path.ok_or(Cancelled)?;
                     Ok(serde_json::to_value(handlers::references(cx, &path, tdp.position, include)?).unwrap())
+                });
+            }
+            Completion::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::CompletionParams>(Completion::METHOD) else { return };
+                let tdp = params.text_document_position;
+                let path = self.path_of(&tdp.text_document.uri);
+                let snippets = self
+                    .caps
+                    .text_document
+                    .as_ref()
+                    .and_then(|t| t.completion.as_ref())
+                    .and_then(|c| c.completion_item.as_ref())
+                    .and_then(|i| i.snippet_support)
+                    .unwrap_or(false);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::completion(cx, &path, tdp.position, snippets)?).unwrap())
                 });
             }
             PrepareRenameRequest::METHOD => {

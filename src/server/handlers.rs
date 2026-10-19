@@ -297,6 +297,60 @@ pub fn references(cx: &Ctx, path: &Path, pos: lsp_types::Position, include_decla
     Ok(out)
 }
 
+pub fn completion(cx: &Ctx, path: &Path, pos: lsp_types::Position, snippets: bool) -> Result<Option<lsp_types::CompletionResponse>> {
+    use crate::analysis::ide::completion::{self, ItemKind};
+    use lsp_types::{CompletionItem, CompletionItemKind as K, CompletionItemLabelDetails, CompletionTextEdit, InsertTextFormat, TextEdit};
+    let Some((file, offset)) = offset_of(cx, path, pos) else { return Ok(None) };
+    let Some(c) = completion::complete(cx.snap, path, offset, completion::Options { snippets }) else { return Ok(None) };
+    cx.check()?;
+    let text = &file.text;
+    let index = LineIndex::new(text);
+    let range = index.range(text, c.range, cx.enc);
+    let items = c
+        .items
+        .into_iter()
+        .enumerate()
+        .map(|(i, it)| {
+            let kind = match it.kind {
+                ItemKind::Variable => K::VARIABLE,
+                ItemKind::Function => K::FUNCTION,
+                ItemKind::Method => K::METHOD,
+                ItemKind::Property => K::PROPERTY,
+                ItemKind::Field => K::FIELD,
+                ItemKind::Constructor => K::CONSTRUCTOR,
+                ItemKind::Class => K::CLASS,
+                ItemKind::Interface => K::INTERFACE,
+                ItemKind::Object => K::MODULE,
+                ItemKind::Enum => K::ENUM,
+                ItemKind::EnumMember => K::ENUM_MEMBER,
+                ItemKind::TypeParameter => K::TYPE_PARAMETER,
+                ItemKind::Keyword => K::KEYWORD,
+                ItemKind::Package => K::MODULE,
+                ItemKind::Snippet => K::SNIPPET,
+            };
+            let edit_range = it.range.map(|r| index.range(text, r, cx.enc)).unwrap_or(range);
+            CompletionItem {
+                label: it.label.clone(),
+                label_details: (it.label_detail.is_some() || it.description.is_some())
+                    .then(|| CompletionItemLabelDetails { detail: it.label_detail.clone(), description: it.description.clone() }),
+                kind: Some(kind),
+                detail: it.detail,
+                documentation: it.doc.map(|d| lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent { kind: lsp_types::MarkupKind::Markdown, value: d })),
+                tags: it.deprecated.then(|| vec![lsp_types::CompletionItemTag::DEPRECATED]),
+                // Our order: rank, then name; the index keeps it stable.
+                sort_text: Some(format!("{}{:05}", it.rank, i)),
+                filter_text: it.filter,
+                insert_text_format: Some(if it.snippet { InsertTextFormat::SNIPPET } else { InsertTextFormat::PLAIN_TEXT }),
+                text_edit: Some(CompletionTextEdit::Edit(TextEdit { range: edit_range, new_text: it.insert.unwrap_or(it.label) })),
+                additional_text_edits: (!it.additional.is_empty())
+                    .then(|| it.additional.iter().map(|(r, t)| TextEdit { range: index.range(text, *r, cx.enc), new_text: t.clone() }).collect()),
+                ..Default::default()
+            }
+        })
+        .collect();
+    Ok(Some(lsp_types::CompletionResponse::List(lsp_types::CompletionList { is_incomplete: c.incomplete, items })))
+}
+
 pub fn prepare_rename(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> std::result::Result<Option<lsp_types::PrepareRenameResponse>, RequestError> {
     let Some((file, offset)) = offset_of(cx, path, pos) else { return Ok(None) };
     let (range, placeholder) = crate::analysis::ide::rename::prepare_rename(cx.snap, path, offset).map_err(RequestError::Failed)?;

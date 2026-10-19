@@ -442,6 +442,47 @@ impl ClasspathIndex {
         self.find_class(&format!("{}.{name}", outer.symbol.fq_name))
     }
 
+    /// Direct subpackages of `pkg` (`""` for the root), as simple names.
+    pub fn subpackages(&self, pkg: &str) -> Vec<String> {
+        let prefix = if pkg.is_empty() { String::new() } else { format!("{pkg}.") };
+        let mut out: Vec<String> = self
+            .packages
+            .keys()
+            .map(|k| &**k)
+            .chain(self.builtin_packages.iter().map(String::as_str))
+            .filter_map(|p| p.strip_prefix(prefix.as_str()))
+            .filter(|rest| !rest.is_empty())
+            .map(|rest| rest.split('.').next().unwrap().to_string())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// FQ names of top-level classes whose simple name satisfies `keep` (for auto-import).
+    /// Kotlin file facades (`FooKt`) are skipped.
+    pub fn top_level_classes_where(&self, keep: &dyn Fn(&str) -> bool) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for (pkg, classes) in &self.packages {
+            for internal in classes {
+                let simple = internal.rsplit('/').next().unwrap_or(internal);
+                if simple.contains('$') || is_anonymous(internal) || simple.ends_with("Kt") || simple.contains("Kt__") || !keep(simple) {
+                    continue;
+                }
+                out.push(if pkg.is_empty() { simple.to_string() } else { format!("{pkg}.{simple}") });
+            }
+        }
+        for fq in self.builtin_classes.keys() {
+            let simple = fq.rsplit('.').next().unwrap_or(fq);
+            if keep(simple) && fq.matches('.').count() >= 1 && simple.chars().next().is_some_and(char::is_uppercase) {
+                out.push(fq.clone());
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// All indexed top-level class FQ names (for workspace symbols / auto-import).
     pub fn all_classes(&self) -> impl Iterator<Item = String> + '_ {
         self.packages

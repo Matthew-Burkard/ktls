@@ -95,6 +95,22 @@ impl SourceIndex {
         self.packages.get(pkg).is_some_and(|ctxs| ctxs.iter().any(|c| visible(*c)))
     }
 
+    /// Direct subpackages of `pkg` visible through `visible`, as simple names.
+    pub fn subpackages(&self, pkg: &str, visible: &dyn Fn(Option<FileContext>) -> bool) -> Vec<String> {
+        let prefix = if pkg.is_empty() { String::new() } else { format!("{pkg}.") };
+        let mut out: Vec<String> = self
+            .packages
+            .iter()
+            .filter(|(_, ctxs)| ctxs.iter().any(|c| visible(*c)))
+            .filter_map(|(p, _)| p.strip_prefix(prefix.as_str()))
+            .filter(|rest| !rest.is_empty())
+            .map(|rest| rest.split('.').next().unwrap().to_string())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// All classifiers (for workspace symbol search).
     pub fn all_classifiers(&self) -> impl Iterator<Item = (&String, &Vec<DeclLoc>)> {
         self.classifiers.iter()
