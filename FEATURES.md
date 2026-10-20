@@ -47,7 +47,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [~] [P1] Generics: variance (declaration & use-site), star projections, reified, type bounds, definitely-non-null `T & Any` — *partial: represented in symbols; not yet checked*
 - [ ] [P1] Delegation (`by lazy`, `by Delegates.observable`, class delegation, `provideDelegate`)
 - [ ] [P1] Coroutines: `suspend` checking, suspend lambdas, `restrictsSuspension`
-- [ ] [P1] Sealed / enum exhaustiveness
+- [x] [P1] Sealed / enum exhaustiveness
 - [ ] [P1] Inline / value classes, `@JvmInline`
 - [ ] [P2] Kotlin compiler plugins semantics: `kotlinx.serialization`, `all-open`, `no-arg`, `kapt`/KSP-generated symbols, Compose, Parcelize, Power-assert
 
@@ -72,10 +72,10 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 
 - [~] [P0] `textDocument/definition` — incl. into library sources/decompiled stubs, Java sources, `expect`↔`actual` — *partial: sources (local or downloaded `-sources.jar`) or generated stubs; no `expect`↔`actual` jumps*
 - [ ] [P1] `textDocument/declaration`
-- [ ] [P1] `textDocument/typeDefinition`
-- [ ] [P1] `textDocument/implementation` — overrides, subclasses, `actual` declarations, SAM implementations
+- [x] [P1] `textDocument/typeDefinition`
+- [~] [P1] `textDocument/implementation` — overrides, subclasses, `actual` declarations, SAM implementations — *partial: project subclasses (transitive) and overriding members; not `actual` declarations, anonymous objects or SAM lambdas*
 - [~] [P0] `textDocument/references` — incl. operator conventions (`plus`, `get`, `invoke`, `component1`), property accessors, delegated properties, KDoc links, Java usages — *partial: name references in Kotlin sources (incl. imports, types, constructor calls, the whole override family incl. `super` calls and anonymous objects, and operator-convention call sites: arithmetic/compound assignment, unary, `++`/`--`, ranges, `in`/`!in`, indexing, `==`, comparisons, `invoke`, destructuring `componentN`, `for` iterators, `by` delegates); not KDoc links or Java files*
-- [ ] [P1] `textDocument/documentHighlight` — read vs write occurrences, exit points (`return`), loop `break` targets
+- [~] [P1] `textDocument/documentHighlight` — read vs write occurrences, exit points (`return`), loop `break` targets — *partial: read/write occurrences (incl. the override family); no exit points or loop targets*
 - [x] [P0] `textDocument/documentSymbol` — hierarchical outline (classes, objects, functions, properties, typealiases, enum entries)
 - [~] [P0] `workspace/symbol` — fuzzy/camel-hump search across project + libraries — *partial: project sources only*
 - [ ] [P2] `workspaceSymbol/resolve`
@@ -100,22 +100,22 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P2] Source library / module of the symbol
 
 ### 3.2 Signature help
-- [ ] [P0] `textDocument/signatureHelp` — active parameter, overloads, named arguments, trailing lambda awareness, vararg
+- [~] [P0] `textDocument/signatureHelp` — active parameter, overloads, named arguments, trailing lambda awareness, vararg — *partial: calls, constructors, supertype/annotation/`this(…)` calls and function-typed values; overloads ranked by the arguments typed so far; KDoc summary and `@param` docs; not inside trailing lambdas*
 - [ ] [P1] Generic type parameters shown in instantiated form
 
 ### 3.3 Inlay hints (`textDocument/inlayHint`, `inlayHint/resolve`)
-- [ ] [P1] Local variable / property inferred types
-- [ ] [P1] Parameter names at call sites (configurable: literals only, all, off)
-- [ ] [P1] Lambda implicit `it` / `this` receiver type and return value hints
+- [x] [P1] Local variable / property inferred types (also loop variables and destructuring; hidden for literals, constructor calls and casts)
+- [x] [P1] Parameter names at call sites (configurable: literals only, all, off)
+- [~] [P1] Lambda implicit `it` / `this` receiver type and return value hints — *partial: `it` and untyped lambda parameters*
 - [ ] [P1] Chained call (fluent) intermediate types
-- [ ] [P2] Function return type hints for expression bodies
+- [x] [P2] Function return type hints for expression bodies
 - [ ] [P2] Ranges (`0 ≤ i < 10` for `0 until 10`)
 - [ ] [P2] Suspend call markers, implicit receiver hints, value-parameter hints for `Function` types
 
 ### 3.4 Semantic tokens (`textDocument/semanticTokens/full`, `/delta`, `/range`)
-- [ ] [P0] Token types: namespace, class, interface, enum, enumMember, typeParameter, function, method, property, parameter, variable, keyword, modifier, annotation, string, number, comment, operator, label
-- [ ] [P1] Modifiers: declaration, readonly (`val`), mutable (`var`), static/companion, deprecated, abstract, suspend, extension, backing field, smart-cast, documentation
-- [ ] [P1] Soft keywords highlighted contextually (`data`, `value`, `sealed`, `by`, `get`, `set`…)
+- [x] [P0] Token types: namespace, class, interface, enum, enumMember, typeParameter, function, method, property, parameter, variable, keyword, modifier, annotation, string, number, comment, operator, label
+- [~] [P1] Modifiers: declaration, readonly (`val`), mutable (`var`), static/companion, deprecated, abstract, suspend, extension, backing field, smart-cast, documentation — *partial: all but backing field and smart-cast; plus `defaultLibrary` for library symbols*
+- [x] [P1] Soft keywords highlighted contextually (`data`, `value`, `sealed`, `by`, `get`, `set`…)
 - [ ] [P2] String template injections, regex/SQL/JSON language injection highlighting
 
 ### 3.5 Other display
@@ -187,7 +187,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P2] Compiler plugin diagnostics (serialization: `SERIALIZER_NOT_FOUND`, Compose: `COMPOSABLE_INVOCATION`…)
 
 ### 5.2 Compiler warnings
-- [~] [P0] `UNUSED_VARIABLE`, `UNUSED_PARAMETER`, `UNUSED_EXPRESSION`, `UNUSED_VALUE`, `ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE` (tag `Unnecessary`) — *partial: `UNUSED_VARIABLE`, `UNUSED_PARAMETER` (private and local functions), as lint rules*
+- [~] [P0] `UNUSED_VARIABLE`, `UNUSED_PARAMETER`, `UNUSED_EXPRESSION`, `UNUSED_VALUE`, `ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE` (tag `Unnecessary`) — *partial: `UNUSED_VARIABLE`, `UNUSED_PARAMETER` (functions and constructors whose signature is not fixed by an override, annotation, operator or function reference; "Remove parameter" fix updates call sites of private/local functions), `UNUSED_ANONYMOUS_PARAMETER` (rename to `_`), as lint rules*
 - [x] [P0] `UNNECESSARY_SAFE_CALL`, `UNNECESSARY_NOT_NULL_ASSERTION`, `USELESS_ELVIS`, `SENSELESS_COMPARISON` (receivers with declared non-null types)
 - [x] [P0] `DEPRECATION` (tag `Deprecated`)
 - [ ] [P1] `USELESS_CAST`, `USELESS_IS_CHECK`, `CAST_NEVER_SUCCEEDS`, `UNCHECKED_CAST`
@@ -319,13 +319,13 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`, `refactor.rewrite`, `source`, `source.organizeImports`, `source.fixAll`.
 
 ### 6.1 Quick fixes (bound to diagnostics)
-- [ ] [P0] **Import** unresolved symbol (with chooser when ambiguous; class, function, extension, operator, delegate accessor)
+- [~] [P0] **Import** unresolved symbol (with chooser when ambiguous; class, function, extension, operator, delegate accessor) — *partial: classes, top-level functions/properties and extensions applicable to the receiver, from the project and libraries; not operators or delegate accessors*
 - [ ] [P0] **Add `?.`** / **add `!!`** / **surround with null check** / **add elvis** for unsafe calls
 - [ ] [P0] **Change type** of variable/parameter/return to match
 - [ ] [P0] **Add explicit cast** (`as T`) / **change to safe cast** (`as?`)
-- [ ] [P0] **Implement members** / **make class abstract**
+- [~] [P0] **Implement members** / **make class abstract** — *partial: implement members*
 - [ ] [P0] **Add `override` modifier**, **remove `override`**, **make super member `open`**
-- [ ] [P0] **Add missing `when` branches** / **add `else` branch**
+- [x] [P0] **Add missing `when` branches** / **add `else` branch**
 - [~] [P0] **Remove unused** variable/parameter/import/declaration — *partial: variable, import, private/local declaration*
 - [ ] [P0] **Change `val` to `var`**
 - [ ] [P0] **Initialize property** / **make `lateinit`** / **make `abstract`** / **move to constructor**
@@ -356,7 +356,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P2] **Upgrade language/API version** / **enable language feature** in build file
 
 ### 6.2 Source actions
-- [ ] [P0] `source.organizeImports` — remove unused, sort per code style, collapse to `*` per threshold, handle aliases
+- [~] [P0] `source.organizeImports` — remove unused, sort per code style, collapse to `*` per threshold, handle aliases — *partial: removes unused/duplicate imports and sorts by `.editorconfig` `ij_kotlin_imports_layout` (default IntelliJ layout); no `*` collapsing*
 - [~] [P1] `source.fixAll` — apply all safe fixes — *partial: unused and redundant code*
 - [ ] [P1] **Generate**: `equals()`/`hashCode()`, `toString()`, secondary constructor, KDoc stub, test class/method, `serialVersionUID`
 - [ ] [P1] **Implement members…** / **Override members…** (with selection)

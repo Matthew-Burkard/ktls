@@ -171,7 +171,8 @@ pub fn file_diagnostics(cx: &Ctx, path: &Path) -> Result<(Vec<lsp_types::Diagnos
 }
 
 /// Quick fixes and suppressions for lint findings in `range`, plus "fix all" for the file.
-pub fn code_actions(cx: &Ctx, path: &Path, range: lsp_types::Range, only: Option<&[lsp_types::CodeActionKind]>) -> Result<Vec<lsp_types::CodeActionOrCommand>> {
+pub fn code_actions(cx: &Ctx, path: &Path, range: lsp_types::Range, context: &lsp_types::CodeActionContext) -> Result<Vec<lsp_types::CodeActionOrCommand>> {
+    let only = context.only.as_deref();
     use crate::analysis::lints::{self, Category, Fix, Level};
     use lsp_types::{CodeAction, CodeActionKind, CodeActionOrCommand, TextEdit, WorkspaceEdit};
     let Some(file) = cx.snap.file(path) else { return Ok(Vec::new()) };
@@ -203,6 +204,18 @@ pub fn code_actions(cx: &Ctx, path: &Path, range: lsp_types::Range, only: Option
     };
     let mut out = Vec::new();
     if wants(&CodeActionKind::QUICKFIX) {
+        // Imports for unresolved names; attached to the client's matching diagnostic.
+        let fixes = crate::analysis::ide::imports::import_fixes(cx.snap, path, wanted);
+        cx.check()?;
+        let single = fixes.len() == 1;
+        for f in fixes {
+            let diag = context.diagnostics.iter().find(|d| {
+                matches!(&d.code, Some(lsp_types::NumberOrString::String(c)) if c == "UNRESOLVED_REFERENCE")
+                    && crate::syntax::TextRange::new(index.offset(text, d.range.start, cx.enc), index.offset(text, d.range.end, cx.enc)).intersect(f.range).is_some()
+            });
+            let fix = Fix::replace(format!("Import '{}'", f.fq), f.edit.0, f.edit.1);
+            out.push(action(&fix.title, CodeActionKind::QUICKFIX, diag.cloned(), &fix, single));
+        }
         let root = file.parse().syntax();
         for l in found.iter().filter(|l| l.range.intersect(wanted).is_some() && l.level != Level::Action) {
             let diag = to_proto::diagnostic(text, &index, &l.diagnostic(), cx.enc);
@@ -221,6 +234,11 @@ pub fn code_actions(cx: &Ctx, path: &Path, range: lsp_types::Range, only: Option
                 out.push(action(&fix.title, CodeActionKind::REFACTOR_REWRITE, None, fix, false));
             }
         }
+    }
+    if wants(&CodeActionKind::SOURCE_ORGANIZE_IMPORTS)
+        && let Some((range, new_text)) = crate::analysis::ide::imports::organize_imports(cx.snap, path)
+    {
+        out.push(action("Organize imports", CodeActionKind::SOURCE_ORGANIZE_IMPORTS, None, &Fix::replace("Organize imports", range, new_text), false));
     }
     // Fix all unused/redundant code at once (non-overlapping fixes only).
     if wants(&CodeActionKind::SOURCE_FIX_ALL) {
@@ -263,6 +281,26 @@ pub fn definition(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Vec
     let offline = cx.snap.workspace.offline;
     let targets = crate::analysis::ide::definition(cx.snap, path, offset, !offline);
     cx.check()?;
+    Ok(locations(cx, targets))
+}
+
+pub fn implementation(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Vec<Location>> {
+    let Some((_, offset)) = offset_of(cx, path, pos) else { return Ok(Vec::new()) };
+    let cancelled = || cx.cancelled.load(Ordering::Relaxed);
+    let targets = crate::analysis::ide::hierarchy::implementations(cx.snap, path, offset, &cancelled);
+    cx.check()?;
+    Ok(locations(cx, targets))
+}
+
+pub fn type_definition(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Vec<Location>> {
+    let Some((_, offset)) = offset_of(cx, path, pos) else { return Ok(Vec::new()) };
+    let targets = crate::analysis::ide::hierarchy::type_definition(cx.snap, path, offset);
+    cx.check()?;
+    Ok(locations(cx, targets))
+}
+
+/// LSP locations of targets, which may be extracted library sources outside the snapshot.
+fn locations(cx: &Ctx, targets: Vec<crate::analysis::ide::NavTarget>) -> Vec<Location> {
     let mut out = Vec::new();
     for t in targets {
         // Targets may be extracted library sources that are not part of the snapshot.
@@ -276,7 +314,7 @@ pub fn definition(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Vec
         let index = LineIndex::new(&text);
         out.push(Location { uri: path_to_uri(&t.path), range: index.range(&text, t.range, cx.enc) });
     }
-    Ok(out)
+    out
 }
 
 pub fn references(cx: &Ctx, path: &Path, pos: lsp_types::Position, include_declaration: bool) -> Result<Vec<Location>> {
@@ -414,6 +452,110 @@ pub fn hover(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Option<l
         contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent { kind: lsp_types::MarkupKind::Markdown, value: h.markdown }),
         range: Some(index.range(&file.text, h.range, cx.enc)),
     }))
+}
+
+pub fn document_highlight(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Option<Vec<lsp_types::DocumentHighlight>>> {
+    use lsp_types::{DocumentHighlight, DocumentHighlightKind};
+    let Some((file, offset)) = offset_of(cx, path, pos) else { return Ok(None) };
+    let Some(found) = crate::analysis::ide::document_highlight(cx.snap, path, offset) else { return Ok(None) };
+    cx.check()?;
+    let index = LineIndex::new(&file.text);
+    Ok(Some(
+        found
+            .into_iter()
+            .map(|(r, write)| DocumentHighlight { range: index.range(&file.text, r, cx.enc), kind: Some(if write { DocumentHighlightKind::WRITE } else { DocumentHighlightKind::READ }) })
+            .collect(),
+    ))
+}
+
+pub fn inlay_hints(cx: &Ctx, path: &Path, range: lsp_types::Range, config: &crate::analysis::ide::inlay::InlayConfig) -> Result<Vec<lsp_types::InlayHint>> {
+    use crate::analysis::ide::inlay::{self, HintKind};
+    use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel};
+    let Some(file) = cx.snap.file(path) else { return Ok(Vec::new()) };
+    let text = &file.text;
+    let index = LineIndex::new(text);
+    let wanted = crate::syntax::TextRange::new(index.offset(text, range.start, cx.enc), index.offset(text, range.end, cx.enc));
+    let hints = inlay::inlay_hints(cx.snap, path, wanted, config);
+    cx.check()?;
+    Ok(hints
+        .into_iter()
+        .map(|h| InlayHint {
+            position: index.position(text, h.offset, cx.enc),
+            label: InlayHintLabel::String(h.label),
+            kind: Some(match h.kind {
+                HintKind::Type => InlayHintKind::TYPE,
+                HintKind::Parameter => InlayHintKind::PARAMETER,
+            }),
+            text_edits: None,
+            tooltip: None,
+            padding_left: None,
+            padding_right: Some(h.kind == HintKind::Parameter),
+            data: None,
+        })
+        .collect())
+}
+
+/// Semantic tokens of the file (or of `range`), in the LSP relative encoding. Tokens that
+/// span lines (block comments, raw strings) are split per line.
+pub fn semantic_tokens(cx: &Ctx, path: &Path, range: Option<lsp_types::Range>) -> Result<Vec<lsp_types::SemanticToken>> {
+    use crate::analysis::ide::semantic;
+    let Some(file) = cx.snap.file(path) else { return Ok(Vec::new()) };
+    let text = &file.text;
+    let index = LineIndex::new(text);
+    let wanted = range.map(|r| crate::syntax::TextRange::new(index.offset(text, r.start, cx.enc), index.offset(text, r.end, cx.enc)));
+    let tokens = semantic::semantic_tokens(cx.snap, path, wanted);
+    cx.check()?;
+    let len = |s: &str| match cx.enc {
+        super::line_index::Encoding::Utf8 => s.len() as u32,
+        super::line_index::Encoding::Utf16 => s.encode_utf16().count() as u32,
+    };
+    let mut out = Vec::with_capacity(tokens.len());
+    let (mut line, mut col) = (0u32, 0u32);
+    for t in tokens {
+        let mut start = usize::from(t.range.start());
+        for piece in text[start..usize::from(t.range.end())].split_inclusive('\n') {
+            let body = piece.trim_end_matches(['\n', '\r']);
+            if !body.is_empty() {
+                let pos = index.position(text, crate::syntax::TextSize::from(start as u32), cx.enc);
+                let delta_line = pos.line - line;
+                let delta_start = if delta_line == 0 { pos.character - col } else { pos.character };
+                out.push(lsp_types::SemanticToken { delta_line, delta_start, length: len(body), token_type: t.ty as u32, token_modifiers_bitset: t.modifiers });
+                (line, col) = (pos.line, pos.character);
+            }
+            start += piece.len();
+        }
+    }
+    Ok(out)
+}
+
+pub fn signature_help(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Option<lsp_types::SignatureHelp>> {
+    use lsp_types::{Documentation, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, SignatureInformation};
+    let Some((_, offset)) = offset_of(cx, path, pos) else { return Ok(None) };
+    let Some(h) = crate::analysis::ide::signature::signature_help(cx.snap, path, offset) else { return Ok(None) };
+    cx.check()?;
+    let md = |v: String| Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: v });
+    // Parameter labels are offsets into the label, in UTF-16 code units.
+    let utf16 = |s: &str| s.encode_utf16().count() as u32;
+    let signatures = h
+        .signatures
+        .into_iter()
+        .map(|s| SignatureInformation {
+            parameters: Some(
+                s.params
+                    .iter()
+                    .map(|(r, doc)| {
+                        let (start, end) = (usize::from(r.start()), usize::from(r.end()));
+                        let at = utf16(&s.label[..start]);
+                        ParameterInformation { label: ParameterLabel::LabelOffsets([at, at + utf16(&s.label[start..end])]), documentation: doc.clone().map(md) }
+                    })
+                    .collect(),
+            ),
+            documentation: s.doc.map(md),
+            active_parameter: s.active_param,
+            label: s.label,
+        })
+        .collect();
+    Ok(Some(lsp_types::SignatureHelp { signatures, active_signature: Some(h.active), active_parameter: None }))
 }
 
 /// JSON summary of the imported project model (for `kotlin.projectModel`).

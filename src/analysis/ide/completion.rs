@@ -759,7 +759,7 @@ fn strip_platform(s: &str) -> String {
 }
 
 /// Not offered for auto-import: JDK and library internals.
-fn importable(fq: &str) -> bool {
+pub(super) fn importable(fq: &str) -> bool {
     const HIDDEN: &[&str] = &["sun.", "jdk.", "com.sun.", "kotlin.jvm.internal.", "kotlin.internal.", "kotlin.coroutines.jvm.internal."];
     !HIDDEN.iter().any(|h| fq.starts_with(h)) && !fq.contains(".internal.") && fq.contains('.')
 }

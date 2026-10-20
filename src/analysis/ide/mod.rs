@@ -1,9 +1,15 @@
-//! IDE features built on the analysis: completion, definition, hover, references and rename.
+//! IDE features built on the analysis: completion, definition, hover, references, rename
+//! and signature help.
 
 pub mod completion;
+pub mod hierarchy;
+pub mod imports;
 pub mod infer;
+pub mod inlay;
 pub mod library;
 pub mod rename;
+pub mod semantic;
+pub mod signature;
 
 use std::path::{Path, PathBuf};
 
@@ -80,7 +86,7 @@ fn token_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
     }
 }
 
-const DECLARATIONS: &[SyntaxKind] = &[
+pub(super) const DECLARATIONS: &[SyntaxKind] = &[
     SyntaxKind::CLASS,
     SyntaxKind::OBJECT_DECLARATION,
     SyntaxKind::FUN,
@@ -93,7 +99,7 @@ const DECLARATIONS: &[SyntaxKind] = &[
 ];
 
 /// Resolve what the token at `offset` refers to.
-fn defs_at(e: &Engine, offset: TextSize) -> Option<(TextRange, Vec<Def>)> {
+pub(super) fn defs_at(e: &Engine, offset: TextSize) -> Option<(TextRange, Vec<Def>)> {
     let tok = token_at(&e.root, offset)?;
     defs_of_token(e, &tok)
 }
@@ -125,7 +131,7 @@ fn defs_of_token(e: &Engine, tok: &SyntaxToken) -> Option<(TextRange, Vec<Def>)>
     Some((range, defs))
 }
 
-fn type_segment(e: &Engine, seg: &SyntaxNode) -> Vec<Def> {
+pub(super) fn type_segment(e: &Engine, seg: &SyntaxNode) -> Vec<Def> {
     let Some(ut) = seg.parent() else { return Vec::new() };
     let segs: Vec<SyntaxNode> = ut.children().filter(|c| c.kind() == SyntaxKind::USER_TYPE_SEGMENT).collect();
     let Some(idx) = segs.iter().position(|s| s == seg) else { return Vec::new() };
@@ -169,7 +175,7 @@ fn local_class(at: &SyntaxNode, name: &str) -> Option<LocalDef> {
 }
 
 /// A segment of an `import` or `package` path.
-fn qualified_name_segment(e: &Engine, qn: &SyntaxNode, tok: &SyntaxToken) -> Vec<Def> {
+pub(super) fn qualified_name_segment(e: &Engine, qn: &SyntaxNode, tok: &SyntaxToken) -> Vec<Def> {
     let segs: Vec<SyntaxToken> = qn.children_with_tokens().filter_map(|t| t.into_token()).filter(|t| t.kind() == SyntaxKind::IDENT).collect();
     let Some(idx) = segs.iter().position(|t| t == tok) else { return Vec::new() };
     let path: Vec<String> = segs[..=idx].iter().map(ast::ident_text).collect();
@@ -186,7 +192,7 @@ fn qualified_name_segment(e: &Engine, qn: &SyntaxNode, tok: &SyntaxToken) -> Vec
 }
 
 /// The declaration whose name is `tok`.
-fn declaration_def(e: &Engine, decl: &SyntaxNode, tok: &SyntaxToken) -> Option<Def> {
+pub(super) fn declaration_def(e: &Engine, decl: &SyntaxNode, tok: &SyntaxToken) -> Option<Def> {
     // Indexed declarations carry full symbols.
     let summary = e.file.summary();
     fn walk(ds: &[super::source::SourceDecl], r: TextRange) -> Option<&Symbol> {
@@ -240,7 +246,7 @@ fn library_target(snap: &Snapshot, e: &Engine, sym: &Symbol, download: bool) -> 
     Some(NavTarget { path: t.path, range: t.range })
 }
 
-fn def_location(snap: &Snapshot, e: &Engine, d: &Def, download: bool) -> Option<NavTarget> {
+pub(super) fn def_location(snap: &Snapshot, e: &Engine, d: &Def, download: bool) -> Option<NavTarget> {
     match d {
         Def::Local(l) => Some(NavTarget { path: e.path.clone(), range: l.name_range }),
         Def::Package(_) => None,
@@ -406,6 +412,67 @@ pub fn references(snap: &Snapshot, path: &Path, offset: TextSize, include_declar
     out.sort_by(|a, b| a.path.cmp(&b.path).then(a.range.start().cmp(&b.range.start())));
     out.dedup();
     Some(out)
+}
+
+/// Occurrences of the declaration at `offset` in its file, each marked as a write
+/// (declaration, assignment target, `++`/`--` operand) or a read.
+pub fn document_highlight(snap: &Snapshot, path: &Path, offset: TextSize) -> Option<Vec<(TextRange, bool)>> {
+    let e = Engine::new(snap, path)?;
+    let tok = token_at(&e.root, offset).filter(|t| t.kind() == SyntaxKind::IDENT)?;
+    let (_, defs) = defs_of_token(&e, &tok)?;
+    let target = defs.into_iter().next()?;
+    let root = match &target {
+        Def::Symbol { sym, .. } => e.override_root(sym),
+        _ => None,
+    };
+    let name = ast::ident_text(&tok);
+    let mut out = Vec::new();
+    for t in e.root.descendants_with_tokens().filter_map(|el| el.into_token()) {
+        if t.kind() != SyntaxKind::IDENT || ast::ident_text(&t) != name {
+            continue;
+        }
+        let Some((range, defs)) = defs_of_token(&e, &t) else { continue };
+        let hit = defs.iter().any(|d| {
+            same_def(d, &target)
+                || match (d, &root) {
+                    (Def::Symbol { sym, .. }, Some((top, top_class))) => same_def(d, &Def::Symbol { sym: top.clone(), subst: Default::default() }) || e.overrides(sym, top, top_class),
+                    _ => false,
+                }
+        });
+        if hit {
+            out.push((range, is_write(&t)));
+        }
+    }
+    Some(out)
+}
+
+/// The token names a declaration or the target of an assignment or increment.
+fn is_write(tok: &SyntaxToken) -> bool {
+    let Some(parent) = tok.parent() else { return false };
+    if DECLARATIONS.contains(&parent.kind()) {
+        return true;
+    }
+    if parent.kind() != SyntaxKind::NAME_REF {
+        return false;
+    }
+    // `x = …`, `obj.x += …`, `x++`: the reference is (the selector of) the left operand.
+    let mut expr = parent;
+    while let Some(p) = expr.parent().filter(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR | SyntaxKind::PAREN_EXPR) && p.last_child().as_ref() == Some(&expr)) {
+        expr = p;
+    }
+    let Some(p) = expr.parent() else { return false };
+    match p.kind() {
+        SyntaxKind::BINARY_EXPR => {
+            p.first_child().as_ref() == Some(&expr)
+                && p.children_with_tokens().filter_map(|t| t.into_token()).any(|t| {
+                    matches!(t.kind(), SyntaxKind::EQ | SyntaxKind::PLUS_EQ | SyntaxKind::MINUS_EQ | SyntaxKind::STAR_EQ | SyntaxKind::SLASH_EQ | SyntaxKind::PERCENT_EQ)
+                })
+        }
+        SyntaxKind::PREFIX_EXPR | SyntaxKind::POSTFIX_EXPR => {
+            p.descendants_with_tokens().filter_map(|t| t.into_token()).any(|t| matches!(t.kind(), SyntaxKind::PLUS2 | SyntaxKind::MINUS2))
+        }
+        _ => false,
+    }
 }
 
 /// Token kinds that can invoke operator function `name`, and source lexemes to look for.

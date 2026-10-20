@@ -662,3 +662,267 @@ fn completion_matching() {
         assert!(!matches(p, n), "{p} should not match {n}");
     }
 }
+
+impl Fx {
+    /// Signature labels (active one marked `*`) and the active parameter's text.
+    fn signatures(&mut self, text: &str) -> (Vec<String>, Option<String>) {
+        let (path, offset) = self.open(text);
+        let snap = self.host.snapshot();
+        let Some(h) = signature::signature_help(&snap, &path, offset) else { return (Vec::new(), None) };
+        let active = &h.signatures[h.active as usize];
+        let param = active.active_param.map(|i| {
+            let r = active.params[i as usize].0;
+            active.label[usize::from(r.start())..usize::from(r.end())].to_string()
+        });
+        let labels = h.signatures.iter().enumerate().map(|(i, s)| format!("{}{}", if i == h.active as usize { "*" } else { "" }, s.label)).collect();
+        (labels, param)
+    }
+}
+
+#[test]
+fn signature_help() {
+    let Some(mut fx) = fixture() else { return };
+    let src = |body: &str| format!("{HEADER}fun run(u: User, xs: List<String>) {{\n{body}\n}}\n/** Adds.\n * @param a first\n * @param b second */\nfun add(a: Int, b: Int = 0): Int = a + b\nfun add(a: String): String = a\n");
+    let (labels, param) = fx.signatures(&src("    u.greet($0)"));
+    assert_eq!(labels, vec!["*greet(prefix: String): String"]);
+    assert_eq!(param.as_deref(), Some("prefix: String"));
+    // Overloads: the one fitting two arguments is active; second parameter.
+    let (labels, param) = fx.signatures(&src("    add(1, $0)"));
+    assert_eq!(labels[0], "*add(a: Int, b: Int = …): Int", "{labels:?}");
+    assert_eq!(labels.len(), 2);
+    assert_eq!(param.as_deref(), Some("b: Int = …"));
+    // Unclosed argument list, nested call: the innermost list around the cursor.
+    let (labels, param) = fx.signatures(&src("    add(add(\"x\"), $0\n"));
+    assert!(labels[0].starts_with("*add(a: Int"), "{labels:?}");
+    assert_eq!(param.as_deref(), Some("b: Int = …"));
+    let (labels, _) = fx.signatures(&src("    add(add(\"x$0\"), 1)"));
+    assert!(labels.iter().any(|l| l == "*add(a: String): String"), "{labels:?}");
+    // Named arguments map by name.
+    let (_, param) = fx.signatures(&src("    add(b = 2, a = $0)"));
+    assert_eq!(param.as_deref(), Some("a: Int"));
+    // Constructors and generic substitution of library members.
+    let (labels, param) = fx.signatures(&src("    User(\"a\", $0)"));
+    assert_eq!(labels, vec!["*User(name: String, age: Int = …)"]);
+    assert_eq!(param.as_deref(), Some("age: Int = …"));
+    let (labels, _) = fx.signatures(&src("    xs.indexOf($0)"));
+    assert!(labels.iter().any(|l| l.starts_with("indexOf(element: String)") || l.starts_with("*indexOf(element: String)")), "{labels:?}");
+    // Values of function type.
+    let (labels, _) = fx.signatures(&format!("{HEADER}fun run(cb: (Int, String) -> Unit) {{\n    cb(1, $0)\n}}\n"));
+    assert_eq!(labels, vec!["*cb(p1: Int, p2: String): Unit"]);
+    // Supertype constructor call.
+    let (labels, _) = fx.signatures(&format!("{HEADER}open class Base(val x: Int)\nclass Sub : Base($0)\n"));
+    assert_eq!(labels, vec!["*Base(x: Int)"]);
+    let (labels, _) = fx.signatures(&format!("{HEADER}annotation class Ann(val name: String)\n@Ann($0)\nclass C\n"));
+    assert_eq!(labels, vec!["*Ann(name: String)"]);
+    let (labels, _) = fx.signatures(&format!("{HEADER}class C(val x: Int) {{\n    constructor(s: String) : this($0)\n}}\n"));
+    assert_eq!(labels, vec!["*C(x: Int)"]);
+    // Parameter docs and summary come from KDoc.
+    let (path, offset) = fx.open(&src("    add(1$0)"));
+    let h = signature::signature_help(&fx.host.snapshot(), &path, offset).unwrap();
+    let s = &h.signatures[h.active as usize];
+    assert_eq!(s.doc.as_deref(), Some("Adds."));
+    assert_eq!(s.params[0].1.as_deref(), Some("first"));
+    // Outside of any argument list.
+    assert!(fx.signatures(&src("    add(1, 2)$0")).0.is_empty());
+}
+
+impl Fx {
+    /// FQ names offered to import for the unresolved name at the cursor.
+    fn import_candidates(&mut self, text: &str) -> Vec<String> {
+        let (path, offset) = self.open(text);
+        imports::import_fixes(&self.host.snapshot(), &path, TextRange::empty(offset)).into_iter().map(|f| f.fq).collect()
+    }
+}
+
+#[test]
+fn import_quick_fixes() {
+    let Some(mut fx) = fixture() else { return };
+    let src = |imports: &str, body: &str| format!("package app\n\n{imports}fun run() {{\n{body}\n}}\n");
+    // Project class, used as a type and as a constructor call.
+    assert_eq!(fx.import_candidates(&src("", "    val u: Us$0er? = null")), vec!["app.model.User"]);
+    assert_eq!(fx.import_candidates(&src("", "    Us$0er(\"a\")")), vec!["app.model.User"]);
+    // Library classes; project top-level functions.
+    let c = fx.import_candidates(&src("", "    val f = Fi$0le(\"x\")"));
+    assert!(c.contains(&"java.io.File".to_string()), "{c:?}");
+    // Extensions: only those applicable to the receiver.
+    assert_eq!(fx.import_candidates(&src("", "    \"a\".sho$0ut()")), vec!["app.model.shout"]);
+    assert!(fx.import_candidates(&src("", "    1.sho$0ut()")).is_empty());
+    // Library top-level functions outside the default imports.
+    let c = fx.import_candidates(&src("", "    thr$0ead { }"));
+    assert!(c.contains(&"kotlin.concurrent.thread".to_string()), "{c:?}");
+    // Resolved names get nothing.
+    assert!(fx.import_candidates(&src("import app.model.User\n\n", "    Us$0er(\"a\")")).is_empty());
+    assert!(fx.import_candidates(&src("", "    print$0ln()")).is_empty());
+    // The edit inserts a sorted import.
+    let (path, offset) = fx.open(&src("import app.model.shout\nimport java.io.File\n\n", "    Us$0er(\"a\")"));
+    let f = imports::import_fixes(&fx.host.snapshot(), &path, TextRange::empty(offset));
+    assert_eq!(f[0].edit.1, "import app.model.User\n");
+}
+
+#[test]
+fn organize_imports() {
+    let Some(mut fx) = fixture() else { return };
+    let text = "package app\n\nimport kotlin.math.max\nimport java.io.File\nimport app.model.User\nimport app.model.Registry\nimport javax.swing.JPanel as P\nimport app.model.User\n\nfun run(f: File, p: P) = User(\"a\").also { max(1, 2) }\n";
+    let path = fx.root.join("src/app/Main.kt");
+    fx.host.set_file(path.clone(), Arc::from(text), Some(1));
+    let (range, new) = imports::organize_imports(&fx.host.snapshot(), &path).unwrap();
+    assert_eq!(&text[usize::from(range.start())..usize::from(range.end())], "import kotlin.math.max\nimport java.io.File\nimport app.model.User\nimport app.model.Registry\nimport javax.swing.JPanel as P\nimport app.model.User");
+    assert_eq!(new, "import app.model.User\nimport java.io.File\nimport kotlin.math.max\nimport javax.swing.JPanel as P");
+    // Already organized: nothing to do.
+    let clean = "package app\n\nimport app.model.User\nimport java.io.File\n\nfun run(f: File) = User(\"a\")\n";
+    fx.host.set_file(path.clone(), Arc::from(clean), Some(2));
+    assert!(imports::organize_imports(&fx.host.snapshot(), &path).is_none());
+    // `.editorconfig` layouts: plain lexicographic, and groups separated by blank lines.
+    let text = "package app\n\nimport kotlin.math.max\nimport java.io.File;\nimport app.model.User\n\nfun run(f: File) = User(\"a\").also { max(1, 2) }\n";
+    fx.host.set_file(path.clone(), Arc::from(text), Some(3));
+    std::fs::write(fx.root.join(".editorconfig"), "root = true\n[*.{kt,kts}]\nij_kotlin_imports_layout = *\n").unwrap();
+    let (_, new) = imports::organize_imports(&fx.host.snapshot(), &path).unwrap();
+    assert_eq!(new, "import app.model.User\nimport java.io.File\nimport kotlin.math.max");
+    std::fs::write(fx.root.join(".editorconfig"), "root = true\n[*.{kt,kts}]\nij_kotlin_imports_layout = kotlin.**,|,*\n").unwrap();
+    let (_, new) = imports::organize_imports(&fx.host.snapshot(), &path).unwrap();
+    assert_eq!(new, "import kotlin.math.max\n\nimport app.model.User\nimport java.io.File");
+}
+
+#[test]
+fn document_highlights() {
+    let Some(mut fx) = fixture() else { return };
+    let text = format!("{HEADER}class C {{\n    var count = 0\n    fun inc(other: C) {{\n        count++\n        count += other.count\n        this.count = count\n        val count = 1\n        println(count)\n    }}\n}}\n");
+    let (path, offset) = fx.open(&text.replacen("var count", "var cou$0nt", 1));
+    let snap = fx.host.snapshot();
+    let found = document_highlight(&snap, &path, offset).unwrap();
+    let file = snap.file(&path).unwrap();
+    let shown: Vec<String> = found
+        .iter()
+        .map(|(r, w)| {
+            let line = file.text[..usize::from(r.start())].matches('\n').count() - HEADER.matches('\n').count();
+            format!("{line}{}", if *w { "w" } else { "r" })
+        })
+        .collect();
+    // Declaration, `count++`, `count +=`, `other.count`, `this.count =`, `= count`; not the local.
+    assert_eq!(shown, vec!["1w", "3w", "4w", "4r", "5w", "5r"]);
+}
+
+impl Fx {
+    fn names(&mut self, targets: Vec<NavTarget>) -> Vec<String> {
+        let snap = self.host.snapshot();
+        let mut out: Vec<String> = targets
+            .into_iter()
+            .map(|t| {
+                let content = std::fs::read_to_string(&t.path).unwrap_or_else(|_| snap.file(&t.path).unwrap().text.to_string());
+                let line = content[..usize::from(t.range.start())].matches('\n').count() + 1;
+                format!("{}:{line}:{}", t.path.file_name().unwrap().to_string_lossy(), &content[usize::from(t.range.start())..usize::from(t.range.end())])
+            })
+            .collect();
+        out.sort();
+        out
+    }
+}
+
+#[test]
+fn implementations_and_type_definitions() {
+    let Some(mut fx) = fixture() else { return };
+    let shapes = "package app.shapes\n\ninterface Shape {\n    fun area(): Double\n}\nabstract class Polygon : Shape\nclass Square(val s: Double) : Polygon() {\n    override fun area() = s * s\n}\nclass Circle(val r: Double) : Shape {\n    override fun area() = 3.14 * r * r\n}\nclass Rect : Square(1.0)\n";
+    fx.host.set_file(fx.root.join("src/app/shapes/Shapes.kt"), Arc::from(shapes), Some(1));
+    // Another file, inheriting through `Polygon` only.
+    fx.host.set_file(fx.root.join("src/app/Tri.kt"), Arc::from("package app\n\nimport app.shapes.Polygon\n\nclass Tri : Polygon() {\n    override fun area() = 0.5\n}\n"), Some(1));
+    let never = || false;
+    let imps = |fx: &mut Fx, text: &str| {
+        let (path, offset) = fx.open(text);
+        let found = hierarchy::implementations(&fx.host.snapshot(), &path, offset, &never);
+        fx.names(found)
+    };
+    let main = |body: &str| format!("package app\n\nimport app.shapes.*\n\n{body}\n");
+    assert_eq!(imps(&mut fx, &main("fun f(s: Sha$0pe) {}")), vec!["Shapes.kt:10:Circle", "Shapes.kt:13:Rect", "Shapes.kt:6:Polygon", "Shapes.kt:7:Square", "Tri.kt:5:Tri"]);
+    // Transitive inheritors (`Rect` through `Square`).
+    assert_eq!(imps(&mut fx, &main("fun f(s: Pol$0ygon) {}")), vec!["Shapes.kt:13:Rect", "Shapes.kt:7:Square", "Tri.kt:5:Tri"]);
+    assert_eq!(imps(&mut fx, &main("fun f(s: Shape) = s.ar$0ea()")), vec!["Shapes.kt:11:area", "Shapes.kt:8:area", "Tri.kt:6:area"]);
+    // From an override: only the overrides below it.
+    fx.host.set_file(fx.root.join("src/app/Sub.kt"), Arc::from("package app\n\nimport app.shapes.*\n\nopen class Base : Shape {\n    override fun area() = 1.0\n}\nclass Sub : Base() {\n    override fun area() = 2.0\n}\n"), Some(1));
+    assert_eq!(imps(&mut fx, &main("fun f(s: Base) = s.ar$0ea()")), vec!["Sub.kt:9:area"]);
+    // Type definition: of a parameter, a call and a property.
+    let tdef = |fx: &mut Fx, text: &str| {
+        let (path, offset) = fx.open(text);
+        let found = hierarchy::type_definition(&fx.host.snapshot(), &path, offset);
+        fx.names(found)
+    };
+    assert_eq!(tdef(&mut fx, &main("fun f(sq: Square) = s$0q.area()")), vec!["Shapes.kt:7:Square"]);
+    assert_eq!(tdef(&mut fx, &main("fun mk(): Circle = Circle(1.0)\nfun f() = m$0k()")), vec!["Shapes.kt:10:Circle"]);
+    assert_eq!(tdef(&mut fx, &main("fun f(c: Circle) = c.r$0")).len(), 1);
+}
+
+impl Fx {
+    /// The file with hints spliced in as `⟨label⟩`.
+    fn hints(&mut self, text: &str, config: &inlay::InlayConfig) -> String {
+        let path = self.root.join("src/app/Main.kt");
+        self.host.set_file(path.clone(), Arc::from(text), Some(1));
+        let snap = self.host.snapshot();
+        let mut out = text.to_string();
+        let hints = inlay::inlay_hints(&snap, &path, TextRange::up_to(TextSize::of(text)), config);
+        for h in hints.iter().rev() {
+            out.insert_str(usize::from(h.offset), &format!("⟨{}⟩", h.label));
+        }
+        out[HEADER.len()..].to_string()
+    }
+}
+
+#[test]
+fn inlay_hints() {
+    let Some(mut fx) = fixture() else { return };
+    let config = inlay::InlayConfig::default();
+    let src = |body: &str| format!("{HEADER}{body}\n");
+    // Inferred types; none for literals, constructor calls and explicit types.
+    assert_eq!(
+        fx.hints(&src("fun run(repo: Repository<User>) {\n    val all = repo.all()\n    val n = 1\n    val u = User(\"a\")\n    val s: String = \"\"\n    val first = all.first().name\n}"), &config),
+        "fun run(repo: Repository<User>) {\n    val all⟨: List<User>⟩ = repo.all()\n    val n = 1\n    val u = User(⟨name:⟩\"a\")\n    val s: String = \"\"\n    val first⟨: String⟩ = all.first().name\n}\n"
+    );
+    // Loop variables, destructuring, lambda parameters and `it`.
+    assert_eq!(
+        fx.hints(&src("fun run(us: List<User>) {\n    for (u in us) {}\n    val (n, a) = us[0]\n    us.forEach { println(it) }\n    us.mapIndexed { i, u -> u }\n}"), &config),
+        "fun run(us: List<User>) {\n    for (u⟨: User⟩ in us) {}\n    val (n⟨: String⟩, a⟨: Int⟩) = us[0]\n    us.forEach {⟨ it: User ->⟩ println(it) }\n    us.mapIndexed { i⟨: Int⟩, u⟨: User⟩ -> u }\n}\n"
+    );
+    // Return types of expression bodies; parameter names for literal arguments.
+    assert_eq!(
+        fx.hints(&src("fun twice(u: User) = u.greet(\"hi\")\nfun f(user: User, count: Int) {}\nfun g(u: User, user: User) = f(user, 2)"), &config),
+        "fun twice(u: User)⟨: String⟩ = u.greet(\"hi\")\nfun f(user: User, count: Int) {}\nfun g(u: User, user: User)⟨: Unit⟩ = f(user, ⟨count:⟩2)\n"
+    );
+    let all = inlay::InlayConfig { parameter_names: inlay::ParameterNames::All, types: false, lambda_parameters: false, return_types: false };
+    assert_eq!(
+        fx.hints(&src("fun f(user: User, count: Int) {}\nfun g(u: User, user: User, n: Int) { f(user, n); f(u, count = n) }"), &all),
+        "fun f(user: User, count: Int) {}\nfun g(u: User, user: User, n: Int) { f(user, ⟨count:⟩n); f(⟨user:⟩u, count = n) }\n"
+    );
+}
+
+#[test]
+fn semantic_token_kinds() {
+    use semantic::{TokenType as T, modifier as m};
+    let Some(mut fx) = fixture() else { return };
+    let text = format!("{HEADER}class Box(val item: User) {{\n    var count = 0\n    @Deprecated(\"x\") fun old() = 1\n    fun use(param: Int): String {{\n        val local = param + count\n        var v = item.greet(\"a\")\n        listOf(1).forEach {{ println(it) }}\n        return \"s\".shout() + Registry + local + v + old()\n    }}\n}}\n");
+    let (path, _) = fx.open(&format!("{text}$0"));
+    let snap = fx.host.snapshot();
+    let tokens = semantic::semantic_tokens(&snap, &path, None);
+    let at = |needle: &str, nth: usize| -> (T, u32) {
+        let start = text.match_indices(needle).nth(nth).unwrap_or_else(|| panic!("{needle}")).0;
+        let t = tokens.iter().find(|t| usize::from(t.range.start()) == start).unwrap_or_else(|| panic!("no token at {needle}"));
+        (t.ty, t.modifiers)
+    };
+    assert_eq!(at("Box", 0), (T::Class, m::DECLARATION));
+    assert_eq!(at("item", 0), (T::Property, m::DECLARATION | m::READONLY));
+    assert_eq!(at("User", 1).0, T::Class);
+    assert_eq!(at("count", 0), (T::Property, m::DECLARATION | m::MUTABLE));
+    assert_eq!(at("Deprecated", 0).0, T::Decorator);
+    assert_eq!(at("param", 0), (T::Parameter, m::DECLARATION | m::READONLY));
+    assert_eq!(at("param", 1), (T::Parameter, m::READONLY));
+    assert_eq!(at("local", 0), (T::Variable, m::DECLARATION | m::READONLY));
+    assert_eq!(at("v =", 0).1, m::DECLARATION | m::MUTABLE);
+    assert_eq!(at("greet", 0), (T::Method, 0));
+    assert_eq!(at("listOf", 0), (T::Function, m::DEFAULT_LIBRARY));
+    assert_eq!(at("forEach", 0).1 & m::EXTENSION, m::EXTENSION);
+    assert_eq!(at("it)", 0).0, T::Parameter);
+    assert_eq!(at("shout", 1), (T::Method, m::EXTENSION));
+    assert_eq!(at("Registry", 1).0, T::Class);
+    assert_eq!(at("old()", 0), (T::Method, m::DECLARATION | m::DEPRECATED));
+    assert_eq!(at("old()", 1), (T::Method, m::DEPRECATED));
+    assert_eq!(at("app.model", 0).0, T::Namespace);
+    assert_eq!(at("val", 0).0, T::Keyword);
+    assert_eq!(at("\"a\"", 0).0, T::String);
+}

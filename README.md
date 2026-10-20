@@ -4,7 +4,9 @@ A Kotlin language server written in Rust. This is the core infrastructure: proto
 handling, an error-tolerant parser, Gradle/Maven import with native dependency
 resolution, binary classpath indexing (jars, the JDK image, Kotlin metadata), a
 module-aware declaration index, import/type resolution with diagnostics, navigation
-(definition, hover, references, rename), completion and lint rules with quick fixes.
+(definition, type definition, implementation, hover, references, highlights, rename),
+completion, signature help, inlay hints, semantic tokens, import fixes, organize imports
+and lint rules with quick fixes.
 
 See [FEATURES.md](FEATURES.md) for the full feature catalog and what is implemented.
 
@@ -43,6 +45,10 @@ Passed as `initializationOptions` or via `workspace/configuration` (section `kot
 | `diagnostics.enabled` / `diagnostics.debounceMs` | `true` / `200` | |
 | `lint.enabled` | `true` | Run the lint rules below |
 | `lint.rules` | `{}` | Level per rule id or category (see below) |
+| `inlayHints.types` | `true` | Inferred types of properties, locals, loop variables and destructuring entries |
+| `inlayHints.lambdaParameters` | `true` | Types of `it` and untyped lambda parameters |
+| `inlayHints.returnTypes` | `true` | Return types of expression-bodied functions |
+| `inlayHints.parameterNames` | `literals` | `literals` (literal arguments of multi-parameter calls), `all` or `none` |
 
 Commands (`workspace/executeCommand`): `kotlin.reloadProject`, `kotlin.projectModel`
 (returns the imported model as JSON: modules, source roots, resolved artifacts, problems).
@@ -132,7 +138,8 @@ supertypes, generated code).
 |---|---|---|
 | `UnusedImport` | warning | Import directive that nothing in the file uses |
 | `UNUSED_VARIABLE` | warning | Local variable that is never read |
-| `UNUSED_PARAMETER` | warning | Parameter of a private or local function that is never used |
+| `UNUSED_PARAMETER` | warning | Function or constructor parameter that is never used |
+| `UNUSED_ANONYMOUS_PARAMETER` | info | Lambda parameter that is never used (can be '_') |
 | `UnusedSymbol` | warning | Private or local declaration that is never used |
 | `CanBeVal` | warning | Local 'var' that is never reassigned |
 
@@ -211,7 +218,8 @@ src/
                protobuf decoding (+ .kotlin_builtins), lazy per-class/per-package index
   analysis/    file summaries (Kotlin + Java), source index, name resolution, diagnostics,
                snapshot-based database (AnalysisHost → Snapshot)
-    ide/       expression typing, completion, definition, hover, references, rename
+    ide/       expression typing, completion, definition, hover, references, rename, signature
+               help, inlay hints, semantic tokens, imports, implementations
     lints/     lint rules with quick fixes and suppression
   server/      LSP main loop, document sync, scheduling/debouncing, cancellation, progress
 ```
@@ -243,4 +251,5 @@ cargo run --release --example parse_corpus   -- <dir-or-sources.jar>
 cargo run --release --example import_project -- <project> [--deps] [--tooling] [--offline]
 cargo run --release --example index_classpath -- <project> [fq.Name ...]
 cargo run --release --example check_project  -- <project>
+cargo run --release --example ide_bench      -- <project> [class.Fq ...]   # time IDE requests
 ```

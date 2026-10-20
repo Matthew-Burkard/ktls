@@ -1249,7 +1249,7 @@ impl<'s> Engine<'s> {
     }
 
     /// Resolve the function invoked by a CALL_EXPR, binding type parameters from arguments.
-    fn resolve_call_target(&self, call: &SyntaxNode, infer_lambdas: bool) -> Option<(Symbol, Subst)> {
+    pub fn resolve_call_target(&self, call: &SyntaxNode, infer_lambdas: bool) -> Option<(Symbol, Subst)> {
         let callee = first_expr_child(call)?;
         let defs = match callee.kind() {
             SyntaxKind::NAME_REF => self.resolve_name_ref(&callee),

@@ -177,7 +177,6 @@ class Holder(private val dead: Int, private val alive: Int) {
 
 private fun withParams(used: Int, notUsed: String): Int = used
 fun callsIt() = withParams(1, "")
-fun publicParams(notReported: Int) = 1
 "#,
     );
     has(&found, "UnusedImport: import kotlin.math.max");
@@ -190,7 +189,7 @@ fun publicParams(notReported: Int) = 1
     has(&found, "UnusedSymbol: Unused");
     has(&found, "UnusedSymbol: dead");
     has(&found, "UNUSED_PARAMETER: notUsed");
-    assert!(!found.iter().any(|f| f.contains("min") || f.contains("read") || f.contains("alive") || f.contains("notReported") || f.contains("withParams")), "{found:#?}");
+    assert!(!found.iter().any(|f| f.contains("min") || f.contains("read") || f.contains("alive") || f.contains("withParams")), "{found:#?}");
 
     assert_eq!(fixed("package a\n\nimport kotlin.math.max\nfun f() = 1\n", "UnusedImport"), "package a\n\nfun f() = 1\n");
     assert_eq!(fixed("fun f() {\n    val x = 1\n    println()\n}\n", "UNUSED_VARIABLE"), "fun f() {\n    println()\n}\n");
@@ -805,4 +804,77 @@ fun ranges(x: Int) = when (x) {
         fixed(text, "NO_ELSE_IN_WHEN"),
         "package a\n\nenum class Color { RED, GREEN, BLUE }\nfun name(c: Color) = when (c) {\n    Color.RED -> \"r\"\n    Color.GREEN -> TODO()\n    Color.BLUE -> TODO()\n}\n"
     );
+}
+
+#[test]
+fn unused_parameters() {
+    let f = Fixture::new();
+    let found = lint(
+        r#"package a
+
+fun publicFn(used: Int, unused: String) = used
+class Service(private val repo: String, plain: Int, used: Int) {
+    val x = used
+    constructor(a: Int, b: Int) : this("", a, a)
+    fun member(p: Int): Int = 1
+}
+fun lambdas() = listOf(1 to 2).map { (a, b) -> a }.forEach { x -> }
+fun defaults(a: Int, b: Int = a) = b
+fun shadowed(x: Int) {
+    val y = listOf(1).map { x -> x }
+    println(y)
+}
+fun receiverCall(body: String.() -> Int) = "x".body()
+"#,
+    );
+    has(&found, "UNUSED_PARAMETER: unused");
+    has(&found, "UNUSED_PARAMETER: plain");
+    has(&found, "UNUSED_PARAMETER: b");
+    has(&found, "UNUSED_PARAMETER: p");
+    has(&found, "UNUSED_ANONYMOUS_PARAMETER: b");
+    has(&found, "UNUSED_ANONYMOUS_PARAMETER: x");
+    let params = |found: &[String]| found.iter().filter(|f| f.starts_with("UNUSED_PARAMETER")).cloned().collect::<Vec<_>>();
+    if f.typed() {
+        // The outer `x` is shadowed by the lambda's, so it is unused.
+        has(&found, "UNUSED_PARAMETER: x");
+        assert_eq!(params(&found).len(), 5, "{found:#?}");
+    }
+    for ok in ["used", "a", "repo", "body"] {
+        assert!(!params(&found).iter().any(|f| f.ends_with(&format!(": {ok}"))), "{ok}: {found:#?}");
+    }
+
+    // Signatures fixed by something else are not reported.
+    let found = lint(
+        r#"package a
+
+interface Handler { fun handle(event: String) }
+open class Base { open fun hook(x: Int) {} }
+class Impl : Base(), Handler {
+    override fun handle(event: String) { println() }
+    override fun hook(x: Int) { println() }
+}
+open class Open { open fun extensible(x: Int) { println() } }
+@Suppress("X") @Deprecated("old") fun deprecated(x: Int) { println() }
+annotation class Test
+@Test fun annotated(x: Int) { println() }
+fun stub(x: Int): Int = TODO()
+fun empty(x: Int) {}
+fun throwing(x: Int): Int = throw UnsupportedOperationException()
+fun main(args: Array<String>) { println() }
+fun referenced(x: Int) = 1
+val ref = listOf(1).map(::referenced)
+operator fun String.getValue(thisRef: Any?, property: Any?): String = this
+"#,
+    );
+    assert!(params(&found).is_empty(), "{found:#?}");
+
+    if !f.typed() {
+        return;
+    }
+    // Removing a private function's parameter also removes the arguments.
+    let text = "package a\n\nprivate fun f(a: Int, b: Int, c: Int) = a + c\nfun g() = f(1, 2, 3) + f(a = 1, b = 2, c = 3) + f(c = 3, a = 1, b = 2)\n";
+    assert_eq!(fixed(text, "UNUSED_PARAMETER"), "package a\n\nprivate fun f(a: Int, c: Int) = a + c\nfun g() = f(1, 3) + f(a = 1, c = 3) + f(c = 3, a = 1)\n");
+    let text = "package a\n\nprivate fun last(a: Int, b: Int) = a\nfun g() = last(1, 2)\n";
+    assert_eq!(fixed(text, "UNUSED_PARAMETER"), "package a\n\nprivate fun last(a: Int) = a\nfun g() = last(1)\n");
+    assert_eq!(fixed("fun f() = listOf(1).map { x -> 2 }\n", "UNUSED_ANONYMOUS_PARAMETER"), "fun f() = listOf(1).map { _ -> 2 }\n");
 }

@@ -19,6 +19,8 @@ pub struct Config {
     pub diagnostics: DiagnosticsConfig,
     /// Lint rules: `{ "enabled": true, "rules": { "<RuleId or category>": "warning" | "off" | ... } }`.
     pub lint: crate::analysis::lints::LintConfig,
+    /// `{ "types": true, "lambdaParameters": true, "returnTypes": true, "parameterNames": "literals" | "all" | "none" }`.
+    pub inlay_hints: crate::analysis::ide::inlay::InlayConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -105,5 +107,8 @@ mod tests {
         assert!(c.lint.enabled);
         assert_eq!(c.lint.level(&crate::analysis::lints::UNUSED_IMPORT), crate::analysis::lints::Level::Error);
         assert_eq!(c.lint.level(&crate::analysis::lints::CLASS_NAME), crate::analysis::lints::Level::Off);
+        let c = Config::from_json(&serde_json::json!({ "inlayHints": { "parameterNames": "all", "types": false } }));
+        assert_eq!(c.inlay_hints.parameter_names, crate::analysis::ide::inlay::ParameterNames::All);
+        assert!(!c.inlay_hints.types && c.inlay_hints.return_types);
     }
 }

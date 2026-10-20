@@ -95,13 +95,31 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
         })),
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         definition_provider: Some(lsp_types::OneOf::Left(true)),
+        type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
+        implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
         references_provider: Some(lsp_types::OneOf::Left(true)),
+        document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
+        inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
+        semantic_tokens_provider: Some(lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(lsp_types::SemanticTokensOptions {
+            legend: lsp_types::SemanticTokensLegend {
+                token_types: crate::analysis::ide::semantic::TOKEN_TYPES.iter().map(|t| lsp_types::SemanticTokenType::new(t)).collect(),
+                token_modifiers: crate::analysis::ide::semantic::TOKEN_MODIFIERS.iter().map(|m| lsp_types::SemanticTokenModifier::new(m)).collect(),
+            },
+            range: Some(true),
+            full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
+            work_done_progress_options: Default::default(),
+        })),
         rename_provider: Some(if prepare_rename {
             lsp_types::OneOf::Right(lsp_types::RenameOptions { prepare_provider: Some(true), work_done_progress_options: Default::default() })
         } else {
             lsp_types::OneOf::Left(true)
         }),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+        signature_help_provider: Some(lsp_types::SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".into(), ",".into()]),
+            retrigger_characters: Some(vec![")".into()]),
+            work_done_progress_options: Default::default(),
+        }),
         completion_provider: Some(lsp_types::CompletionOptions {
             trigger_characters: Some(vec![".".into(), ":".into(), "@".into()]),
             resolve_provider: Some(false),
@@ -113,6 +131,7 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
                 lsp_types::CodeActionKind::QUICKFIX,
                 lsp_types::CodeActionKind::REFACTOR_REWRITE,
                 lsp_types::CodeActionKind::SOURCE_FIX_ALL,
+                lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
             ]),
             resolve_provider: None,
             work_done_progress_options: Default::default(),
@@ -293,6 +312,18 @@ impl Server {
                     Ok(serde_json::to_value(lsp_types::GotoDefinitionResponse::Array(locs)).unwrap())
                 });
             }
+            GotoImplementation::METHOD | GotoTypeDefinition::METHOD => {
+                let method = req.method.clone();
+                let implementation = method == GotoImplementation::METHOD;
+                let Ok((id, params)) = req.extract::<lsp_types::GotoDefinitionParams>(&method) else { return };
+                let tdp = params.text_document_position_params;
+                let path = self.path_of(&tdp.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    let locs = if implementation { handlers::implementation(cx, &path, tdp.position)? } else { handlers::type_definition(cx, &path, tdp.position)? };
+                    Ok(serde_json::to_value(lsp_types::GotoDefinitionResponse::Array(locs)).unwrap())
+                });
+            }
             References::METHOD => {
                 let Ok((id, params)) = req.extract::<lsp_types::ReferenceParams>(References::METHOD) else { return };
                 let tdp = params.text_document_position;
@@ -353,14 +384,58 @@ impl Server {
                     Ok(serde_json::to_value(handlers::hover(cx, &path, tdp.position)?).unwrap())
                 });
             }
+            DocumentHighlightRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::DocumentHighlightParams>(DocumentHighlightRequest::METHOD) else { return };
+                let tdp = params.text_document_position_params;
+                let path = self.path_of(&tdp.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::document_highlight(cx, &path, tdp.position)?).unwrap())
+                });
+            }
+            SemanticTokensFullRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::SemanticTokensParams>(SemanticTokensFullRequest::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    let data = handlers::semantic_tokens(cx, &path, None)?;
+                    Ok(serde_json::to_value(lsp_types::SemanticTokens { result_id: None, data }).unwrap())
+                });
+            }
+            SemanticTokensRangeRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::SemanticTokensRangeParams>(SemanticTokensRangeRequest::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    let data = handlers::semantic_tokens(cx, &path, Some(params.range))?;
+                    Ok(serde_json::to_value(lsp_types::SemanticTokens { result_id: None, data }).unwrap())
+                });
+            }
+            InlayHintRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::InlayHintParams>(InlayHintRequest::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                let config = self.config.inlay_hints.clone();
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::inlay_hints(cx, &path, params.range, &config)?).unwrap())
+                });
+            }
+            SignatureHelpRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::SignatureHelpParams>(SignatureHelpRequest::METHOD) else { return };
+                let tdp = params.text_document_position_params;
+                let path = self.path_of(&tdp.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::signature_help(cx, &path, tdp.position)?).unwrap())
+                });
+            }
             CodeActionRequest::METHOD => {
                 let Ok((id, params)) = req.extract::<lsp_types::CodeActionParams>(CodeActionRequest::METHOD) else { return };
                 let path = self.path_of(&params.text_document.uri);
-                let enabled = self.config.lint.enabled;
                 self.spawn(id, move |cx| {
-                    let actions = match (&path, enabled) {
-                        (Some(p), true) => handlers::code_actions(cx, p, params.range, params.context.only.as_deref())?,
-                        _ => Vec::new(),
+                    let actions = match &path {
+                        Some(p) => handlers::code_actions(cx, p, params.range, &params.context)?,
+                        None => Vec::new(),
                     };
                     Ok(serde_json::to_value(actions).unwrap())
                 });
@@ -454,13 +529,23 @@ impl Server {
         }
     }
 
+    fn refresh_inlay_hints(&mut self) {
+        if self.caps.workspace.as_ref().and_then(|w| w.inlay_hint.as_ref()).and_then(|h| h.refresh_support).unwrap_or(false) {
+            self.request::<lsp_types::request::InlayHintRefreshRequest>((), Outgoing::Other);
+        }
+    }
+
     fn apply_config(&mut self, new: Config) {
         if new == self.config {
             return;
         }
         let reload = new.project != self.config.project || new.jdk_home != self.config.jdk_home || new.cache_dir != self.config.cache_dir;
         self.host.set_lint_config(new.lint.clone());
+        let hints_changed = new.inlay_hints != self.config.inlay_hints;
         self.config = new;
+        if hints_changed {
+            self.refresh_inlay_hints();
+        }
         if reload {
             self.start_load(false);
         } else {
@@ -748,6 +833,11 @@ impl Server {
             }
         } else {
             self.schedule_open_files(Duration::ZERO);
+        }
+        // Types are now known: hints and tokens computed before the load are incomplete.
+        self.refresh_inlay_hints();
+        if self.caps.workspace.as_ref().and_then(|w| w.semantic_tokens.as_ref()).and_then(|t| t.refresh_support).unwrap_or(false) {
+            self.request::<lsp_types::request::SemanticTokensRefresh>((), Outgoing::Other);
         }
         if std::mem::take(&mut self.pending_reload) {
             self.start_load(true);

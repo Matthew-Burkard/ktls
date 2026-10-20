@@ -29,9 +29,11 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         match n.kind() {
             SyntaxKind::PROPERTY if is_local(&n) => local_variable(cx, &n, out),
             SyntaxKind::FUN => {
-                unused_parameters(&n, out);
+                unused_parameters(cx, &n, out);
                 unused_declaration(cx, &n, out);
             }
+            SyntaxKind::PRIMARY_CONSTRUCTOR | SyntaxKind::SECONDARY_CONSTRUCTOR => unused_constructor_parameters(cx, &n, out),
+            SyntaxKind::LAMBDA_EXPR => unused_lambda_parameters(cx, &n, out),
             SyntaxKind::PROPERTY | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::TYPEALIAS => unused_declaration(cx, &n, out),
             SyntaxKind::VALUE_PARAMETER => unused_constructor_property(cx, &n, out),
             _ => {}
@@ -39,7 +41,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     }
 }
 
-fn unused_imports(cx: &Cx, out: &mut Sink) {
+pub(super) fn unused_imports(cx: &Cx, out: &mut Sink) {
     let Some(file) = cx.snap.file(cx.path) else { return };
     let summary = file.summary();
     // Names used anywhere outside the import list (identifiers and KDoc links).
@@ -148,29 +150,208 @@ fn is_pure(e: &SyntaxNode) -> bool {
     }
 }
 
-fn unused_parameters(f: &SyntaxNode, out: &mut Sink) {
-    if !(is_local(f) || has_modifier(f, "private")) || has_annotations(f) {
-        return;
-    }
+/// Uses of the parameter declared by `tok` inside `scope`. With types, a use must resolve to
+/// the parameter; without, any same-named reference counts (shadowing hides unused ones).
+fn parameter_used(cx: &Cx, scope: &SyntaxNode, tok: &SyntaxToken) -> bool {
+    let name = ast::ident_text(tok);
+    let engine = cx.engine();
+    idents(scope).any(|t| {
+        if t == *tok || t.text_range().start() < tok.text_range().end() || ast::ident_text(&t) != name {
+            return false;
+        }
+        let Some(nr) = t.parent().filter(|p| p.kind() == SyntaxKind::NAME_REF) else { return false };
+        // `other.name` is a member of something else.
+        let selector = nr.parent().is_some_and(|p| {
+            matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(&nr)
+                || p.kind() == SyntaxKind::CALL_EXPR
+                    && p.parent().is_some_and(|q| matches!(q.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && q.first_child().as_ref() != Some(&p))
+        });
+        match engine {
+            // `recv.name()` may call a function-typed parameter with a receiver.
+            // (members win; otherwise it is the local function value).
+            Some(e) if selector => {
+                let defs = e.resolve_name_ref(&nr);
+                defs.iter().any(|d| matches!(d, crate::analysis::ide::infer::Def::Local(l) if l.name_range == tok.text_range()))
+                    || defs.is_empty() && e.find_local(&nr, &name).is_some_and(|l| l.name_range == tok.text_range())
+            }
+            Some(e) => e.find_local(&nr, &name).is_none_or(|l| l.name_range == tok.text_range()),
+            None => true,
+        }
+    })
+}
+
+/// A parameter whose name is part of a fixed contract (frameworks, overrides, references).
+fn signature_is_fixed(cx: &Cx, f: &SyntaxNode) -> bool {
     if ["override", "open", "abstract", "actual", "expect", "operator", "external"].iter().any(|m| has_modifier(f, m)) {
+        return true;
+    }
+    // Annotated functions are usually called by frameworks (tests, web handlers, DI);
+    // deprecated ones keep their signature.
+    let annotated = modifiers(f).is_some_and(|m| {
+        m.annotations().any(|a| !matches!(a.type_ref().map(|t| t.syntax().text().to_string()).as_deref(), Some("Suppress" | "kotlin.Suppress")))
+    });
+    if annotated {
+        return true;
+    }
+    if owner(f).is_some_and(|o| is_interface(&o) || has_modifier(&o, "expect")) {
+        return true;
+    }
+    let Some(name) = name_token(f).map(|t| ast::ident_text(&t)) else { return true };
+    if name == "main" {
+        return true;
+    }
+    // Passed as a function reference: the signature must match a function type.
+    let reference = format!("::{name}");
+    if is_local(f) || has_modifier(f, "private") {
+        cx.text.contains(&reference)
+    } else {
+        cx.snap.files.values().any(|file| file.text.contains(&reference))
+    }
+}
+
+/// Bodies that intentionally ignore their parameters: `{}`, `TODO()`, `throw ...`.
+fn is_stub(body: &SyntaxNode) -> bool {
+    if is_empty_block(body) || is_todo(body) {
+        return true;
+    }
+    let stmt = if body.kind() == SyntaxKind::BLOCK { only_statement(body) } else { Some(body.clone()) };
+    stmt.is_some_and(|s| s.kind() == SyntaxKind::THROW_EXPR || s.kind() == SyntaxKind::RETURN_EXPR && s.first_child().is_some_and(|c| c.kind() == SyntaxKind::THROW_EXPR))
+}
+
+fn unused_parameters(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&UNUSED_PARAMETER) {
         return;
     }
     let decl = ast::FunDecl::cast(f.clone()).unwrap();
     let body = decl.body_block().map(|b| b.syntax().clone()).or_else(|| initializer(f));
     let Some(body) = body else { return };
-    if is_empty_block(&body) || is_todo(&body) || name_token(f).is_some_and(|t| t.text() == "main") {
+    if is_stub(&body) {
         return;
     }
-    for p in decl.parameters() {
+    let unused: Vec<ast::ValueParameter> = decl
+        .parameters()
+        .into_iter()
+        .filter(|p| p.name_token().is_some_and(|t| ast::ident_text(&t) != "_" && !has_annotations(p.syntax()) && !parameter_used(cx, f, &t)))
+        .collect();
+    if unused.is_empty() || signature_is_fixed(cx, f) {
+        return;
+    }
+    for p in unused {
+        let tok = p.name_token().unwrap();
+        let name = ast::ident_text(&tok);
+        let fix = remove_parameter_fix(cx, f, &p);
+        out.report(&UNUSED_PARAMETER, tok.text_range(), format!("Parameter '{name}' is never used"), fix);
+    }
+}
+
+/// Plain (non-property) constructor parameters never used in initializers.
+fn unused_constructor_parameters(cx: &Cx, ctor: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&UNUSED_PARAMETER) {
+        return;
+    }
+    let Some(class) = ctor.ancestors().find(|a| a.kind() == SyntaxKind::CLASS) else { return };
+    if has_annotations(&class) || ["data", "value", "inline", "expect", "actual", "annotation", "external"].iter().any(|m| has_modifier(&class, m)) {
+        return;
+    }
+    let scope = if ctor.kind() == SyntaxKind::SECONDARY_CONSTRUCTOR { ctor.clone() } else { class.clone() };
+    // `@Inject constructor(...)`: the framework decides the parameters.
+    if has_annotations(ctor) {
+        return;
+    }
+    if ctor.kind() == SyntaxKind::SECONDARY_CONSTRUCTOR && ( ctor.children().find(|c| c.kind() == SyntaxKind::BLOCK).is_none_or(|b| is_stub(&b)) && !ctor.children().any(|c| c.kind() == SyntaxKind::CONSTRUCTOR_DELEGATION_CALL)) {
+        return;
+    }
+    let Some(list) = ctor.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER_LIST) else { return };
+    for p in list.children().filter_map(ast::ValueParameter::cast) {
         let Some(tok) = p.name_token() else { continue };
         let name = ast::ident_text(&tok);
-        if name == "_" || has_annotations(p.syntax()) {
+        if p.property_keyword().is_some() || name == "_" || has_annotations(p.syntax()) || parameter_used(cx, &scope, &tok) {
             continue;
         }
-        if mentions(f, &name, tok.text_range().end(), &tok).is_empty() {
-            out.report(&UNUSED_PARAMETER, tok.text_range(), format!("Parameter '{name}' is never used"), None);
+        out.report(&UNUSED_PARAMETER, tok.text_range(), format!("Constructor parameter '{name}' is never used"), None);
+    }
+}
+
+/// Lambda parameters that are never used can be `_`.
+fn unused_lambda_parameters(cx: &Cx, lambda: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&UNUSED_ANONYMOUS_PARAMETER) {
+        return;
+    }
+    let Some(list) = lambda.children().find(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) else { return };
+    for p in list.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER) {
+        let mut names: Vec<SyntaxToken> = name_token(&p).into_iter().collect();
+        for d in p.children().filter(|c| c.kind() == SyntaxKind::DESTRUCTURING_DECLARATION) {
+            names.extend(d.children().filter(|c| c.kind() == SyntaxKind::DESTRUCTURING_ENTRY).filter_map(|c| name_token(&c)));
+        }
+        for tok in names {
+            let name = ast::ident_text(&tok);
+            if name == "_" || parameter_used(cx, lambda, &tok) {
+                continue;
+            }
+            out.report(
+                &UNUSED_ANONYMOUS_PARAMETER,
+                tok.text_range(),
+                format!("Parameter '{name}' is never used, could be renamed to _"),
+                Some(Fix::replace("Rename to _", tok.text_range(), "_")),
+            );
         }
     }
+}
+
+/// The range that removes `item` and one adjacent comma from its list.
+fn list_item_removal(items: &[SyntaxNode], idx: usize) -> TextRange {
+    let item = &items[idx];
+    if idx + 1 < items.len() {
+        TextRange::new(item.text_range().start(), items[idx + 1].text_range().start())
+    } else if idx > 0 {
+        TextRange::new(items[idx - 1].text_range().end(), item.text_range().end())
+    } else {
+        item.text_range()
+    }
+}
+
+/// "Remove parameter": for private and local functions, whose calls are all in this file,
+/// the parameter and the matching argument of every call.
+fn remove_parameter_fix(cx: &Cx, f: &SyntaxNode, p: &ast::ValueParameter) -> Option<Fix> {
+    if !(is_local(f) || has_modifier(f, "private")) || p.is_vararg() {
+        return None;
+    }
+    let e = cx.engine()?;
+    let fname = name_token(f)?;
+    let pname = ast::ident_text(&p.name_token()?);
+    let list = f.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER_LIST)?;
+    let params: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER).collect();
+    let index = params.iter().position(|x| x == p.syntax())?;
+    let mut edits = vec![Edit { range: list_item_removal(&params, index), text: String::new() }];
+    let name = ast::ident_text(&fname);
+    for t in idents(&cx.root).filter(|t| *t != fname && ast::ident_text(t) == name) {
+        let nr = t.parent().filter(|n| n.kind() == SyntaxKind::NAME_REF)?;
+        // Only direct calls that resolve to this function.
+        let defs = e.resolve_name_ref(&nr);
+        let ours = defs.iter().any(|d| match d {
+            crate::analysis::ide::infer::Def::Symbol { sym, .. } => matches!(&sym.origin, crate::symbols::Origin::Source { name_range, .. } if *name_range == fname.text_range()),
+            crate::analysis::ide::infer::Def::Local(l) => l.name_range == fname.text_range(),
+            _ => false,
+        });
+        if !ours {
+            continue;
+        }
+        let call = nr.parent().filter(|c| c.kind() == SyntaxKind::CALL_EXPR && c.first_child().as_ref() == Some(&nr))?;
+        let args_list = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST);
+        let args: Vec<SyntaxNode> = args_list.iter().flat_map(|l| l.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect::<Vec<_>>()).collect();
+        if args.iter().any(|a| ast::token(a, SyntaxKind::STAR).is_some()) {
+            return None;
+        }
+        let arg_name = |a: &SyntaxNode| a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| ast::token(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t));
+        let target = args.iter().position(|a| arg_name(a).as_deref() == Some(pname.as_str())).or_else(|| (index < args.len() && arg_name(&args[index]).is_none()).then_some(index));
+        match target {
+            Some(i) => edits.push(Edit { range: list_item_removal(&args, i), text: String::new() }),
+            // A trailing lambda for the last parameter cannot just disappear.
+            None if index + 1 == params.len() && call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) => return None,
+            None => {}
+        }
+    }
+    Some(Fix::new(format!("Remove parameter '{pname}'"), edits))
 }
 
 /// `TODO()` / `{ TODO() }`.

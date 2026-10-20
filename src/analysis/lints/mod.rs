@@ -150,7 +150,8 @@ rules! {
 
     UNUSED_IMPORT = "UnusedImport", Unused, Warning, true, ["unused"], "Import directive that nothing in the file uses";
     UNUSED_VARIABLE = "UNUSED_VARIABLE", Unused, Warning, true, ["unused", "UnusedVariable"], "Local variable that is never read";
-    UNUSED_PARAMETER = "UNUSED_PARAMETER", Unused, Warning, true, ["unused", "UnusedParameter"], "Parameter of a private or local function that is never used";
+    UNUSED_PARAMETER = "UNUSED_PARAMETER", Unused, Warning, true, ["unused", "UnusedParameter"], "Function or constructor parameter that is never used";
+    UNUSED_ANONYMOUS_PARAMETER = "UNUSED_ANONYMOUS_PARAMETER", Unused, Info, true, ["unused"], "Lambda parameter that is never used (can be '_')";
     UNUSED_SYMBOL = "UnusedSymbol", Unused, Warning, true, ["unused", "UnusedPrivateMember", "UnusedPrivateProperty", "UnusedPrivateClass"], "Private or local declaration that is never used";
     CAN_BE_VAL = "CanBeVal", Unused, Warning, false, ["CAN_BE_VAL"], "Local 'var' that is never reassigned";
 
@@ -362,6 +363,26 @@ pub fn lint_file(snap: &Snapshot, path: &Path, full: bool) -> Vec<Lint> {
     lints.sort_by_key(|l| (l.range.start(), l.range.end(), l.rule.id));
     lints.dedup_by(|a, b| a.range == b.range && a.rule.id == b.rule.id);
     lints
+}
+
+/// Ranges of unused (or duplicate) import directives, regardless of the lint settings.
+pub fn unused_imports(snap: &Snapshot, path: &Path, full: bool) -> Vec<TextRange> {
+    let Some(file) = snap.file(path) else { return Vec::new() };
+    let config = LintConfig::default();
+    let cx = Cx {
+        snap,
+        path,
+        text: &file.text,
+        root: file.parse().syntax(),
+        module: None,
+        test_source: false,
+        config: &config,
+        full,
+        engine: OnceCell::new(),
+    };
+    let mut sink = Sink { config: &config, lints: Vec::new() };
+    unused::unused_imports(&cx, &mut sink);
+    sink.lints.into_iter().map(|l| l.range).collect()
 }
 
 // ---------------------------------------------------------------- suppression

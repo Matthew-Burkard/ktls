@@ -284,7 +284,7 @@ fn lint_diagnostics_and_code_actions() {
     let range = json!({ "start": { "line": 2, "character": 3 }, "end": { "line": 2, "character": 3 } });
     let actions = c.request("textDocument/codeAction", json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [] } }));
     let titles: Vec<&str> = actions.as_array().unwrap().iter().map(|a| a["title"].as_str().unwrap()).collect();
-    assert_eq!(titles, vec!["Remove unused import", "Suppress 'UnusedImport' for file", "Fix all unused and redundant code"], "{actions:#}");
+    assert_eq!(titles, vec!["Remove unused import", "Suppress 'UnusedImport' for file", "Organize imports", "Fix all unused and redundant code"], "{actions:#}");
     let edit = &actions[0]["edit"]["changes"][uri.as_str()][0];
     assert_eq!(edit["range"], json!({ "start": { "line": 2, "character": 0 }, "end": { "line": 3, "character": 0 } }));
     assert_eq!(edit["newText"], "");
@@ -294,6 +294,9 @@ fn lint_diagnostics_and_code_actions() {
     let all = c.request("textDocument/codeAction", json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [], "only": ["source.fixAll"] } }));
     assert_eq!(all.as_array().unwrap().len(), 1);
     assert_eq!(all[0]["edit"]["changes"][uri.as_str()].as_array().unwrap().len(), 2);
+    let organize = c.request("textDocument/codeAction", json!({ "textDocument": { "uri": uri }, "range": range, "context": { "diagnostics": [], "only": ["source.organizeImports"] } }));
+    assert_eq!(organize[0]["kind"], "source.organizeImports");
+    assert_eq!(organize[0]["edit"]["changes"][uri.as_str()][0]["newText"], "");
     c.shutdown();
 }
 
@@ -365,5 +368,38 @@ fn completion_session() {
     let uuid = r["items"].as_array().unwrap().iter().find(|i| i["label"] == "UUID").expect("UUID");
     assert_eq!(uuid["additionalTextEdits"][0]["newText"], "\n\nimport java.util.UUID");
     assert_eq!(uuid["additionalTextEdits"][0]["range"]["start"], json!({ "line": 0, "character": 12 }));
+    c.shutdown();
+}
+
+#[test]
+fn editing_assists_session() {
+    let Some(stdlib) = stdlib() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let (project, options) = maven_fixture(tmp.path(), &stdlib);
+    let mut c = Client::start(&project, options, false);
+    c.wait_for_import();
+    let app = project.join("src/main/kotlin/demo/Assist.kt");
+    let text = "package demo\n\nfun add(a: Int, b: Int) = a + b\nfun g() {\n    var n = add(1, 2)\n    n += 1\n    add(n, \n}\n";
+    write(&app, text);
+    let uri = path_to_uri(&app).as_str().to_string();
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": text } }));
+
+    let r = c.request("textDocument/signatureHelp", json!({ "textDocument": { "uri": uri }, "position": { "line": 6, "character": 11 } }));
+    assert_eq!(r["signatures"][0]["label"], "add(a: Int, b: Int): Int");
+    assert_eq!(r["signatures"][0]["parameters"][1]["label"], json!([12, 18]));
+    assert_eq!(r["signatures"][0]["activeParameter"], 1);
+
+    let r = c.request("textDocument/documentHighlight", json!({ "textDocument": { "uri": uri }, "position": { "line": 4, "character": 8 } }));
+    let kinds: Vec<i64> = r.as_array().unwrap().iter().map(|h| h["kind"].as_i64().unwrap()).collect();
+    assert_eq!(kinds, vec![3, 3, 2], "{r}"); // write (declaration), write (+=), read
+
+    let r = c.request("textDocument/inlayHint", json!({ "textDocument": { "uri": uri }, "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 8, "character": 0 } } }));
+    let labels: Vec<&str> = r.as_array().unwrap().iter().map(|h| h["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, vec![": Int", ": Int", "a:", "b:"], "{r}");
+    assert_eq!(r[2]["kind"], 2);
+    assert_eq!(r[2]["paddingRight"], true);
+
+    let r = c.request("textDocument/implementation", json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 5 } }));
+    assert_eq!(r[0]["range"]["start"], json!({ "line": 2, "character": 4 }));
     c.shutdown();
 }

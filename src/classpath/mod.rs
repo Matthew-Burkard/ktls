@@ -476,6 +476,22 @@ impl ClasspathIndex {
         out
     }
 
+    /// Packages that may declare Kotlin top-level functions or properties (they have file
+    /// facades or built-in members).
+    pub fn packages_with_members(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .packages
+            .iter()
+            .filter(|(_, classes)| classes.iter().any(|c| c.ends_with("Kt") || c.contains("Kt__")))
+            .map(|(p, _)| p.to_string())
+            .chain(self.relocated_facades.keys().cloned())
+            .chain(self.builtin_members.keys().cloned())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// FQ names of top-level classes whose simple name satisfies `keep` (for auto-import).
     /// Kotlin file facades (`FooKt`) are skipped.
     pub fn top_level_classes_where(&self, keep: &dyn Fn(&str) -> bool) -> Vec<String> {
