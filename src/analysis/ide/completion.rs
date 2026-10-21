@@ -438,6 +438,56 @@ impl Collector<'_, '_> {
         }
     }
 
+    /// `a, b ->` at the start of a lambda without parameters, from its expected type.
+    fn lambda_parameters(&mut self, at: &SyntaxNode) {
+        let Some(body) = at.parent().filter(|b| b.kind() == SyntaxKind::BLOCK && b.first_child().as_ref() == Some(at)) else { return };
+        let Some(lambda) = body.parent().filter(|l| l.kind() == SyntaxKind::LAMBDA_EXPR) else { return };
+        if lambda.children_with_tokens().any(|t| matches!(t.kind(), SyntaxKind::ARROW | SyntaxKind::VALUE_PARAMETER_LIST)) {
+            return;
+        }
+        let Some((_, params)) = self.e.lambda_signature(&lambda) else { return };
+        if params.is_empty() {
+            return;
+        }
+        let mut names: Vec<String> = Vec::new();
+        for p in &params {
+            let base = suggested_name(super::infer::strip(p));
+            let mut name = base.clone();
+            let mut i = 2;
+            while names.contains(&name) {
+                name = format!("{base}{i}");
+                i += 1;
+            }
+            names.push(name);
+        }
+        let types: Vec<String> = params.iter().map(|p| p.display()).collect();
+        let mut offer = |label: String, snippet: String, rank: u8| {
+            let mut item = Self::item(&label, ItemKind::Snippet, rank);
+            item.description = Some(format!("({}) ->", types.join(", ")));
+            item.detail = Some("lambda parameters".into());
+            if self.opts.snippets {
+                item.insert = Some(snippet);
+                item.snippet = true;
+            } else {
+                item.insert = Some(format!("{label} "));
+            }
+            self.push(item);
+        };
+        let tabstops: Vec<String> = names.iter().enumerate().map(|(i, n)| format!("${{{}:{n}}}", i + 1)).collect();
+        offer(format!("{} ->", names.join(", ")), format!("{} -> ", tabstops.join(", ")), 0);
+        // Destructuring for one pair-like parameter.
+        if let [p] = params.as_slice() {
+            let parts = match super::infer::strip(p).fq_name() {
+                Some("kotlin.collections.Map.Entry" | "kotlin.collections.MutableMap.MutableEntry") => Some(["key", "value"]),
+                Some("kotlin.Pair") => Some(["first", "second"]),
+                _ => None,
+            };
+            if let Some([a, b]) = parts {
+                offer(format!("({a}, {b}) ->"), format!("(${{1:{a}}}, ${{2:{b}}}) -> "), 0);
+            }
+        }
+    }
+
     /// Postfix templates (`cond.if`, `xs.for`, `expr.val`): the snippet replaces the
     /// template name, and an extra edit removes `recv.` before it.
     fn postfix(&mut self, recv: &SyntaxNode, at: &SyntaxToken, t: &TypeRef) {
@@ -533,6 +583,9 @@ impl Collector<'_, '_> {
     fn scope(&mut self, at: &SyntaxNode, statement: bool, callable_ref: bool) {
         let call = !callable_ref;
         self.named_arguments(at);
+        if statement {
+            self.lambda_parameters(at);
+        }
         for l in self.e.locals_at(at) {
             let kind = match l.kind {
                 LocalKind::Function => ItemKind::Function,

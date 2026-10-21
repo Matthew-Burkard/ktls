@@ -1069,3 +1069,17 @@ fn postfix_templates() {
     // Snippet syntax in the receiver is escaped.
     assert!(expand(&mut fx, "    \"${u.name}\".va$0", "val").contains("= \"\\${u.name\\}\"$0"));
 }
+
+#[test]
+fn lambda_parameter_completion() {
+    let Some(mut fx) = fixture() else { return };
+    let src = |body: &str| format!("{HEADER}fun run(xs: List<User>, m: Map<String, Int>) {{\n{body}\n}}\n");
+    let snippets = |fx: &mut Fx, body: &str| fx.complete(&src(body)).items.into_iter().filter(|i| i.detail.as_deref() == Some("lambda parameters")).map(|i| (i.label, i.insert.unwrap_or_default())).collect::<Vec<_>>();
+    assert_eq!(snippets(&mut fx, "    xs.forEach { $0 }"), vec![("user ->".to_string(), "${1:user} -> ".to_string())]);
+    assert_eq!(snippets(&mut fx, "    xs.forEachIndexed { $0 }"), vec![("value, user ->".to_string(), "${1:value}, ${2:user} -> ".to_string())]);
+    let m = snippets(&mut fx, "    m.forEach { $0 }");
+    assert!(m.iter().any(|(l, _)| l == "(key, value) ->"), "{m:?}");
+    // Not once the lambda has parameters, nor later in the body.
+    assert!(snippets(&mut fx, "    xs.forEach { u -> $0 }").is_empty());
+    assert!(snippets(&mut fx, "    xs.forEach {\n        println(it)\n        $0\n    }").is_empty());
+}

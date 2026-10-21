@@ -1310,6 +1310,11 @@ impl<'s> Engine<'s> {
             sym
         };
         let vars: HashSet<String> = sym.type_params.iter().map(|t| t.name.clone()).collect();
+        // A member function's own type parameters shadow its class's of the same name
+        // (an extension's are bound from the receiver).
+        if sym.receiver.is_none() && sym.kind == SymbolKind::Function {
+            s.retain(|k, _| !vars.contains(k));
+        }
         // Explicit type arguments.
         if let Some(targs) = call.children().find(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) {
             for (tp, a) in sym.type_params.iter().zip(targs.children().filter(|c| c.kind() == SyntaxKind::TYPE_PROJECTION)) {
@@ -1790,15 +1795,23 @@ impl<'s> Engine<'s> {
     /// Java getters also offered as properties (`getName()` → `name`).
     pub fn all_members(&self, t: &TypeRef) -> Vec<(Symbol, Subst)> {
         let mut out: Vec<(Symbol, Subst)> = Vec::new();
-        let mut seen: HashSet<(String, bool, usize)> = HashSet::new();
-        let mut push = |m: Symbol, s: &Subst, out: &mut Vec<(Symbol, Subst)>| {
-            let key = (m.name.clone(), m.kind == SymbolKind::Function, m.params.len());
-            if seen.insert(key) {
-                out.push((m, s.clone()));
+        // Signature → the class that declared it first. Supertypes' declarations with the
+        // same name and arity are hidden (overridden); overloads of one class are kept.
+        let mut seen: HashMap<(String, bool, usize), String> = HashMap::new();
+        let mut push = |m: Symbol, s: &Subst, out: &mut Vec<(Symbol, Subst)>, class: &str| {
+            let function = m.kind == SymbolKind::Function;
+            let key = (m.name.clone(), function, m.params.len());
+            match seen.get(&key) {
+                Some(c) if !function || c != class => {}
+                _ => {
+                    seen.insert(key, class.to_string());
+                    out.push((m, s.clone()));
+                }
             }
         };
         for st in self.supertype_closure(t) {
             let Some(fq) = fq_of(&st) else { continue };
+            let mut push = |m: Symbol, s: &Subst, out: &mut Vec<(Symbol, Subst)>| push(m, s, out, fq);
             if let Some(members) = self.anon_members(fq) {
                 for m in members {
                     push(m, &Subst::new(), &mut out);

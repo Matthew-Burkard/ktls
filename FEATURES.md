@@ -73,7 +73,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [~] [P0] `textDocument/definition` — incl. into library sources/decompiled stubs, Java sources, `expect`↔`actual` — *partial: sources (local or downloaded `-sources.jar`) or generated stubs; no `expect`↔`actual` jumps*
 - [x] [P1] `textDocument/declaration` — the member an `override` overrides (also in libraries), the `expect` of an `actual`, otherwise the definition
 - [x] [P1] `textDocument/typeDefinition`
-- [~] [P1] `textDocument/implementation` — overrides, subclasses, `actual` declarations, SAM implementations — *partial: project subclasses (transitive) and overriding members; not `actual` declarations, anonymous objects or SAM lambdas*
+- [~] [P1] `textDocument/implementation` — overrides, subclasses, `actual` declarations, SAM implementations — *partial: project subclasses (transitive), overriding members and the `actual`s of an `expect`; not anonymous objects or SAM lambdas*
 - [~] [P0] `textDocument/references` — incl. operator conventions (`plus`, `get`, `invoke`, `component1`), property accessors, delegated properties, KDoc links, Java usages — *partial: name references in Kotlin sources (incl. imports, types, constructor calls, the whole override family incl. `super` calls and anonymous objects, and operator-convention call sites: arithmetic/compound assignment, unary, `++`/`--`, ranges, `in`/`!in`, indexing, `==`, comparisons, `invoke`, destructuring `componentN`, `for` iterators, `by` delegates); not KDoc links or Java files*
 - [~] [P1] `textDocument/documentHighlight` — read vs write occurrences, exit points (`return`), loop `break` targets — *partial: read/write occurrences (incl. the override family); no exit points or loop targets*
 - [x] [P0] `textDocument/documentSymbol` — hierarchical outline (classes, objects, functions, properties, typealiases, enum entries)
@@ -141,7 +141,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [ ] [P1] `when` exhaustive branch completion (sealed/enum)
 - [~] [P1] Snippets / postfix templates: `.if`, `.not`, `.for`, `.val`, `.var`, `.return`, `.let`, `.notnull`, `.null`, `.try`, `.par`, `.sout`, `.when`, `.arg`, `.spread` — *partial: `.val`, `.var`, `.return`, `.if`, `.while`, `.not`, `.notnull`, `.null`, `.for`, `.when`, `.par`, `.arg`, `.println`, `.try` (by type and statement position; names from the type); not `.let`, `.spread`*
 - [ ] [P1] Live templates: `main`, `fun0/1/2`, `sout`, `iter`, `ifn`, `inn`, `void`, `closure`, `object`, `interface`, `exfun`, `exval`
-- [ ] [P1] Lambda parameter completion (`{ a, b -> }` from expected function type)
+- [x] [P1] Lambda parameter completion (`{ a, b -> }` from expected function type; `(key, value) ->` for map entries and pairs)
 - [x] [P1] Completion in string templates (`$` / `${`)
 - [ ] [P1] Completion in KDoc (`[Symbol]`, tags)
 - [~] [P1] Annotation completion (incl. use-site targets) — *partial: annotation classes, no use-site targets*
@@ -163,7 +163,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 ### 5.1 Compiler errors (subset of the K2 compiler diagnostic set)
 - [x] [P0] Syntax errors (expecting X, unexpected token, unclosed string/comment)
 - [~] [P0] `UNRESOLVED_REFERENCE`, `UNRESOLVED_IMPORT` — *partial: imports, types, and expression names that exist nowhere (typos, deleted declarations)*
-- [~] [P0] `TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`, `RETURN_TYPE_MISMATCH`, `INITIALIZER_TYPE_MISMATCH` — *partial: initializers, default values and return values that are literals, locals/parameters declared with a type (not smart cast), or constructor calls; not arguments*
+- [~] [P0] `TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`, `RETURN_TYPE_MISMATCH`, `INITIALIZER_TYPE_MISMATCH` — *partial: initializers, default values and return values that are literals, locals/parameters declared with a type (not smart cast), or constructor calls; arguments likewise, for functions without overloads and with non-generic parameter types*
 - [~] [P0] `NONE_APPLICABLE`, `OVERLOAD_RESOLUTION_AMBIGUITY`, `TOO_MANY_ARGUMENTS`, `NO_VALUE_FOR_PARAMETER`, `NAMED_PARAMETER_NOT_FOUND` — *partial: argument counts and names (not types), all overloads considered; no ambiguity*
 - [~] [P0] Null safety: `UNSAFE_CALL`, `UNSAFE_OPERATOR_CALL`, `UNSAFE_IMPLICIT_INVOKE_CALL`, `NULL_FOR_NONNULL_TYPE` — *partial: `NULL_FOR_NONNULL_TYPE` for literal `null`; `UNSAFE_CALL` for members of locals/parameters declared nullable that are never null-checked (no smart-cast analysis)*
 - [~] [P0] `VAL_REASSIGNMENT`, `UNINITIALIZED_VARIABLE`, `MUST_BE_INITIALIZED`, `MUST_BE_INITIALIZED_OR_BE_ABSTRACT` — *partial: all but `UNINITIALIZED_VARIABLE`*
@@ -178,7 +178,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] Modifiers: `INCOMPATIBLE_MODIFIERS`, `REDUNDANT_MODIFIER`, `WRONG_MODIFIER_TARGET`, `REPEATED_MODIFIER` — *partial: all but `REDUNDANT_MODIFIER`*
 - [ ] [P1] Annotations: `WRONG_ANNOTATION_TARGET`, `ANNOTATION_ARGUMENT_MUST_BE_CONST`, opt-in (`OPT_IN_USAGE`, `OPT_IN_USAGE_ERROR`)
 - [~] [P1] Data/value/sealed/enum class rule violations (`DATA_CLASS_WITHOUT_PARAMETERS`, `VALUE_CLASS_*`, `SEALED_SUPERTYPE*`) — *partial: data classes, interface/object constructors and initializers*
-- [ ] [P1] `expect`/`actual`: `NO_ACTUAL_FOR_EXPECT`, `ACTUAL_WITHOUT_EXPECT`, `ACTUAL_MISSING`, incompatible signatures
+- [~] [P1] `expect`/`actual`: `NO_ACTUAL_FOR_EXPECT`, `ACTUAL_WITHOUT_EXPECT`, `ACTUAL_MISSING`, incompatible signatures — *partial: `NO_ACTUAL_FOR_EXPECT` (top-level, no `actual` anywhere in the project), `ACTUAL_WITHOUT_EXPECT` (with a "Remove 'actual'" fix); not per platform module*
 - [~] [P1] `CONST_VAL_*`, `LATEINIT_*`, `DELEGATE_SPECIAL_FUNCTION_*` (missing `getValue`/`setValue`) — *partial: `const` and `lateinit` rules*
 - [ ] [P1] `OPERATOR_MODIFIER_REQUIRED`, `INFIX_MODIFIER_REQUIRED`
 - [~] [P1] `SUPERTYPE_NOT_INITIALIZED`, `SUPERTYPE_INITIALIZED_IN_INTERFACE`, `CYCLIC_INHERITANCE_HIERARCHY` — *partial: the first two, plus `MANY_CLASSES_IN_SUPERTYPE_LIST`, `INTERFACE_WITH_SUPERCLASS`*
@@ -324,7 +324,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [~] [P0] **Change type** of variable/parameter/return to match — *partial: for type mismatches and `null` (`T?`)*
 - [ ] [P0] **Add explicit cast** (`as T`) / **change to safe cast** (`as?`)
 - [~] [P0] **Implement members** / **make class abstract** — *partial: implement members*
-- [~] [P0] **Add `override` modifier**, **remove `override`**, **make super member `open`** — *partial: add/remove `override`*
+- [~] [P0] **Add `override` modifier**, **remove `override`**, **make super member `open`** — *partial: add/remove `override`, make a project super member `open` (also in another file)*
 - [x] [P0] **Add missing `when` branches** / **add `else` branch**
 - [~] [P0] **Remove unused** variable/parameter/import/declaration — *partial: variable, import, private/local declaration*
 - [x] [P0] **Change `val` to `var`**

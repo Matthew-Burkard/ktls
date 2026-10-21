@@ -639,6 +639,10 @@ fn call_arguments(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
     };
     let results: Vec<(&Symbol, Option<Mismatch>)> = candidates.iter().map(|(s, _)| (s, fit(s))).collect();
     if results.iter().any(|(_, m)| m.is_none()) {
+        // Argument types, when there is no overload to choose from.
+        if let [(sym, subst)] = candidates.as_slice() {
+            argument_types(e, sym, subst, &args, out);
+        }
         return;
     }
     let name = callee.text().to_string();
@@ -657,6 +661,52 @@ fn call_arguments(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
     let shown: Vec<String> = results.iter().take(3).map(|(s, _)| s.signature()).collect();
     let more = if results.len() > 3 { format!("\n... and {} more", results.len() - 3) } else { String::new() };
     out.report(&NONE_APPLICABLE, callee.text_range(), format!("None of the following candidates is applicable for '{name}':\n{}{more}", shown.join("\n")), None);
+}
+
+/// Literal and certain-typed arguments of a call to the single candidate `sym`.
+fn argument_types(e: &Engine, sym: &Symbol, subst: &crate::analysis::ide::infer::Subst, args: &[SyntaxNode], out: &mut Sink) {
+    // The function's own type parameters shadow the class's (`fun <T> f(v: T)` in `C<T>`).
+    let mut subst = subst.clone();
+    for tp in &sym.type_params {
+        subst.remove(&tp.name);
+    }
+    let mut position = 0;
+    for a in args {
+        let name = a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| ast::token(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t));
+        let param = match &name {
+            Some(n) => sym.params.iter().find(|p| p.name == *n),
+            None => {
+                position += 1;
+                sym.params.get(position - 1)
+            }
+        };
+        let Some(param) = param.filter(|p| !p.vararg) else {
+            // Positions after a vararg are ambiguous.
+            if name.is_none() {
+                return;
+            }
+            continue;
+        };
+        let Some(value) = a.children().filter(|c| c.kind() != SyntaxKind::VALUE_ARGUMENT_NAME).last() else { continue };
+        let t = crate::analysis::ide::infer::substitute(&e.resolve_declared(sym, &param.ty), &subst);
+        // Java parameters (platform types) accept null; generic ones need inference.
+        if matches!(t, TypeRef::Platform(_)) || has_type_param(&t) {
+            continue;
+        }
+        if let Some((rule, msg, _)) = type_mismatch(e, &value, &t, &t.display()) {
+            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ARGUMENT_TYPE_MISMATCH } else { rule };
+            out.report(rule, value.text_range(), msg, None);
+        }
+    }
+}
+
+fn has_type_param(t: &TypeRef) -> bool {
+    match t {
+        TypeRef::TypeParam { .. } | TypeRef::Error | TypeRef::Dynamic => true,
+        TypeRef::Named { fq, args, .. } => fq.is_none() || args.iter().any(|a| matches!(a, crate::symbols::TypeArg::Type { ty, .. } if has_type_param(ty))),
+        TypeRef::Function { receiver, params, ret, .. } => receiver.as_deref().is_some_and(has_type_param) || params.iter().any(has_type_param) || has_type_param(ret),
+        TypeRef::Platform(inner) => has_type_param(inner),
+    }
 }
 
 // ------------------------------------------------------------ literal types
@@ -691,25 +741,33 @@ fn literal_type(n: &SyntaxNode) -> Option<Option<&'static str>> {
     })
 }
 
-/// A literal of type `lit` (or `null`) where `expected` is declared: the mismatch message
-/// and a fix changing the declared type.
-fn literal_mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef) -> Option<(&'static Rule, String, Fix)> {
-    let lit = literal_type(value)?;
-    let t = e.resolve_syntax_type(expected);
-    let shown = expected.syntax().text().to_string();
-    let (fq, nullable) = match &t {
+/// A literal, or a value of certain type (see `certain_type`), where type `t` (written
+/// `shown`) is expected: the rule, message and the type the declaration could change to.
+fn type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: &str) -> Option<(&'static Rule, String, String)> {
+    let (fq, nullable) = match t {
         TypeRef::Named { fq: Some(fq), nullable, .. } => (fq.to_string(), *nullable),
         TypeRef::Function { nullable, .. } => ("kotlin.Function".to_string(), *nullable),
         _ => return None,
     };
     let c = e.res.find_classifier(&fq);
-    if fq != "kotlin.Function" && c.as_ref().is_none_or(|c| c.symbol().kind == SymbolKind::TypeAlias) {
+    if fq != "kotlin.Function" && c.as_ref().is_none_or(|c| c.symbol().kind == SymbolKind::TypeAlias || matches!(c, crate::analysis::resolve::Classifier::Library(lc) if !lc.is_kotlin)) {
         return None;
     }
+    let Some(lit) = literal_type(value) else {
+        if fq == "kotlin.Function" || !certain_type(e, value) {
+            return None;
+        }
+        let actual = e.type_of(value)?;
+        if e.conforms(&actual, &fq)? {
+            return None;
+        }
+        let actual_shown = actual.display();
+        let to = if nullable && !actual_shown.ends_with('?') { format!("{actual_shown}?") } else { actual_shown.clone() };
+        return Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual_shown}'."), to));
+    };
     let Some(lit) = lit else {
-        let range = expected.syntax().text_range();
         let to = if matches!(t, TypeRef::Function { .. }) { format!("({shown})?") } else { format!("{shown}?") };
-        return (!nullable).then(|| (&NULL_FOR_NONNULL_TYPE, format!("Null cannot be a value of a non-null type '{shown}'."), Fix::replace(format!("Change type to '{to}'"), range, to)));
+        return (!nullable).then(|| (&NULL_FOR_NONNULL_TYPE, format!("Null cannot be a value of a non-null type '{shown}'."), to));
     };
     // Integer literals adapt to any integer type; others need a supertype match.
     if lit == "kotlin.Int" && matches!(fq.as_str(), "kotlin.Long" | "kotlin.Short" | "kotlin.Byte") {
@@ -724,34 +782,15 @@ fn literal_mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef) -> 
     }
     let actual = lit.trim_start_matches("kotlin.");
     let to = if nullable { format!("{actual}?") } else { actual.to_string() };
-    let fix = Fix::replace(format!("Change type to '{to}'"), expected.syntax().text_range(), to);
-    Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual}'."), fix))
+    Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual}'."), to))
 }
 
-/// A literal, or a name, call or member access whose class type is not a subtype of the
-/// declared one.
+/// A value of the wrong type where `expected` is declared, with a fix changing the
+/// declared type.
 fn mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef) -> Option<(&'static Rule, String, Fix)> {
-    if literal_type(value).is_some() {
-        return literal_mismatch(e, value, expected);
-    }
-    if !certain_type(e, value) {
-        return None;
-    }
-    let exp = e.resolve_syntax_type(expected);
-    let TypeRef::Named { fq: Some(efq), .. } = &exp else { return None };
-    if e.res.find_classifier(efq).is_none_or(|c| c.symbol().kind == SymbolKind::TypeAlias) {
-        return None;
-    }
-    let actual = e.type_of(value)?;
-    if e.conforms(&actual, efq)? {
-        return None;
-    }
-    let shown = expected.syntax().text().to_string();
-    let actual_shown = actual.display();
-    let nullable = matches!(exp, TypeRef::Named { nullable: true, .. });
-    let to = if nullable && !actual_shown.ends_with('?') { format!("{actual_shown}?") } else { actual_shown.clone() };
-    let fix = Fix::replace(format!("Change type to '{to}'"), expected.syntax().text_range(), to);
-    Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual_shown}'."), fix))
+    let t = e.resolve_syntax_type(expected);
+    let (rule, msg, to) = type_mismatch(e, value, &t, &expected.syntax().text().to_string())?;
+    Some((rule, msg, Fix::replace(format!("Change type to '{to}'"), expected.syntax().text_range(), to)))
 }
 
 /// Values whose type the engine knows for sure: a local or parameter declared with a

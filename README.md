@@ -88,6 +88,8 @@ supertypes, generated code).
 | `NOTHING_TO_OVERRIDE` | error | 'override' of a member no supertype declares |
 | `VIRTUAL_MEMBER_HIDDEN` | error | Member with the signature of a supertype member but no 'override' |
 | `OVERRIDING_FINAL_MEMBER` | error | 'override' of a final member |
+| `NO_ACTUAL_FOR_EXPECT` | error | Top-level 'expect' declaration with no 'actual' anywhere in the project |
+| `ACTUAL_WITHOUT_EXPECT` | error | 'actual' declaration with no matching 'expect' |
 | `NO_ELSE_IN_WHEN` | error | 'when' that is not exhaustive |
 | `REPEATED_MODIFIER` | error | The same modifier twice |
 | `INCOMPATIBLE_MODIFIERS` | error | Modifiers that cannot be combined |
@@ -120,6 +122,7 @@ supertypes, generated code).
 | `CONFLICTING_OVERLOADS` | error | Two functions with the same signature in one scope |
 | `INITIALIZER_TYPE_MISMATCH` | error | Value of the wrong type (literal, typed local/parameter, constructor call) as an initializer or default value |
 | `RETURN_TYPE_MISMATCH` | error | Value of the wrong type returned |
+| `ARGUMENT_TYPE_MISMATCH` | error | Argument of the wrong type (literal, typed local/parameter, constructor call) for a function without overloads |
 | `NULL_FOR_NONNULL_TYPE` | error | 'null' for a non-null type |
 | `TOO_MANY_ARGUMENTS` | error | More arguments than parameters |
 | `NO_VALUE_FOR_PARAMETER` | error | Required parameter without an argument |

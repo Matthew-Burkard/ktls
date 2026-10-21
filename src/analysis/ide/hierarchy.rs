@@ -95,6 +95,9 @@ pub fn implementations(snap: &Snapshot, path: &Path, offset: TextSize, cancelled
     let Some(Def::Symbol { sym, .. }) = defs.first() else {
         return defs.iter().filter_map(|d| def_location(snap, &e, d, false)).collect();
     };
+    if sym.modifiers.has(Modifiers::EXPECT) {
+        return counterparts(snap, sym, Modifiers::ACTUAL).iter().filter_map(|(p, s)| target(p, s)).collect();
+    }
     if sym.kind.is_classifier() && sym.kind != SymbolKind::TypeAlias {
         return inheritors(snap, &sym.fq_name, cancelled).iter().filter_map(|i| target(&i.path, &i.symbol)).collect();
     }
@@ -126,7 +129,7 @@ pub fn declaration(snap: &Snapshot, path: &Path, offset: TextSize) -> Vec<NavTar
     let mut out: Vec<NavTarget> = Vec::new();
     for d in &defs {
         let found = match d {
-            Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::ACTUAL) => expects(snap, sym),
+            Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::ACTUAL) => counterparts(snap, sym, Modifiers::EXPECT).iter().filter_map(|(p, s)| target(p, s)).collect(),
             Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::OVERRIDE) => overridden(&e, sym).and_then(|b| def_location(snap, &e, &Def::Symbol { sym: b, subst: Default::default() }, !snap.workspace.offline)).into_iter().collect(),
             _ => Vec::new(),
         };
@@ -147,23 +150,29 @@ fn overridden(e: &Engine, sym: &Symbol) -> Option<Symbol> {
     e.hidden_member(&class_type(c.symbol()), sym).map(|(m, _)| m)
 }
 
-/// The `expect` declarations matching the `actual` declaration `sym`.
-fn expects(snap: &Snapshot, sym: &Symbol) -> Vec<NavTarget> {
-    fn walk(path: &Path, ds: &[SourceDecl], sym: &Symbol, out: &mut Vec<NavTarget>) {
+/// The project declarations with modifier `want` (`EXPECT` or `ACTUAL`) matching `sym`
+/// (same FQ name; a classifier matches any classifier, e.g. an `actual typealias`).
+pub fn counterparts(snap: &Snapshot, sym: &Symbol, want: u32) -> Vec<(PathBuf, Symbol)> {
+    // Members of an `expect` class are implicitly `expect`.
+    fn walk(path: &Path, ds: &[SourceDecl], sym: &Symbol, want: u32, in_expect: bool, out: &mut Vec<(PathBuf, Symbol)>) {
         for d in ds {
             let s = &d.symbol;
-            if s.modifiers.has(Modifiers::EXPECT) && s.fq_name == sym.fq_name && s.kind.is_classifier() == sym.kind.is_classifier() && s.params.len() == sym.params.len() {
-                out.extend(target(path, s));
+            let marked = s.modifiers.has(want) || want == Modifiers::EXPECT && in_expect;
+            let same_kind = if sym.kind.is_classifier() { s.kind.is_classifier() } else { s.kind == sym.kind && s.params.len() == sym.params.len() };
+            if marked && s.fq_name == sym.fq_name && same_kind {
+                out.push((path.to_path_buf(), s.clone()));
             }
             if sym.fq_name.starts_with(&format!("{}.", s.fq_name)) {
-                walk(path, &d.children, sym, out);
+                walk(path, &d.children, sym, want, marked, out);
             }
         }
     }
+    let word = if want == Modifiers::EXPECT { "expect" } else { "actual" };
     let mut out = Vec::new();
-    for f in snap.files.values().filter(|f| f.text.contains("expect") && f.text.contains(sym.name.as_str())) {
-        walk(&f.path, &f.summary().decls, sym, &mut out);
+    for f in snap.files.values().filter(|f| f.text.contains(word) && f.text.contains(sym.name.as_str())) {
+        walk(&f.path, &f.summary().decls, sym, want, false, &mut out);
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 

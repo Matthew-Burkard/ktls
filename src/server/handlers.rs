@@ -193,11 +193,20 @@ pub fn code_actions(cx: &Ctx, path: &Path, range: lsp_types::Range, context: &ls
         ..Default::default()
     };
     let action = |title: &str, kind: CodeActionKind, diag: Option<lsp_types::Diagnostic>, fix: &Fix, preferred: bool| {
+        let mut we = edit(fix.edits.iter().collect());
+        if let Some(changes) = we.changes.as_mut() {
+            for (p, e) in &fix.elsewhere {
+                let Some(target) = cx.snap.file(p) else { continue };
+                let li = LineIndex::new(&target.text);
+                changes.entry(path_to_uri(p)).or_default().push(TextEdit { range: li.range(&target.text, e.range, cx.enc), new_text: e.text.clone() });
+            }
+            changes.retain(|_, v| !v.is_empty());
+        }
         CodeActionOrCommand::CodeAction(CodeAction {
             title: title.to_string(),
             kind: Some(kind),
             diagnostics: diag.map(|d| vec![d]),
-            edit: Some(edit(fix.edits.iter().collect())),
+            edit: Some(we),
             is_preferred: Some(preferred),
             ..Default::default()
         })
@@ -265,7 +274,7 @@ pub fn code_actions(cx: &Ctx, path: &Path, range: lsp_types::Range, context: &ls
         let mut edits: Vec<&lints::Edit> = Vec::new();
         let mut end = crate::syntax::TextSize::from(0);
         for l in &found {
-            let Some(fix) = &l.fix else { continue };
+            let Some(fix) = l.fix.as_ref().filter(|f| f.elsewhere.is_empty()) else { continue };
             if !matches!(l.rule.category, Category::Unused | Category::Redundancy) || matches!(l.level, Level::Hint | Level::Action) {
                 continue;
             }

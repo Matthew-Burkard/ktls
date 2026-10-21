@@ -953,6 +953,11 @@ class Sub(val size: Int) : Base<String>(), Named {
     let (lints, _) = Fixture::new().run("src/main/kotlin/a/A.kt", text);
     let name = lints.iter().find(|l| l.rule.id == "VIRTUAL_MEMBER_HIDDEN" && l.message.starts_with("'name'")).unwrap();
     assert!(apply(text, &name.fix.as_ref().unwrap().edits).contains("@Suppress(\"x\") override suspend fun name()"));
+    // A final member of a project class: make it open (same file here).
+    assert!(fixed(text, "OVERRIDING_FINAL_MEMBER").contains("    open fun fixed() {}\n"));
+    let hidden = "package a\n\nopen class Base {\n    internal fun f() {}\n}\nclass Sub : Base() {\n    internal fun f() {}\n}\n";
+    let out = fixed(hidden, "VIRTUAL_MEMBER_HIDDEN");
+    assert!(out.contains("    internal open fun f() {}\n}\nclass") && out.contains("    internal override fun f() {}"), "{out}");
 }
 
 #[test]
@@ -992,4 +997,58 @@ fun h(x: Any): String {
     }
     assert_eq!(found.len(), 4, "{found:#?}");
     assert!(fixed(text, "INITIALIZER_TYPE_MISMATCH").contains("    val x: A = a\n"));
+}
+
+#[test]
+fn expect_and_actual() {
+    let mut fx = Fixture::new();
+    let common = "package a\n\nexpect fun platform(): String\nexpect class Box {\n    fun size(): Int\n}\nexpect fun lonely()\n";
+    fx.run("src/main/kotlin/a/Common.kt", common);
+    let jvm = "package a\n\nactual fun platform(): String = \"jvm\"\nactual class Box {\n    actual fun size(): Int = 1\n    actual fun extra() {}\n}\nactual fun orphan() {}\n";
+    let (lints, _) = fx.run("src/main/kotlin/a/Jvm.kt", jvm);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{}: {}", l.rule.id, &jvm[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    assert_eq!(found, vec!["ACTUAL_WITHOUT_EXPECT: extra", "ACTUAL_WITHOUT_EXPECT: orphan"]);
+    let (lints, _) = fx.run("src/main/kotlin/a/Common.kt", common);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{}: {}", l.rule.id, &common[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    assert_eq!(found, vec!["NO_ACTUAL_FOR_EXPECT: lonely"]);
+}
+
+#[test]
+fn argument_type_mismatches() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let text = r#"package a
+
+class A
+class B
+object Bounds {
+    fun of(x: Int) = x
+    fun of(x: A) = 0
+}
+class Box<T> {
+    fun <T> put(key: String, value: T) {}
+    fun take(t: T) {}
+}
+
+fun one(a: A, n: Int) {}
+
+fun f(a: A, b: B, box: Box<A>) {
+    one(b, 1)
+    one(a, "x")
+    one(n = 2.5, a = a)
+    one(a, null)
+    one(A(), 1)
+    Bounds.of(1)
+    Bounds.of(a)
+    box.put("k", 1)
+    box.take(b)
+    StringBuilder().append(1)
+}
+"#;
+    let found: Vec<String> = compiler(text).into_iter().filter(|f| f.contains("TYPE_MISMATCH") || f.starts_with("NULL_FOR")).collect();
+    for expected in ["ARGUMENT_TYPE_MISMATCH: b", "ARGUMENT_TYPE_MISMATCH: \"x\"", "ARGUMENT_TYPE_MISMATCH: 2.5", "NULL_FOR_NONNULL_TYPE: null"] {
+        has(&found, expected);
+    }
+    assert_eq!(found.len(), 5, "{found:#?}");
 }

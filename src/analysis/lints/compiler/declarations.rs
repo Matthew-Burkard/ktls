@@ -29,6 +29,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::CLASS_BODY | SyntaxKind::KOTLIN_FILE => redeclarations(&n, out),
             _ => {}
         }
+        if matches!(n.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::TYPEALIAS) {
+            expect_actual(cx, &n, out);
+        }
     }
 }
 
@@ -430,6 +433,32 @@ fn implementations(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
     }
 }
 
+/// `expect` declarations without an `actual`, and `actual` ones without an `expect`.
+fn expect_actual(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    use crate::analysis::ide::hierarchy::counterparts;
+    let (expect, actual) = (has_modifier(n, "expect"), has_modifier(n, "actual"));
+    if !expect && !actual {
+        return;
+    }
+    let Some(name) = name_token(n) else { return };
+    let Some(sym) = decl_symbol(cx, &name, |_| true) else { return };
+    let what = match n.kind() {
+        SyntaxKind::FUN => "function",
+        SyntaxKind::PROPERTY => "property",
+        SyntaxKind::TYPEALIAS => "type alias",
+        _ => "class",
+    };
+    let shown = ast::ident_text(&name);
+    let top_level = n.parent().is_some_and(|p| p.kind() == SyntaxKind::KOTLIN_FILE);
+    if expect && top_level && cx.on(&NO_ACTUAL_FOR_EXPECT) && counterparts(cx.snap, &sym, Modifiers::ACTUAL).is_empty() {
+        out.report(&NO_ACTUAL_FOR_EXPECT, name.text_range(), format!("Expected {what} '{shown}' has no actual declaration in any module."), None);
+    }
+    if actual && cx.on(&ACTUAL_WITHOUT_EXPECT) && counterparts(cx.snap, &sym, Modifiers::EXPECT).is_empty() {
+        let fix = modifiers(n).and_then(|l| l.modifiers().find(|t| t.text() == "actual")).map(|t| Fix::delete("Remove 'actual'", remove_modifier(&t)));
+        out.report(&ACTUAL_WITHOUT_EXPECT, name.text_range(), format!("Actual {what} '{shown}' has no corresponding expected declaration."), fix);
+    }
+}
+
 /// Members declared without `override` that match a supertype member (they need it), and
 /// `override`s of final members.
 fn hidden_and_final(cx: &Cx, e: &Engine, c: &SyntaxNode, t: &TypeRef, body: Option<&SyntaxNode>, out: &mut Sink) {
@@ -446,17 +475,43 @@ fn hidden_and_final(cx: &Cx, e: &Engine, c: &SyntaxNode, t: &TypeRef, body: Opti
         let n = ast::ident_text(&name);
         let interface = e.classifier(&class).is_some_and(|c| c.symbol().kind == SymbolKind::Interface);
         let open = interface || base.modifiers.has(Modifiers::OPEN) || base.modifiers.has(Modifiers::ABSTRACT) || base.modifiers.has(Modifiers::OVERRIDE) && !base.modifiers.has(Modifiers::FINAL);
+        let add_override = Edit { range: TextRange::empty(override_position(&m)), text: "override ".into() };
+        let make_open = |also: Vec<Edit>| open_fix(cx, &base, &format!("{class_name}.{n}"), also);
         if has_modifier(&m, "override") {
             if !open {
-                out.report(&OVERRIDING_FINAL_MEMBER, name.text_range(), format!("'{n}' in '{class_name}' is final and cannot be overridden."), None);
+                out.report(&OVERRIDING_FINAL_MEMBER, name.text_range(), format!("'{n}' in '{class_name}' is final and cannot be overridden."), make_open(Vec::new()));
             }
         } else if open {
-            let fix = Fix::replace("Add 'override' modifier", TextRange::empty(override_position(&m)), "override ");
+            let fix = Fix::new("Add 'override' modifier", vec![add_override]);
             out.report(&VIRTUAL_MEMBER_HIDDEN, name.text_range(), format!("'{n}' hides member of supertype '{class_name}' and needs an 'override' modifier."), Some(fix));
         } else {
-            out.report(&VIRTUAL_MEMBER_HIDDEN, name.text_range(), format!("'{n}' hides final member of supertype '{class_name}'."), None);
+            out.report(&VIRTUAL_MEMBER_HIDDEN, name.text_range(), format!("'{n}' hides final member of supertype '{class_name}'."), make_open(vec![add_override]));
         }
     }
+}
+
+/// "Make 'Base.name' open" for a final member declared in the project (plus `also` here).
+fn open_fix(cx: &Cx, base: &crate::symbols::Symbol, shown: &str, also: Vec<Edit>) -> Option<Fix> {
+    let crate::symbols::Origin::Source { file, name_range, .. } = &base.origin else { return None };
+    let root = cx.snap.file(file)?.parse().syntax();
+    let decl = crate::syntax::covering(&root, *name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::VALUE_PARAMETER))?;
+    // The class must be open too (else the class itself cannot be extended).
+    let class = decl.ancestors().find(|a| a.kind() == SyntaxKind::CLASS)?;
+    if !["open", "abstract", "sealed"].iter().any(|m| has_modifier(&class, m)) && !is_interface(&class) {
+        return None;
+    }
+    let edit = match modifiers(&decl).and_then(|l| l.modifiers().find(|t| t.text() == "final")) {
+        // `final override`: dropping `final` leaves it open.
+        Some(f) => Edit { range: remove_modifier(&f), text: String::new() },
+        None => Edit { range: TextRange::empty(override_position(&decl)), text: "open ".into() },
+    };
+    let mut fix = Fix::new(format!("Make '{shown}' open"), also);
+    if file.as_path() == cx.path {
+        fix.edits.push(edit);
+    } else {
+        fix.elsewhere.push((file.to_path_buf(), edit));
+    }
+    Some(fix)
 }
 
 /// Where `override` goes: after annotations and visibility/modality modifiers, before the
