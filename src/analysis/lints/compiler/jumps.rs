@@ -18,10 +18,29 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         }
     }
     let Some(e) = cx.engine() else { return };
-    for n in cx.root.descendants().filter(|n| n.kind() == SyntaxKind::RETURN_EXPR) {
-        if !in_error(&n) {
-            return_value(e, &n, out);
+    for n in cx.root.descendants().filter(|n| matches!(n.kind(), SyntaxKind::RETURN_EXPR | SyntaxKind::FUN)) {
+        if in_error(&n) {
+            continue;
         }
+        if n.kind() == SyntaxKind::RETURN_EXPR {
+            return_value(e, &n, out);
+        } else {
+            expression_body(e, &n, out);
+        }
+    }
+}
+
+/// `fun f(): T = value` with a value of the wrong type.
+fn expression_body(e: &Engine, f: &SyntaxNode, out: &mut Sink) {
+    let Some(decl) = ast::FunDecl::cast(f.clone()) else { return };
+    let (Some(t), Some(v)) = (decl.return_type(), initializer(f)) else { return };
+    let ty = e.resolve_syntax_type(&t);
+    if matches!(ty, TypeRef::Platform(_) | TypeRef::TypeParam { .. }) {
+        return;
+    }
+    if let Some((rule, msg, _, convert)) = type_mismatch(e, &v, &ty, &t.syntax().text().to_string()) {
+        let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
+        out.report_fixes(rule, v.text_range(), msg, convert.into_iter().collect());
     }
 }
 
@@ -60,6 +79,17 @@ fn return_value(e: &Engine, ret: &SyntaxNode, out: &mut Sink) {
                     let known = matches!(&ty, TypeRef::Named { fq: Some(_), .. } | TypeRef::Function { .. });
                     if known && !unit {
                         out.report(&RETURN_TYPE_MISMATCH, at, format!("This function must return a value of type '{}'.", t.syntax().text()), None);
+                    }
+                }
+                // A value of the wrong type.
+                (Some(t), Some(v)) => {
+                    let ty = e.resolve_syntax_type(&t);
+                    if matches!(ty, TypeRef::Platform(_) | TypeRef::TypeParam { .. }) {
+                        return;
+                    }
+                    if let Some((rule, msg, _, convert)) = type_mismatch(e, &v, &ty, &t.syntax().text().to_string()) {
+                        let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
+                        out.report_fixes(rule, v.text_range(), msg, convert.into_iter().collect());
                     }
                 }
                 // A value from a block-bodied function without a result type (Unit).

@@ -140,6 +140,25 @@ supertypes, generated code).
 | `BREAK_OR_CONTINUE_OUTSIDE_A_LOOP` | error | 'break' or 'continue' outside a loop |
 | `UNINITIALIZED_VARIABLE` | error | Local variable read before it is assigned |
 | `WRONG_NUMBER_OF_TYPE_ARGUMENTS` | error | Type with the wrong number of type arguments |
+| `VAR_OVERRIDDEN_BY_VAL` | error | 'val' overriding a 'var' |
+| `CANNOT_WEAKEN_ACCESS_PRIVILEGE` | error | Override with less visibility than the overridden member |
+| `RETURN_TYPE_MISMATCH_ON_OVERRIDE` | error | Override whose return type is not a subtype of the overridden one |
+| `PROPERTY_TYPE_MISMATCH_ON_OVERRIDE` | error | 'val' override whose type is not a subtype of the overridden one |
+| `VAR_TYPE_MISMATCH_ON_OVERRIDE` | error | 'var' override whose type differs from the overridden one |
+| `MULTIPLE_VARARG_PARAMETERS` | error | More than one 'vararg' parameter |
+| `DEFAULT_VALUE_NOT_ALLOWED_IN_OVERRIDE` | error | Default parameter value in an 'override fun' |
+| `REIFIED_TYPE_PARAMETER_NO_INLINE` | error | 'reified' type parameter of a non-inline declaration |
+| `TYPE_PARAMETER_AS_REIFIED` | error | 'T::class' of a type parameter that is not reified |
+| `EXPOSED_FUNCTION_RETURN_TYPE` | error | Function whose return type is less visible than the function |
+| `EXPOSED_PARAMETER_TYPE` | error | Function or constructor whose parameter type is less visible than it |
+| `EXPOSED_PROPERTY_TYPE` | error | Property whose type is less visible than the property |
+| `EXPOSED_RECEIVER_TYPE` | error | Extension whose receiver type is less visible than the extension |
+| `EXPOSED_SUPER_CLASS` | error | Class whose superclass is less visible than the class |
+| `EXPOSED_SUPER_INTERFACE` | error | Class whose super-interface is less visible than the class |
+| `EQUALITY_NOT_APPLICABLE` | error | '==' between values of unrelated classes |
+| `INCOMPATIBLE_TYPES` | error | 'when' branch value whose class is unrelated to the subject's |
+| `INVALID_IF_AS_EXPRESSION` | error | 'if' without 'else' used as a value |
+| `ELSE_MISPLACED_IN_WHEN` | error | 'else' branch that is not the last one in a 'when' |
 | `ARGUMENT_TYPE_MISMATCH` | error | Argument of the wrong type (literal, typed local/parameter, constructor call) for a function without overloads |
 | `NULL_FOR_NONNULL_TYPE` | error | 'null' for a non-null type |
 | `TOO_MANY_ARGUMENTS` | error | More arguments than parameters |
@@ -149,6 +168,9 @@ supertypes, generated code).
 | `USELESS_CAST` | warning | Cast to the type the value already has |
 | `USELESS_IS_CHECK` | warning | 'is' check that is always true or always false |
 | `CAST_NEVER_SUCCEEDS` | warning | Cast between unrelated classes |
+| `NOTHING_TO_INLINE` | warning | 'inline' function without parameters of function type |
+| `REDUNDANT_NULLABLE` | warning | Type marked nullable twice ('T??') |
+| `DUPLICATE_BRANCH_CONDITION_IN_WHEN` | warning | 'when' branch condition repeating an earlier one |
 | `UNNECESSARY_SAFE_CALL` | warning | '?.' on a non-null receiver |
 | `UNNECESSARY_NOT_NULL_ASSERTION` | warning | '!!' on a non-null value |
 | `USELESS_ELVIS` | warning | '?:' after a non-null value |

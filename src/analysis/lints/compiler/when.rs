@@ -10,11 +10,65 @@ use crate::analysis::resolve::{Classifier, Resolved};
 use crate::symbols::{Modifiers, Symbol, SymbolKind, TypeRef, short_class_name};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
+    for n in cx.root.descendants().filter(|n| n.kind() == SyntaxKind::WHEN_EXPR) {
+        if !in_error(&n) {
+            branches(cx, &n, out);
+        }
+    }
     let Some(e) = cx.engine() else { return };
     for n in cx.root.descendants().filter(|n| n.kind() == SyntaxKind::WHEN_EXPR) {
         if !in_error(&n) {
             when_expr(cx, e, &n, out);
         }
+    }
+}
+
+/// The value of a `when` branch condition (not `is`/`in`).
+pub(super) fn condition_value(c: &SyntaxNode) -> Option<SyntaxNode> {
+    if c.children().any(|x| x.kind() == SyntaxKind::OPERATION_REFERENCE) {
+        return None;
+    }
+    c.first_child()
+}
+
+/// `else` before other branches, and value conditions repeating an earlier constant one.
+fn branches(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let entries: Vec<SyntaxNode> = n.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY).collect();
+    for en in entries.iter().take(entries.len().saturating_sub(1)) {
+        if let Some(kw) = ast::token(en, SyntaxKind::ELSE_KW) {
+            out.report(&ELSE_MISPLACED_IN_WHEN, kw.text_range(), "'else' entry must be the last one in a 'when' expression.", None);
+        }
+    }
+    if !n.children().any(|c| c.kind() == SyntaxKind::WHEN_SUBJECT) {
+        return;
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    for v in entries.iter().flat_map(|en| en.children().filter(|c| c.kind() == SyntaxKind::WHEN_CONDITION)).filter_map(|c| condition_value(&c)) {
+        if !constant(cx, &v) {
+            continue;
+        }
+        let key: String = v.text().to_string().chars().filter(|c| !c.is_whitespace()).collect();
+        if !seen.insert(key) {
+            out.report(&DUPLICATE_BRANCH_CONDITION_IN_WHEN, v.text_range(), "Duplicate branch condition in 'when'.", None);
+        }
+    }
+}
+
+/// A literal, or a name of an enum entry or object.
+fn constant(cx: &Cx, v: &SyntaxNode) -> bool {
+    use crate::analysis::ide::infer::Def;
+    match v.kind() {
+        SyntaxKind::LITERAL => true,
+        SyntaxKind::STRING_TEMPLATE => v.descendants().all(|d| !matches!(d.kind(), SyntaxKind::SHORT_STRING_TEMPLATE_ENTRY | SyntaxKind::LONG_STRING_TEMPLATE_ENTRY)),
+        SyntaxKind::NAME_REF | SyntaxKind::DOT_QUALIFIED_EXPR => {
+            let Some(e) = cx.engine() else { return false };
+            let name = if v.kind() == SyntaxKind::NAME_REF { Some(v.clone()) } else { v.children().last().filter(|c| c.kind() == SyntaxKind::NAME_REF) };
+            if v.kind() == SyntaxKind::DOT_QUALIFIED_EXPR && v.descendants().any(|d| !matches!(d.kind(), SyntaxKind::NAME_REF | SyntaxKind::DOT_QUALIFIED_EXPR)) {
+                return false;
+            }
+            name.is_some_and(|r| matches!(e.resolve_name_ref(&r).as_slice(), [Def::Symbol { sym, .. }] if matches!(sym.kind, SymbolKind::EnumEntry | SymbolKind::Object)))
+        }
+        _ => false,
     }
 }
 

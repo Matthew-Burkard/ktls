@@ -1296,3 +1296,108 @@ fun f(a: Money, b: Money, n: Int, s: String, flag: Boolean?, dog: Dog, car: Car,
     assert_eq!(found.iter().filter(|f| f.starts_with("NONE_APPLICABLE")).count(), 1, "{found:#?}");
     assert!(!found.iter().any(|f| f.contains("any as Dog") || f.starts_with("ASSIGNMENT_TYPE_MISMATCH: 2")), "{found:#?}");
 }
+
+#[test]
+fn signature_and_override_compiler_errors() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let text = r#"package a
+
+private class Secret
+internal class Inner
+enum class Color { RED, GREEN }
+
+open class Base {
+    open var size: Int = 0
+    open val name: String = ""
+    open fun count(): Int = 0
+    open fun run(times: Int) {}
+    open fun label(): CharSequence = ""
+}
+
+class Derived : Base() {
+    override val size: Int = 1
+    override val name: Int = 2
+    override fun count(): String = ""
+    private override fun run(times: Int = 2) {}
+    override fun label(): String = ""
+}
+
+fun many(vararg a: Int, vararg b: Int) {}
+fun <reified T> notInline(t: T) {}
+inline fun <reified T> ok() = T::class
+fun <T> klass() = T::class
+inline fun plain(x: Int) = x + 1
+inline fun lambda(f: () -> Unit) = f()
+fun nullable(s: String??) {}
+
+fun exposeReturn(): Secret = Secret()
+fun exposeParam(s: Inner) {}
+private fun hiddenOk(): Secret = Secret()
+internal fun internalOk(i: Inner) {}
+class Public(val s: Secret)
+class Holder private constructor(private val s: Secret)
+open class Sub : Inner()
+internal interface Hidden
+class Impl : Hidden
+interface Leaky : Hidden
+
+fun g(s: String, n: Int, c: Color): Int {
+    if (s == n) println()
+    if (s == "x") println()
+    when (n) {
+        "a" -> println()
+        1, 1 -> println()
+        else -> println()
+    }
+    when (c) {
+        else -> println()
+        Color.RED -> println()
+    }
+    val v = if (n > 0) 1
+    if (n > 0) return "x"
+    return 1
+}
+
+fun body(): Int = "x"
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{}: {}", l.rule.id, &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    for expected in [
+        "VAR_OVERRIDDEN_BY_VAL: size",
+        "PROPERTY_TYPE_MISMATCH_ON_OVERRIDE: Int",
+        "RETURN_TYPE_MISMATCH_ON_OVERRIDE: String",
+        "CANNOT_WEAKEN_ACCESS_PRIVILEGE: private",
+        "DEFAULT_VALUE_NOT_ALLOWED_IN_OVERRIDE: 2",
+        "MULTIPLE_VARARG_PARAMETERS: vararg",
+        "REIFIED_TYPE_PARAMETER_NO_INLINE: reified",
+        "TYPE_PARAMETER_AS_REIFIED: T",
+        "NOTHING_TO_INLINE: inline",
+        "REDUNDANT_NULLABLE: ?",
+        "EXPOSED_FUNCTION_RETURN_TYPE: Secret",
+        "EXPOSED_PARAMETER_TYPE: Inner",
+        "EXPOSED_PARAMETER_TYPE: Secret",
+        "EXPOSED_SUPER_CLASS: Inner",
+        "EXPOSED_SUPER_INTERFACE: Hidden",
+        "EQUALITY_NOT_APPLICABLE: ==",
+        "INCOMPATIBLE_TYPES: \"a\"",
+        "DUPLICATE_BRANCH_CONDITION_IN_WHEN: 1",
+        "ELSE_MISPLACED_IN_WHEN: else",
+        "INVALID_IF_AS_EXPRESSION: if",
+        "RETURN_TYPE_MISMATCH: \"x\"",
+    ] {
+        has(&found, expected);
+    }
+    let count = |rule: &str| found.iter().filter(|f| f.starts_with(rule)).count();
+    // `label(): String` narrows `CharSequence`; `private` / `internal` / private-constructor
+    // declarations and a class implementing an internal interface expose nothing; `lambda`
+    // and `ok` have something to inline.
+    assert_eq!(count("RETURN_TYPE_MISMATCH_ON_OVERRIDE"), 1, "{found:#?}");
+    assert_eq!(count("EXPOSED_"), 5, "{found:#?}");
+    assert_eq!(count("NOTHING_TO_INLINE"), 1, "{found:#?}");
+    assert_eq!(count("EQUALITY_NOT_APPLICABLE"), 1, "{found:#?}");
+    assert_eq!(count("RETURN_TYPE_MISMATCH:"), 2, "{found:#?}");
+    assert_eq!(count("TYPE_PARAMETER_AS_REIFIED"), 1, "{found:#?}");
+}

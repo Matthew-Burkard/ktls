@@ -4,6 +4,7 @@
 
 use super::super::*;
 use super::expressions::{certain_type_smart, literal_type, type_mismatch};
+use super::when::condition_value;
 use crate::analysis::ide::infer::{Def, Engine, fq_of, strip};
 use crate::symbols::{Origin, SymbolKind, TypeRef};
 
@@ -16,6 +17,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         match n.kind() {
             SyntaxKind::BINARY_EXPR => {
                 assignment(cx, e, &n, out);
+                equality(e, &n, out);
                 if binary_op(&n).is_some_and(|o| matches!(o.kind(), SyntaxKind::AMP2 | SyntaxKind::PIPE2)) {
                     for operand in n.children().filter(|c| c.kind() != SyntaxKind::OPERATION_REFERENCE) {
                         condition(e, &operand, out);
@@ -33,6 +35,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 }
             }
             SyntaxKind::BINARY_WITH_TYPE => cast(e, &n, out),
+            SyntaxKind::IF_EXPR => if_as_expression(e, &n, out),
+            SyntaxKind::WHEN_EXPR => when_values(e, &n, out),
             SyntaxKind::IS_EXPR => is_check(e, &n, out),
             _ => {}
         }
@@ -155,5 +159,70 @@ fn is_check(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     if e.conforms(&TypeRef::named(afq), tfq) == Some(true) {
         let result = if negated { "false" } else { "true" };
         out.report(&USELESS_IS_CHECK, n.text_range(), format!("Check for instance is always '{result}'."), None);
+    }
+}
+
+/// Two types whose values can never be equal: unrelated classes (each class has one
+/// superclass, so they share no subclass).
+fn incompatible(e: &Engine, a: &TypeRef, b: &TypeRef) -> bool {
+    let (Some(afq), Some(bfq)) = (fq_of(a), fq_of(b)) else { return false };
+    if [afq, bfq].iter().any(|f| matches!(*f, "kotlin.Any" | "kotlin.Nothing")) || !class_kind(e, afq) || !class_kind(e, bfq) {
+        return false;
+    }
+    e.conforms(&TypeRef::named(afq), bfq) == Some(false) && e.conforms(&TypeRef::named(bfq), afq) == Some(false)
+}
+
+/// The certain type of an operand, except integer literals (their type follows the other
+/// side).
+fn operand_type(e: &Engine, v: &SyntaxNode) -> Option<TypeRef> {
+    if v.descendants_with_tokens().any(|t| t.kind() == SyntaxKind::INT_LITERAL) && literal_type(v).is_some() {
+        return None;
+    }
+    certain(e, v)
+}
+
+/// `a == b` / `a != b` between unrelated classes.
+fn equality(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    let Some(op) = binary_op(n).filter(|o| matches!(o.kind(), SyntaxKind::EQ2 | SyntaxKind::NOT_EQ)) else { return };
+    let Some((l, r)) = binary_operands(n) else { return };
+    let (Some(a), Some(b)) = (operand_type(e, &l), operand_type(e, &r)) else { return };
+    if incompatible(e, &a, &b) {
+        out.report(&EQUALITY_NOT_APPLICABLE, op.text_range(), format!("Operator '{}' cannot be applied to '{}' and '{}'.", op.text(), a.display(), b.display()), None);
+    }
+}
+
+/// `when (x) { v -> }` where `v`'s class is unrelated to `x`'s.
+fn when_values(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    let Some(subject) = n.children().find(|c| c.kind() == SyntaxKind::WHEN_SUBJECT) else { return };
+    let expr = match subject.children().find(|c| c.kind() == SyntaxKind::PROPERTY) {
+        Some(p) => initializer(&p),
+        None => subject.first_child(),
+    };
+    let Some(st) = expr.and_then(|x| operand_type(e, &x)) else { return };
+    let conditions = n.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY).flat_map(|en| en.children().filter(|c| c.kind() == SyntaxKind::WHEN_CONDITION).collect::<Vec<_>>());
+    for v in conditions.filter_map(|c| condition_value(&c)) {
+        let Some(vt) = operand_type(e, &v) else { continue };
+        if incompatible(e, &vt, &st) {
+            out.report(&INCOMPATIBLE_TYPES, v.text_range(), format!("Incompatible types '{}' and '{}'.", vt.display(), st.display()), None);
+        }
+    }
+}
+
+/// `if` without `else` whose value is used.
+fn if_as_expression(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    if n.children().any(|c| c.kind() == SyntaxKind::ELSE_BRANCH) || ast::token(n, SyntaxKind::ELSE_KW).is_some() {
+        return;
+    }
+    let Some(p) = n.parent() else { return };
+    let used = match p.kind() {
+        SyntaxKind::PROPERTY => initializer(&p).as_ref() == Some(n),
+        SyntaxKind::VALUE_ARGUMENT => true,
+        SyntaxKind::BINARY_EXPR => assignment_op(&p).is_some_and(|o| o.kind() == SyntaxKind::EQ) && p.children().last().as_ref() == Some(n),
+        // An expression body of a function with a (non-Unit) result type.
+        SyntaxKind::FUN => initializer(&p).as_ref() == Some(n) && ast::FunDecl::cast(p.clone()).and_then(|f| f.return_type()).is_some_and(|t| !matches!(e.resolve_syntax_type(&t).fq_name(), Some("kotlin.Unit") | None)),
+        _ => false,
+    };
+    if used && let Some(kw) = ast::token(n, SyntaxKind::IF_KW) {
+        out.report(&INVALID_IF_AS_EXPRESSION, kw.text_range(), "'if' must have both main and 'else' branches if used as an expression.", None);
     }
 }

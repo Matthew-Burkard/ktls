@@ -2028,6 +2028,12 @@ impl<'s> Engine<'s> {
     /// there is none or the supertypes are not fully known. Java classes other than
     /// `Object` are skipped (mapped collection members have Java names).
     pub fn hidden_member(&self, t: &TypeRef, m: &Symbol) -> Option<(Symbol, String)> {
+        self.overridden_member(t, m).map(|(s, c, _)| (s, c))
+    }
+
+    /// Like [`Engine::hidden_member`], with the substitution of the supertype's type
+    /// parameters.
+    pub fn overridden_member(&self, t: &TypeRef, m: &Symbol) -> Option<(Symbol, String, Subst)> {
         if !matches!(m.kind, SymbolKind::Function | SymbolKind::Property) {
             return None;
         }
@@ -2061,7 +2067,7 @@ impl<'s> Engine<'s> {
                     }
                 }
                 if same {
-                    return Some((sm, fq.to_string()));
+                    return Some((sm, fq.to_string(), s));
                 }
             }
         }

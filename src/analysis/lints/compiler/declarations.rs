@@ -7,7 +7,7 @@ use super::super::*;
 use crate::analysis::diagnostics::{LocalsCache, scope_at};
 use crate::analysis::ide::completion::override_stub;
 use crate::analysis::resolve::Resolved;
-use crate::symbols::{Modifiers, SymbolKind, TypeRef};
+use crate::symbols::{Modifiers, Symbol, SymbolKind, TypeRef};
 
 const VISIBILITY: &[&str] = &["public", "private", "protected", "internal"];
 const PRIMITIVES: &[&str] = &["Int", "Long", "Short", "Byte", "Float", "Double", "Boolean", "Char", "UInt", "ULong", "UShort", "UByte"];
@@ -462,7 +462,7 @@ fn expect_actual(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
 /// Members declared without `override` that match a supertype member (they need it), and
 /// `override`s of final members.
 fn hidden_and_final(cx: &Cx, e: &Engine, c: &SyntaxNode, t: &TypeRef, body: Option<&SyntaxNode>, out: &mut Sink) {
-    if c.kind() == SyntaxKind::OBJECT_LITERAL || !cx.on(&VIRTUAL_MEMBER_HIDDEN) && !cx.on(&OVERRIDING_FINAL_MEMBER) {
+    if c.kind() == SyntaxKind::OBJECT_LITERAL {
         return;
     }
     let ctor_params = c.children().filter(|x| x.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR).flat_map(|p| p.descendants()).filter(|v| v.kind() == SyntaxKind::VALUE_PARAMETER && v.children_with_tokens().any(|t| matches!(t.kind(), SyntaxKind::VAL_KW | SyntaxKind::VAR_KW)));
@@ -470,7 +470,7 @@ fn hidden_and_final(cx: &Cx, e: &Engine, c: &SyntaxNode, t: &TypeRef, body: Opti
     for m in ctor_params.chain(members) {
         let Some(name) = name_token(&m) else { continue };
         let Some(sym) = decl_symbol(cx, &name, |s| matches!(s.kind, SymbolKind::Function | SymbolKind::Property)) else { continue };
-        let Some((base, class)) = e.hidden_member(t, &sym) else { continue };
+        let Some((base, class, subst)) = e.overridden_member(t, &sym) else { continue };
         let class_name = class.rsplit('.').next().unwrap_or(&class);
         let n = ast::ident_text(&name);
         let interface = e.classifier(&class).is_some_and(|c| c.symbol().kind == SymbolKind::Interface);
@@ -481,12 +481,82 @@ fn hidden_and_final(cx: &Cx, e: &Engine, c: &SyntaxNode, t: &TypeRef, body: Opti
             if !open {
                 out.report(&OVERRIDING_FINAL_MEMBER, name.text_range(), format!("'{n}' in '{class_name}' is final and cannot be overridden."), make_open(Vec::new()));
             }
+            override_signature(e, &m, &name, &sym, &base, &subst, class_name, out);
         } else if open {
             let fix = Fix::new("Add 'override' modifier", vec![add_override]);
             out.report(&VIRTUAL_MEMBER_HIDDEN, name.text_range(), format!("'{n}' hides member of supertype '{class_name}' and needs an 'override' modifier."), Some(fix));
         } else {
             out.report(&VIRTUAL_MEMBER_HIDDEN, name.text_range(), format!("'{n}' hides final member of supertype '{class_name}'."), make_open(vec![add_override]));
         }
+    }
+}
+
+/// An `override` that changes what it overrides: `val` for a `var`, less visibility, or a
+/// type that does not fit.
+#[allow(clippy::too_many_arguments)]
+fn override_signature(e: &Engine, m: &SyntaxNode, name: &SyntaxToken, sym: &Symbol, base: &Symbol, subst: &crate::analysis::ide::infer::Subst, class_name: &str, out: &mut Sink) {
+    use crate::symbols::Visibility;
+    let n = ast::ident_text(name);
+    let var = m.children_with_tokens().any(|t| t.kind() == SyntaxKind::VAR_KW);
+    if sym.kind == SymbolKind::Property && base.modifiers.has(Modifiers::VAR) && !var {
+        let fix = ast::token(m, SyntaxKind::VAL_KW).map(|v| Fix::replace("Change to 'var'", v.text_range(), "var"));
+        out.report(&VAR_OVERRIDDEN_BY_VAL, name.text_range(), format!("Val-property cannot override var-property '{class_name}.{n}'."), fix);
+    }
+    // Visibility: only an explicit modifier can be weaker.
+    if let Some(v) = modifiers(m).and_then(|l| l.modifiers().find(|t| VISIBILITY.contains(&t.text()))) {
+        let weaker = match base.visibility {
+            Visibility::Public => v.text() != "public",
+            Visibility::Protected => matches!(v.text(), "private" | "internal"),
+            Visibility::Internal => matches!(v.text(), "private" | "protected"),
+            _ => false,
+        };
+        if weaker {
+            let shown = match base.visibility {
+                Visibility::Public => "public",
+                Visibility::Protected => "protected",
+                _ => "internal",
+            };
+            out.report(&CANNOT_WEAKEN_ACCESS_PRIVILEGE, v.text_range(), format!("Cannot weaken access privilege '{shown}' for '{n}' in '{class_name}'."), Some(Fix::replace(format!("Make '{n}' {shown}"), v.text_range(), shown)));
+        }
+    }
+    // Types.
+    let written = match m.kind() {
+        SyntaxKind::FUN => ast::FunDecl::cast(m.clone()).and_then(|f| f.return_type()),
+        _ => ast::child::<ast::TypeRef>(m),
+    };
+    let ours = match written {
+        Some(t) => e.resolve_syntax_type(&t),
+        // A block-bodied function without a result type returns Unit.
+        None if m.kind() == SyntaxKind::FUN && ast::FunDecl::cast(m.clone()).is_some_and(|f| !f.has_expression_body()) && m.children().any(|c| c.kind() == SyntaxKind::BLOCK) => TypeRef::named("kotlin.Unit"),
+        None => return,
+    };
+    let Some(theirs) = base.ty.as_ref().map(|t| crate::analysis::ide::infer::substitute(&e.resolve_declared(base, t), subst)) else { return };
+    let (TypeRef::Named { fq: Some(ofq), nullable: on, .. }, TypeRef::Named { fq: Some(tfq), nullable: tn, .. }) = (&ours, &theirs) else { return };
+    if [ofq, tfq].iter().any(|f| e.classifier(f).is_none_or(|c| c.symbol().kind == SymbolKind::TypeAlias)) {
+        return;
+    }
+    let fits = |a: &str, an: bool, b: &str, bn: bool| -> Option<bool> { Some((!an || bn) && e.conforms(&TypeRef::named(a), b)?) };
+    let ok = match (sym.kind, var) {
+        (SymbolKind::Property, true) => fits(ofq, *on, tfq, *tn).zip(fits(tfq, *tn, ofq, *on)).map(|(a, b)| a && b),
+        _ => fits(ofq, *on, tfq, *tn),
+    };
+    if ok != Some(false) {
+        return;
+    }
+    let at = written_range(m).unwrap_or(name.text_range());
+    let (rule, what) = match (sym.kind, var) {
+        (SymbolKind::Property, true) => (&VAR_TYPE_MISMATCH_ON_OVERRIDE, "Type of"),
+        (SymbolKind::Property, false) => (&PROPERTY_TYPE_MISMATCH_ON_OVERRIDE, "Type of"),
+        _ => (&RETURN_TYPE_MISMATCH_ON_OVERRIDE, "Return type of"),
+    };
+    out.report(rule, at, format!("{what} '{n}' is not a subtype of the overridden member '{class_name}.{n}' of type '{}'.", theirs.display()), None);
+}
+
+/// The written type (return type, property type) of a declaration.
+fn written_range(m: &SyntaxNode) -> Option<TextRange> {
+    match m.kind() {
+        SyntaxKind::FUN => ast::FunDecl::cast(m.clone()).and_then(|f| f.return_type()).map(|t| t.syntax().text_range()),
+        _ => ast::child::<ast::TypeRef>(m).map(|t| t.syntax().text_range()),
     }
 }
 
