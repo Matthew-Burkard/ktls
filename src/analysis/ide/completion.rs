@@ -407,6 +407,9 @@ impl Collector<'_, '_> {
                 for (m, s) in self.e.all_members(&t) {
                     self.symbol(&m, &s, 1, true, call);
                 }
+                if call && self.opts.snippets {
+                    self.postfix(recv, at, &t);
+                }
                 let at = at.parent().unwrap();
                 for (m, s) in self.e.all_extensions(&at, &t) {
                     self.symbol(&m, &s, 2, true, call);
@@ -432,6 +435,82 @@ impl Collector<'_, '_> {
             }
             Qualifier::Package(p) => self.package_contents(&p, 3, call, false),
             Qualifier::Unknown => {}
+        }
+    }
+
+    /// Postfix templates (`cond.if`, `xs.for`, `expr.val`): the snippet replaces the
+    /// template name, and an extra edit removes `recv.` before it.
+    fn postfix(&mut self, recv: &SyntaxNode, at: &SyntaxToken, t: &TypeRef) {
+        let Some(outer) = recv.parent().filter(|p| p.kind() == SyntaxKind::DOT_QUALIFIED_EXPR) else { return };
+        let marker = match at.parent().and_then(|n| n.parent()) {
+            Some(c) if c.kind() == SyntaxKind::CALL_EXPR => c,
+            _ => at.parent().unwrap(),
+        };
+        // `recv.name` exactly, not `recv.name()` or `recv.name.more`.
+        if marker.kind() == SyntaxKind::CALL_EXPR || outer.children().last().as_ref() != Some(&marker) {
+            return;
+        }
+        let statement = outer.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::BLOCK | SyntaxKind::SCRIPT_BODY));
+        let expr = snippet_escape(&recv.text().to_string());
+        let simple = matches!(recv.kind(), SyntaxKind::NAME_REF | SyntaxKind::CALL_EXPR | SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR | SyntaxKind::PAREN_EXPR | SyntaxKind::THIS_EXPR)
+            || format!("{:?}", recv.kind()).ends_with("LITERAL");
+        let stripped = super::infer::strip(t);
+        let fq = stripped.fq_name().unwrap_or_default();
+        let nullable = matches!(t, TypeRef::Platform(_)) || matches!(stripped, TypeRef::Named { nullable: true, .. } | TypeRef::TypeParam { nullable: true, .. } | TypeRef::Function { nullable: true, .. });
+        let boolean = fq == "kotlin.Boolean" && !nullable;
+        let unit = matches!(fq, "kotlin.Unit" | "kotlin.Nothing");
+        let iterable = !nullable && self.e.supertype_closure(t).iter().filter_map(|s| s.fq_name()).any(|f| {
+            matches!(f, "kotlin.collections.Iterable" | "kotlin.collections.Map" | "kotlin.sequences.Sequence" | "kotlin.CharSequence" | "kotlin.Array")
+                || f.starts_with("kotlin.") && f.ends_with("Array") && !f[7..].contains('.')
+        });
+        let name = suggested_name(stripped);
+        let mut templates: Vec<(&str, String, &str)> = Vec::new();
+        if statement && !unit {
+            templates.push(("val", format!("val ${{1:{name}}} = {expr}$0"), "val name = expr"));
+            templates.push(("var", format!("var ${{1:{name}}} = {expr}$0"), "var name = expr"));
+        }
+        if statement {
+            templates.push(("return", format!("return {expr}$0"), "return expr"));
+        }
+        if boolean {
+            if statement {
+                templates.push(("if", format!("if ({expr}) {{\n    $0\n}}"), "if (expr) {}"));
+                templates.push(("while", format!("while ({expr}) {{\n    $0\n}}"), "while (expr) {}"));
+            }
+            let not = if simple { format!("!{expr}$0") } else { format!("!({expr})$0") };
+            templates.push(("not", not, "!expr"));
+        }
+        if nullable && statement {
+            templates.push(("notnull", format!("if ({expr} != null) {{\n    $0\n}}"), "if (expr != null) {}"));
+            templates.push(("null", format!("if ({expr} == null) {{\n    $0\n}}"), "if (expr == null) {}"));
+        }
+        if iterable && statement {
+            let item = if fq == "kotlin.collections.Map" || fq.ends_with("Map") { "(key, value)".to_string() } else { "${1:item}".to_string() };
+            templates.push(("for", format!("for ({item} in {expr}) {{\n    $0\n}}"), "for (item in expr) {}"));
+        }
+        if !unit {
+            templates.push(("when", format!("when ({expr}) {{\n    $0\n}}"), "when (expr) {}"));
+            templates.push(("par", format!("({expr})$0"), "(expr)"));
+            templates.push(("arg", format!("${{1:call}}({expr})$0"), "call(expr)"));
+        }
+        if statement && !unit {
+            templates.push(("println", format!("println({expr})$0"), "println(expr)"));
+        }
+        if statement {
+            templates.push(("try", format!("try {{\n    {expr}$0\n}} catch (e: Exception) {{\n    \n}}"), "try { expr } catch"));
+        }
+        let remove = TextRange::new(recv.text_range().start(), at.text_range().start());
+        for (label, insert, shown) in templates {
+            if !matches(&self.prefix, label) {
+                continue;
+            }
+            let mut item = Self::item(label, ItemKind::Snippet, 6);
+            item.description = Some(shown.to_string());
+            item.detail = Some(format!("postfix: {shown}"));
+            item.insert = Some(insert);
+            item.snippet = true;
+            item.additional = vec![(remove, String::new())];
+            self.items.push(item);
         }
     }
 
@@ -806,5 +885,34 @@ pub fn override_stub(e: &Engine, m: &Symbol, s: &Subst, indent: &str) -> String 
     match m.kind {
         SymbolKind::Function => format!("{head} {{\n{indent}    TODO(\"Not yet implemented\")\n{indent}}}"),
         _ => format!("{head}\n{indent}    get() = TODO(\"Not yet implemented\")"),
+    }
+}
+
+/// Escape `$`, `}` and `\` for a snippet.
+fn snippet_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('$', "\\$").replace('}', "\\}")
+}
+
+/// A variable name for a value of type `t`: `User` → `user`, `List<User>` → `users`.
+fn suggested_name(t: &TypeRef) -> String {
+    let simple = |t: &TypeRef| t.fq_name().map(|f| f.rsplit('.').next().unwrap_or(f).to_string());
+    let decap = |s: &str| {
+        let mut c = s.chars();
+        c.next().map(|f| f.to_lowercase().chain(c).collect::<String>()).unwrap_or_default()
+    };
+    let name = match t {
+        TypeRef::Named { args, .. } if args.len() == 1 && simple(t).is_some_and(|s| matches!(s.as_str(), "List" | "MutableList" | "Set" | "MutableSet" | "Collection" | "Iterable" | "Sequence" | "Array")) => {
+            match &args[0] {
+                crate::symbols::TypeArg::Type { ty, .. } => simple(super::infer::strip(ty)).map(|s| format!("{}s", decap(&s))),
+                _ => None,
+            }
+        }
+        _ => simple(t).map(|s| decap(&s)),
+    };
+    match name.as_deref() {
+        None | Some("") | Some("int") | Some("long") | Some("double") | Some("float") | Some("short") | Some("byte") | Some("char") | Some("boolean") | Some("any") => "value".to_string(),
+        Some("string") => "s".to_string(),
+        Some(n @ ("object" | "class" | "interface" | "in" | "is" | "as" | "fun" | "val" | "var" | "when" | "if" | "for" | "do" | "try" | "throw" | "return" | "package" | "typealias" | "this" | "super" | "null")) => format!("{n}Value"),
+        Some(n) => n.to_string(),
     }
 }

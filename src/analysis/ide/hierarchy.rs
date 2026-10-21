@@ -1,5 +1,5 @@
-//! Go to implementation (subclasses and overrides), go to type definition, and the call
-//! and type hierarchies.
+//! Go to implementation (subclasses and overrides), go to declaration (overridden member,
+//! `expect`), go to type definition, and the call and type hierarchies.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -114,6 +114,55 @@ pub fn implementations(snap: &Snapshot, path: &Path, offset: TextSize, cancelled
                 out.extend(target(&i.path, m));
             }
         }
+    }
+    out
+}
+
+/// Go to declaration: for an `override`, the member it overrides; for an `actual`
+/// declaration, its `expect`; otherwise the definition.
+pub fn declaration(snap: &Snapshot, path: &Path, offset: TextSize) -> Vec<NavTarget> {
+    let Some(e) = Engine::new(snap, path) else { return Vec::new() };
+    let Some((_, defs)) = defs_at(&e, offset) else { return Vec::new() };
+    let mut out: Vec<NavTarget> = Vec::new();
+    for d in &defs {
+        let found = match d {
+            Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::ACTUAL) => expects(snap, sym),
+            Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::OVERRIDE) => overridden(&e, sym).and_then(|b| def_location(snap, &e, &Def::Symbol { sym: b, subst: Default::default() }, !snap.workspace.offline)).into_iter().collect(),
+            _ => Vec::new(),
+        };
+        let found = if found.is_empty() { def_location(snap, &e, d, !snap.workspace.offline).into_iter().collect() } else { found };
+        for t in found {
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// The supertype member that the `override` member `sym` overrides.
+fn overridden(e: &Engine, sym: &Symbol) -> Option<Symbol> {
+    let (container, _) = sym.fq_name.rsplit_once('.')?;
+    let c = e.classifier(container)?;
+    e.hidden_member(&class_type(c.symbol()), sym).map(|(m, _)| m)
+}
+
+/// The `expect` declarations matching the `actual` declaration `sym`.
+fn expects(snap: &Snapshot, sym: &Symbol) -> Vec<NavTarget> {
+    fn walk(path: &Path, ds: &[SourceDecl], sym: &Symbol, out: &mut Vec<NavTarget>) {
+        for d in ds {
+            let s = &d.symbol;
+            if s.modifiers.has(Modifiers::EXPECT) && s.fq_name == sym.fq_name && s.kind.is_classifier() == sym.kind.is_classifier() && s.params.len() == sym.params.len() {
+                out.extend(target(path, s));
+            }
+            if sym.fq_name.starts_with(&format!("{}.", s.fq_name)) {
+                walk(path, &d.children, sym, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for f in snap.files.values().filter(|f| f.text.contains("expect") && f.text.contains(sym.name.as_str())) {
+        walk(&f.path, &f.summary().decls, sym, &mut out);
     }
     out
 }

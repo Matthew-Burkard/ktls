@@ -96,6 +96,7 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
+        declaration_provider: Some(lsp_types::DeclarationCapability::Simple(true)),
         implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
         call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
         folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
@@ -318,15 +319,18 @@ impl Server {
                     Ok(serde_json::to_value(lsp_types::GotoDefinitionResponse::Array(locs)).unwrap())
                 });
             }
-            GotoImplementation::METHOD | GotoTypeDefinition::METHOD => {
+            GotoImplementation::METHOD | GotoTypeDefinition::METHOD | GotoDeclaration::METHOD => {
                 let method = req.method.clone();
-                let implementation = method == GotoImplementation::METHOD;
                 let Ok((id, params)) = req.extract::<lsp_types::GotoDefinitionParams>(&method) else { return };
                 let tdp = params.text_document_position_params;
                 let path = self.path_of(&tdp.text_document.uri);
                 self.spawn(id, move |cx| {
                     let path = path.ok_or(Cancelled)?;
-                    let locs = if implementation { handlers::implementation(cx, &path, tdp.position)? } else { handlers::type_definition(cx, &path, tdp.position)? };
+                    let locs = match method.as_str() {
+                        GotoImplementation::METHOD => handlers::implementation(cx, &path, tdp.position)?,
+                        GotoDeclaration::METHOD => handlers::declaration(cx, &path, tdp.position)?,
+                        _ => handlers::type_definition(cx, &path, tdp.position)?,
+                    };
                     Ok(serde_json::to_value(lsp_types::GotoDefinitionResponse::Array(locs)).unwrap())
                 });
             }

@@ -239,6 +239,9 @@ pub fn code_actions(cx: &Ctx, path: &Path, range: lsp_types::Range, context: &ls
             if let Some(fix) = &l.fix {
                 out.push(action(&fix.title, CodeActionKind::QUICKFIX, Some(diag.clone()), fix, true));
             }
+            for fix in &l.alternatives {
+                out.push(action(&fix.title, CodeActionKind::QUICKFIX, Some(diag.clone()), fix, false));
+            }
             for s in lints::suppress_fixes(&root, text, l) {
                 out.push(action(&s.title, CodeActionKind::QUICKFIX, Some(diag.clone()), &s, false));
             }
@@ -312,6 +315,13 @@ pub fn implementation(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result
 pub fn type_definition(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Vec<Location>> {
     let Some((_, offset)) = offset_of(cx, path, pos) else { return Ok(Vec::new()) };
     let targets = crate::analysis::ide::hierarchy::type_definition(cx.snap, path, offset);
+    cx.check()?;
+    Ok(locations(cx, targets))
+}
+
+pub fn declaration(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Vec<Location>> {
+    let Some((_, offset)) = offset_of(cx, path, pos) else { return Ok(Vec::new()) };
+    let targets = crate::analysis::ide::hierarchy::declaration(cx.snap, path, offset);
     cx.check()?;
     Ok(locations(cx, targets))
 }

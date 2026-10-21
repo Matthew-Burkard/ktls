@@ -4,8 +4,8 @@ A Kotlin language server written in Rust. This is the core infrastructure: proto
 handling, an error-tolerant parser, Gradle/Maven import with native dependency
 resolution, binary classpath indexing (jars, the JDK image, Kotlin metadata), a
 module-aware declaration index, import/type resolution with diagnostics, navigation
-(definition, type definition, implementation, hover, references, highlights, rename,
-call/type hierarchy), completion, signature help, inlay hints, semantic tokens, folding and
+(definition, declaration, type definition, implementation, hover, references, highlights, rename,
+call/type hierarchy), completion (incl. postfix templates), signature help, inlay hints, semantic tokens, folding and
 selection ranges, import and create-from-usage fixes, organize imports and lint rules with
 quick fixes.
 
@@ -86,6 +86,8 @@ supertypes, generated code).
 | `ABSTRACT_MEMBER_NOT_IMPLEMENTED` | error | Concrete class missing an implementation of an interface member |
 | `ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED` | error | Concrete class missing an implementation of an abstract class member |
 | `NOTHING_TO_OVERRIDE` | error | 'override' of a member no supertype declares |
+| `VIRTUAL_MEMBER_HIDDEN` | error | Member with the signature of a supertype member but no 'override' |
+| `OVERRIDING_FINAL_MEMBER` | error | 'override' of a final member |
 | `NO_ELSE_IN_WHEN` | error | 'when' that is not exhaustive |
 | `REPEATED_MODIFIER` | error | The same modifier twice |
 | `INCOMPATIBLE_MODIFIERS` | error | Modifiers that cannot be combined |
@@ -116,8 +118,8 @@ supertypes, generated code).
 | `FINAL_SUPERTYPE` | error | Extending a final class |
 | `REDECLARATION` | error | Two declarations with the same name in one scope |
 | `CONFLICTING_OVERLOADS` | error | Two functions with the same signature in one scope |
-| `INITIALIZER_TYPE_MISMATCH` | error | Literal of the wrong type as an initializer or default value |
-| `RETURN_TYPE_MISMATCH` | error | Literal of the wrong type returned |
+| `INITIALIZER_TYPE_MISMATCH` | error | Value of the wrong type (literal, typed local/parameter, constructor call) as an initializer or default value |
+| `RETURN_TYPE_MISMATCH` | error | Value of the wrong type returned |
 | `NULL_FOR_NONNULL_TYPE` | error | 'null' for a non-null type |
 | `TOO_MANY_ARGUMENTS` | error | More arguments than parameters |
 | `NO_VALUE_FOR_PARAMETER` | error | Required parameter without an argument |

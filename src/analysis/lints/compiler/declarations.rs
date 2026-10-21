@@ -7,7 +7,7 @@ use super::super::*;
 use crate::analysis::diagnostics::{LocalsCache, scope_at};
 use crate::analysis::ide::completion::override_stub;
 use crate::analysis::resolve::Resolved;
-use crate::symbols::{Modifiers, SymbolKind};
+use crate::symbols::{Modifiers, SymbolKind, TypeRef};
 
 const VISIBILITY: &[&str] = &["public", "private", "protected", "internal"];
 const PRIMITIVES: &[&str] = &["Int", "Long", "Short", "Byte", "Float", "Double", "Boolean", "Char", "UInt", "ULong", "UShort", "UByte"];
@@ -406,6 +406,7 @@ fn implementations(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
         };
         out.report(rule, at, format!("{what} is not abstract and does not implement abstract members: {}.", names.join(", ")), fix);
     }
+    hidden_and_final(cx, e, c, &t, body.as_ref(), out);
     // `override` of nothing.
     let Some(body) = body else { return };
     let members: Vec<SyntaxNode> = body.children().filter(|m| matches!(m.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY) && has_modifier(m, "override")).collect();
@@ -429,24 +430,72 @@ fn implementations(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
     }
 }
 
+/// Members declared without `override` that match a supertype member (they need it), and
+/// `override`s of final members.
+fn hidden_and_final(cx: &Cx, e: &Engine, c: &SyntaxNode, t: &TypeRef, body: Option<&SyntaxNode>, out: &mut Sink) {
+    if c.kind() == SyntaxKind::OBJECT_LITERAL || !cx.on(&VIRTUAL_MEMBER_HIDDEN) && !cx.on(&OVERRIDING_FINAL_MEMBER) {
+        return;
+    }
+    let ctor_params = c.children().filter(|x| x.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR).flat_map(|p| p.descendants()).filter(|v| v.kind() == SyntaxKind::VALUE_PARAMETER && v.children_with_tokens().any(|t| matches!(t.kind(), SyntaxKind::VAL_KW | SyntaxKind::VAR_KW)));
+    let members = body.into_iter().flat_map(|b| b.children()).filter(|m| matches!(m.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY));
+    for m in ctor_params.chain(members) {
+        let Some(name) = name_token(&m) else { continue };
+        let Some(sym) = decl_symbol(cx, &name, |s| matches!(s.kind, SymbolKind::Function | SymbolKind::Property)) else { continue };
+        let Some((base, class)) = e.hidden_member(t, &sym) else { continue };
+        let class_name = class.rsplit('.').next().unwrap_or(&class);
+        let n = ast::ident_text(&name);
+        let interface = e.classifier(&class).is_some_and(|c| c.symbol().kind == SymbolKind::Interface);
+        let open = interface || base.modifiers.has(Modifiers::OPEN) || base.modifiers.has(Modifiers::ABSTRACT) || base.modifiers.has(Modifiers::OVERRIDE) && !base.modifiers.has(Modifiers::FINAL);
+        if has_modifier(&m, "override") {
+            if !open {
+                out.report(&OVERRIDING_FINAL_MEMBER, name.text_range(), format!("'{n}' in '{class_name}' is final and cannot be overridden."), None);
+            }
+        } else if open {
+            let fix = Fix::replace("Add 'override' modifier", TextRange::empty(override_position(&m)), "override ");
+            out.report(&VIRTUAL_MEMBER_HIDDEN, name.text_range(), format!("'{n}' hides member of supertype '{class_name}' and needs an 'override' modifier."), Some(fix));
+        } else {
+            out.report(&VIRTUAL_MEMBER_HIDDEN, name.text_range(), format!("'{n}' hides final member of supertype '{class_name}'."), None);
+        }
+    }
+}
+
+/// Where `override` goes: after annotations and visibility/modality modifiers, before the
+/// others (`override suspend fun`) and the keyword.
+fn override_position(m: &SyntaxNode) -> TextSize {
+    let keyword = m
+        .children_with_tokens()
+        .filter_map(|t| t.into_token())
+        .find(|t| matches!(t.kind(), SyntaxKind::FUN_KW | SyntaxKind::VAL_KW | SyntaxKind::VAR_KW))
+        .map_or(m.text_range().start(), |t| t.text_range().start());
+    let Some(list) = modifiers(m) else { return keyword };
+    list.modifiers()
+        .find(|t| !VISIBILITY.contains(&t.text()) && !matches!(t.text(), "open" | "abstract" | "final" | "expect" | "actual"))
+        .map_or(keyword, |t| t.text_range().start())
+}
+
 /// The indexed symbol of the class whose name token is `name`.
 fn class_symbol(cx: &Cx, name: &SyntaxToken) -> Option<crate::symbols::Symbol> {
+    decl_symbol(cx, name, |s| s.kind.is_classifier())
+}
+
+/// The indexed symbol of the declaration whose name token is `name`.
+fn decl_symbol(cx: &Cx, name: &SyntaxToken, wanted: impl Fn(&crate::symbols::Symbol) -> bool + Copy) -> Option<crate::symbols::Symbol> {
     let summary = cx.snap.file(cx.path)?.summary();
-    fn walk(ds: &[crate::analysis::source::SourceDecl], r: TextRange) -> Option<&crate::symbols::Symbol> {
+    fn walk(ds: &[crate::analysis::source::SourceDecl], r: TextRange, wanted: impl Fn(&crate::symbols::Symbol) -> bool + Copy) -> Option<&crate::symbols::Symbol> {
         for d in ds {
             if let crate::symbols::Origin::Source { name_range, .. } = &d.symbol.origin
                 && *name_range == r
-                && d.symbol.kind.is_classifier()
+                && wanted(&d.symbol)
             {
                 return Some(&d.symbol);
             }
-            if let Some(s) = walk(&d.children, r) {
+            if let Some(s) = walk(&d.children, r, wanted) {
                 return Some(s);
             }
         }
         None
     }
-    walk(&summary.decls, name.text_range()).cloned()
+    walk(&summary.decls, name.text_range(), wanted).cloned()
 }
 
 /// Two properties or classes with one name, or two functions with one signature, in the

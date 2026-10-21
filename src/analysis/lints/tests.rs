@@ -88,6 +88,14 @@ fn fixed(text: &str, rule: &str) -> String {
     apply(&text, &l.fix.as_ref().expect("no fix").edits)
 }
 
+/// The file after applying the fix of `rule` titled `title` (the first fix or an alternative).
+fn fixed_with(text: &str, rule: &str, title: &str) -> String {
+    let (lints, text) = Fixture::new().run("src/main/kotlin/a/A.kt", text);
+    let l = lints.iter().find(|l| l.rule.id == rule).unwrap_or_else(|| panic!("no {rule} in {lints:#?}"));
+    let fix = l.fix.iter().chain(&l.alternatives).find(|f| f.title == title).unwrap_or_else(|| panic!("no fix '{title}' in {l:#?}"));
+    apply(&text, &fix.edits)
+}
+
 fn apply(text: &str, edits: &[Edit]) -> String {
     let mut edits = edits.to_vec();
     edits.sort_by_key(|e| std::cmp::Reverse(e.range.start()));
@@ -648,6 +656,10 @@ fun str(): String = 1
     assert_eq!(found.iter().filter(|f| f.starts_with("INITIALIZER_TYPE_MISMATCH")).count(), 1, "{found:#?}");
     assert_eq!(fixed("fun f() {\n    val v = 1\n    v = 2\n}\n", "VAL_REASSIGNMENT"), "fun f() {\n    var v = 1\n    v = 2\n}\n");
     assert_eq!(fixed("fun f(s: String) = s?.length\n", "UNNECESSARY_SAFE_CALL"), "fun f(s: String) = s.length\n");
+    assert_eq!(fixed("val t: String = null\n", "NULL_FOR_NONNULL_TYPE"), "val t: String? = null\n");
+    assert_eq!(fixed("val t: () -> Unit = null\n", "NULL_FOR_NONNULL_TYPE"), "val t: (() -> Unit)? = null\n");
+    assert_eq!(fixed("val i: String? = 1\n", "INITIALIZER_TYPE_MISMATCH"), "val i: Int? = 1\n");
+    assert_eq!(fixed_with("fun str(): String = 1\n", "RETURN_TYPE_MISMATCH", "Change return type to 'Int'"), "fun str(): Int = 1\n");
 }
 
 #[test]
@@ -804,6 +816,7 @@ fun ranges(x: Int) = when (x) {
         fixed(text, "NO_ELSE_IN_WHEN"),
         "package a\n\nenum class Color { RED, GREEN, BLUE }\nfun name(c: Color) = when (c) {\n    Color.RED -> \"r\"\n    Color.GREEN -> TODO()\n    Color.BLUE -> TODO()\n}\n"
     );
+    assert!(fixed_with(text, "NO_ELSE_IN_WHEN", "Add 'else' branch").contains("    Color.RED -> \"r\"\n    else -> TODO()\n}"));
 }
 
 #[test]
@@ -899,4 +912,84 @@ fun f(s: String?, t: String?, u: String?, v: String?, w: List<String>?) {
     let found: Vec<String> = compiler(text).into_iter().filter(|f| f.starts_with("UNSAFE_CALL")).collect();
     assert_eq!(found.len(), 2, "{found:#?}");
     assert!(fixed(text, "UNSAFE_CALL").contains("    s?.length\n"));
+    assert!(fixed_with(text, "UNSAFE_CALL", "Add non-null asserted (!!.) call").contains("    s!!.length\n"));
+}
+
+#[test]
+fn missing_and_final_overrides() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let text = r#"package a
+
+open class Base<T> {
+    open fun take(x: T) {}
+    open fun name(): String = ""
+    fun fixed() {}
+    open val size: Int = 0
+    open fun other(x: Int) {}
+}
+
+interface Named { fun id(): Int }
+
+class Sub(val size: Int) : Base<String>(), Named {
+    fun take(x: String) {}
+    @Suppress("x") suspend fun name(): String = "s"
+    override fun fixed() {}
+    fun other(x: String) {}
+    fun <R> generic(r: R) {}
+    fun id(): Int = 1
+    override fun toString(): String = "sub"
+    fun hashCode(): Int = 1
+}
+"#;
+    let found: Vec<String> = compiler(text).into_iter().filter(|f| f.starts_with("VIRTUAL") || f.starts_with("OVERRIDING")).collect();
+    for expected in ["VIRTUAL_MEMBER_HIDDEN: size", "VIRTUAL_MEMBER_HIDDEN: take", "VIRTUAL_MEMBER_HIDDEN: name", "OVERRIDING_FINAL_MEMBER: fixed", "VIRTUAL_MEMBER_HIDDEN: id", "VIRTUAL_MEMBER_HIDDEN: hashCode"] {
+        has(&found, expected);
+    }
+    assert_eq!(found.len(), 6, "{found:#?}");
+    let out = fixed(text, "VIRTUAL_MEMBER_HIDDEN");
+    assert!(out.contains("class Sub(override val size: Int)"), "{out}");
+    let (lints, _) = Fixture::new().run("src/main/kotlin/a/A.kt", text);
+    let name = lints.iter().find(|l| l.rule.id == "VIRTUAL_MEMBER_HIDDEN" && l.message.starts_with("'name'")).unwrap();
+    assert!(apply(text, &name.fix.as_ref().unwrap().edits).contains("@Suppress(\"x\") override suspend fun name()"));
+}
+
+#[test]
+fn non_literal_type_mismatches() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let text = r#"package a
+
+open class A
+class B : A()
+class C
+
+fun f(a: A, b: B, s: String, vararg rest: C) {
+    val x: C = a
+    val y: Int = s
+    val ok1: A = b
+    val ok2: CharSequence = s
+    val ok3: Any = a
+    val w: C = B()
+    val ok4: A = B()
+    val ok5: Array<out C> = rest
+}
+
+fun g(a: A): C = a
+
+fun h(x: Any): String {
+    if (x is String) {
+        val s: String = x
+    }
+    return ""
+}
+"#;
+    let found: Vec<String> = compiler(text).into_iter().filter(|f| f.contains("TYPE_MISMATCH")).collect();
+    for expected in ["INITIALIZER_TYPE_MISMATCH: a", "INITIALIZER_TYPE_MISMATCH: s", "INITIALIZER_TYPE_MISMATCH: B()", "RETURN_TYPE_MISMATCH: a"] {
+        has(&found, expected);
+    }
+    assert_eq!(found.len(), 4, "{found:#?}");
+    assert!(fixed(text, "INITIALIZER_TYPE_MISMATCH").contains("    val x: A = a\n"));
 }

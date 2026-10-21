@@ -154,6 +154,7 @@ fn when_expr(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     if nullable && !covered.null {
         missing.push("null".into());
     }
+    let missing_fixes = |missing: &[String]| -> Vec<Fix> { add_branches(cx, n, missing).into_iter().chain(add_branches(cx, n, &["else".into()])).collect() };
     match (missing.is_empty(), else_entry) {
         (true, Some(el)) => {
             let fix = Fix::delete("Remove 'else' branch", deletion_range(cx.text, el.text_range()));
@@ -163,11 +164,11 @@ fn when_expr(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         (false, None) => {
             let shown: Vec<String> = missing.iter().map(|m| format!("'{m}'")).collect();
             let what = if used_as_expression(n) { "expression" } else { "statement" };
-            out.report(
+            out.report_fixes(
                 &NO_ELSE_IN_WHEN,
                 kw.text_range(),
                 format!("'when' {what} must be exhaustive. Add the {} branch{} or an 'else' branch.", shown.join(", "), if missing.len() > 1 { "es" } else { "" }),
-                add_branches(cx, n, &missing),
+                missing_fixes(&missing),
             );
         }
         _ => {}

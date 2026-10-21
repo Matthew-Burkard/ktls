@@ -71,7 +71,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 ## 2. Navigation
 
 - [~] [P0] `textDocument/definition` — incl. into library sources/decompiled stubs, Java sources, `expect`↔`actual` — *partial: sources (local or downloaded `-sources.jar`) or generated stubs; no `expect`↔`actual` jumps*
-- [ ] [P1] `textDocument/declaration`
+- [x] [P1] `textDocument/declaration` — the member an `override` overrides (also in libraries), the `expect` of an `actual`, otherwise the definition
 - [x] [P1] `textDocument/typeDefinition`
 - [~] [P1] `textDocument/implementation` — overrides, subclasses, `actual` declarations, SAM implementations — *partial: project subclasses (transitive) and overriding members; not `actual` declarations, anonymous objects or SAM lambdas*
 - [~] [P0] `textDocument/references` — incl. operator conventions (`plus`, `get`, `invoke`, `component1`), property accessors, delegated properties, KDoc links, Java usages — *partial: name references in Kotlin sources (incl. imports, types, constructor calls, the whole override family incl. `super` calls and anonymous objects, and operator-convention call sites: arithmetic/compound assignment, unary, `++`/`--`, ranges, `in`/`!in`, indexing, `==`, comparisons, `invoke`, destructuring `componentN`, `for` iterators, `by` delegates); not KDoc links or Java files*
@@ -139,7 +139,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P1] Named argument completion (`param =`)
 - [x] [P1] Override/implement member completion (generates full signature + body)
 - [ ] [P1] `when` exhaustive branch completion (sealed/enum)
-- [ ] [P1] Snippets / postfix templates: `.if`, `.not`, `.for`, `.val`, `.var`, `.return`, `.let`, `.notnull`, `.null`, `.try`, `.par`, `.sout`, `.when`, `.arg`, `.spread`
+- [~] [P1] Snippets / postfix templates: `.if`, `.not`, `.for`, `.val`, `.var`, `.return`, `.let`, `.notnull`, `.null`, `.try`, `.par`, `.sout`, `.when`, `.arg`, `.spread` — *partial: `.val`, `.var`, `.return`, `.if`, `.while`, `.not`, `.notnull`, `.null`, `.for`, `.when`, `.par`, `.arg`, `.println`, `.try` (by type and statement position; names from the type); not `.let`, `.spread`*
 - [ ] [P1] Live templates: `main`, `fun0/1/2`, `sout`, `iter`, `ifn`, `inn`, `void`, `closure`, `object`, `interface`, `exfun`, `exval`
 - [ ] [P1] Lambda parameter completion (`{ a, b -> }` from expected function type)
 - [x] [P1] Completion in string templates (`$` / `${`)
@@ -163,13 +163,13 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 ### 5.1 Compiler errors (subset of the K2 compiler diagnostic set)
 - [x] [P0] Syntax errors (expecting X, unexpected token, unclosed string/comment)
 - [~] [P0] `UNRESOLVED_REFERENCE`, `UNRESOLVED_IMPORT` — *partial: imports, types, and expression names that exist nowhere (typos, deleted declarations)*
-- [~] [P0] `TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`, `RETURN_TYPE_MISMATCH`, `INITIALIZER_TYPE_MISMATCH` — *partial: literals as initializers, default values and return values*
+- [~] [P0] `TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`, `RETURN_TYPE_MISMATCH`, `INITIALIZER_TYPE_MISMATCH` — *partial: initializers, default values and return values that are literals, locals/parameters declared with a type (not smart cast), or constructor calls; not arguments*
 - [~] [P0] `NONE_APPLICABLE`, `OVERLOAD_RESOLUTION_AMBIGUITY`, `TOO_MANY_ARGUMENTS`, `NO_VALUE_FOR_PARAMETER`, `NAMED_PARAMETER_NOT_FOUND` — *partial: argument counts and names (not types), all overloads considered; no ambiguity*
 - [~] [P0] Null safety: `UNSAFE_CALL`, `UNSAFE_OPERATOR_CALL`, `UNSAFE_IMPLICIT_INVOKE_CALL`, `NULL_FOR_NONNULL_TYPE` — *partial: `NULL_FOR_NONNULL_TYPE` for literal `null`; `UNSAFE_CALL` for members of locals/parameters declared nullable that are never null-checked (no smart-cast analysis)*
 - [~] [P0] `VAL_REASSIGNMENT`, `UNINITIALIZED_VARIABLE`, `MUST_BE_INITIALIZED`, `MUST_BE_INITIALIZED_OR_BE_ABSTRACT` — *partial: all but `UNINITIALIZED_VARIABLE`*
 - [~] [P0] `NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY`, `RETURN_NOT_ALLOWED` — *partial: `NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY` (no `return`/`throw` anywhere)*
 - [~] [P0] `ABSTRACT_MEMBER_NOT_IMPLEMENTED`, `ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED`, `MANY_IMPL_MEMBER_NOT_IMPLEMENTED` — *partial: the first two, with an "Implement members" fix*
-- [~] [P0] `NOTHING_TO_OVERRIDE`, `VIRTUAL_MEMBER_HIDDEN` (missing `override`), `OVERRIDING_FINAL_MEMBER`, `FINAL_SUPERTYPE` — *partial: `NOTHING_TO_OVERRIDE`, `FINAL_SUPERTYPE`*
+- [~] [P0] `NOTHING_TO_OVERRIDE`, `VIRTUAL_MEMBER_HIDDEN` (missing `override`), `OVERRIDING_FINAL_MEMBER`, `FINAL_SUPERTYPE` — *partial: all four (members of Kotlin and project supertypes; not Java supertypes)*
 - [ ] [P0] Visibility: `INVISIBLE_REFERENCE`, `INVISIBLE_MEMBER`, `EXPOSED_*` (exposed visibility)
 - [x] [P0] `NO_ELSE_IN_WHEN` / `WHEN_ON_SEALED_*` non-exhaustive (enum, Boolean, nullable, source sealed hierarchies; "Add remaining branches" fix)
 - [ ] [P0] `ILLEGAL_SUSPEND_FUNCTION_CALL`, `NON_LOCAL_SUSPENSION_POINT`
@@ -320,14 +320,14 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 
 ### 6.1 Quick fixes (bound to diagnostics)
 - [~] [P0] **Import** unresolved symbol (with chooser when ambiguous; class, function, extension, operator, delegate accessor) — *partial: classes, top-level functions/properties and extensions applicable to the receiver, from the project and libraries; not operators or delegate accessors*
-- [~] [P0] **Add `?.`** / **add `!!`** / **surround with null check** / **add elvis** for unsafe calls — *partial: replace with `?.`*
-- [ ] [P0] **Change type** of variable/parameter/return to match
+- [~] [P0] **Add `?.`** / **add `!!`** / **surround with null check** / **add elvis** for unsafe calls — *partial: `?.` and `!!`*
+- [~] [P0] **Change type** of variable/parameter/return to match — *partial: for type mismatches and `null` (`T?`)*
 - [ ] [P0] **Add explicit cast** (`as T`) / **change to safe cast** (`as?`)
 - [~] [P0] **Implement members** / **make class abstract** — *partial: implement members*
-- [ ] [P0] **Add `override` modifier**, **remove `override`**, **make super member `open`**
+- [~] [P0] **Add `override` modifier**, **remove `override`**, **make super member `open`** — *partial: add/remove `override`*
 - [x] [P0] **Add missing `when` branches** / **add `else` branch**
 - [~] [P0] **Remove unused** variable/parameter/import/declaration — *partial: variable, import, private/local declaration*
-- [ ] [P0] **Change `val` to `var`**
+- [x] [P0] **Change `val` to `var`**
 - [ ] [P0] **Initialize property** / **make `lateinit`** / **make `abstract`** / **move to constructor**
 - [ ] [P0] **Add `suspend` modifier** to containing function / wrap in `runBlocking`/`launch`
 - [~] [P0] **Create from usage**: function, extension function, property, local variable, parameter, class, interface, enum, object, enum entry, constructor, type parameter, annotation, `component`/operator functions — *partial: function (top-level or member, incl. in other files), extension function/property, property, local variable, parameter, class; types from arguments and the expected type*

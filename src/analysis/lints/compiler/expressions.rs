@@ -471,11 +471,14 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         return;
     }
     let Some(dot) = n.children_with_tokens().filter_map(|t| t.into_token()).find(|t| t.kind() == SyntaxKind::DOT) else { return };
-    out.report(
+    out.report_fixes(
         &UNSAFE_CALL,
         dot.text_range(),
         format!("Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{}'.", ty_text.trim()),
-        Some(Fix::replace("Replace with safe (?.) call", dot.text_range(), "?.")),
+        vec![
+            Fix::replace("Replace with safe (?.) call", dot.text_range(), "?."),
+            Fix::replace("Add non-null asserted (!!.) call", dot.text_range(), "!!."),
+        ],
     );
 }
 
@@ -688,8 +691,9 @@ fn literal_type(n: &SyntaxNode) -> Option<Option<&'static str>> {
     })
 }
 
-/// A literal of type `lit` (or `null`) where `expected` is declared: the mismatch message.
-fn literal_mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef) -> Option<(&'static Rule, String)> {
+/// A literal of type `lit` (or `null`) where `expected` is declared: the mismatch message
+/// and a fix changing the declared type.
+fn literal_mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef) -> Option<(&'static Rule, String, Fix)> {
     let lit = literal_type(value)?;
     let t = e.resolve_syntax_type(expected);
     let shown = expected.syntax().text().to_string();
@@ -703,7 +707,9 @@ fn literal_mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef) -> 
         return None;
     }
     let Some(lit) = lit else {
-        return (!nullable).then(|| (&NULL_FOR_NONNULL_TYPE, format!("Null cannot be a value of a non-null type '{shown}'.")));
+        let range = expected.syntax().text_range();
+        let to = if matches!(t, TypeRef::Function { .. }) { format!("({shown})?") } else { format!("{shown}?") };
+        return (!nullable).then(|| (&NULL_FOR_NONNULL_TYPE, format!("Null cannot be a value of a non-null type '{shown}'."), Fix::replace(format!("Change type to '{to}'"), range, to)));
     };
     // Integer literals adapt to any integer type; others need a supertype match.
     if lit == "kotlin.Int" && matches!(fq.as_str(), "kotlin.Long" | "kotlin.Short" | "kotlin.Byte") {
@@ -717,14 +723,72 @@ fn literal_mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef) -> 
         return None;
     }
     let actual = lit.trim_start_matches("kotlin.");
-    Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual}'.")))
+    let to = if nullable { format!("{actual}?") } else { actual.to_string() };
+    let fix = Fix::replace(format!("Change type to '{to}'"), expected.syntax().text_range(), to);
+    Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual}'."), fix))
+}
+
+/// A literal, or a name, call or member access whose class type is not a subtype of the
+/// declared one.
+fn mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef) -> Option<(&'static Rule, String, Fix)> {
+    if literal_type(value).is_some() {
+        return literal_mismatch(e, value, expected);
+    }
+    if !certain_type(e, value) {
+        return None;
+    }
+    let exp = e.resolve_syntax_type(expected);
+    let TypeRef::Named { fq: Some(efq), .. } = &exp else { return None };
+    if e.res.find_classifier(efq).is_none_or(|c| c.symbol().kind == SymbolKind::TypeAlias) {
+        return None;
+    }
+    let actual = e.type_of(value)?;
+    if e.conforms(&actual, efq)? {
+        return None;
+    }
+    let shown = expected.syntax().text().to_string();
+    let actual_shown = actual.display();
+    let nullable = matches!(exp, TypeRef::Named { nullable: true, .. });
+    let to = if nullable && !actual_shown.ends_with('?') { format!("{actual_shown}?") } else { actual_shown.clone() };
+    let fix = Fix::replace(format!("Change type to '{to}'"), expected.syntax().text_range(), to);
+    Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual_shown}'."), fix))
+}
+
+/// Values whose type the engine knows for sure: a local or parameter declared with a
+/// type (and not smart cast with `is`), or a constructor call.
+fn certain_type(e: &Engine, value: &SyntaxNode) -> bool {
+    match value.kind() {
+        SyntaxKind::NAME_REF => {
+            let defs = e.resolve_name_ref(value);
+            let [Def::Local(l)] = defs.as_slice() else { return false };
+            if !matches!(l.kind, LocalKind::Val | LocalKind::Var | LocalKind::Parameter) {
+                return false;
+            }
+            let decl = crate::syntax::covering(&e.root, l.name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::VALUE_PARAMETER | SyntaxKind::PROPERTY));
+            let Some(decl) = decl.filter(|d| ast::child::<ast::TypeRef>(d).is_some() && !has_modifier(d, "vararg")) else { return false };
+            let name = ast::ident_text(&value.first_token().unwrap());
+            let scope = decl.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR | SyntaxKind::CLASS_BODY | SyntaxKind::KOTLIN_FILE));
+            // `is` checks smart cast the name.
+            !scope.is_some_and(|s| {
+                s.descendants().filter(|d| matches!(d.kind(), SyntaxKind::IS_EXPR | SyntaxKind::WHEN_CONDITION) && d.text().to_string().contains("is ")).any(|d| {
+                    d.kind() == SyntaxKind::WHEN_CONDITION || d.descendants().any(|r| r.kind() == SyntaxKind::NAME_REF && r.first_token().is_some_and(|t| ast::ident_text(&t) == name))
+                })
+            })
+        }
+        SyntaxKind::CALL_EXPR => {
+            let Some(callee) = value.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return false };
+            let defs = e.resolve_name_ref(&callee);
+            !defs.is_empty() && defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if matches!(sym.kind, SymbolKind::Constructor | SymbolKind::Class)))
+        }
+        _ => false,
+    }
 }
 
 fn literal_initializer(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     let Some(ty) = ast::child::<ast::TypeRef>(n) else { return };
     let Some(value) = initializer(n) else { return };
-    if let Some((rule, msg)) = literal_mismatch(e, &value, &ty) {
-        out.report(rule, value.text_range(), msg, None);
+    if let Some((rule, msg, fix)) = mismatch(e, &value, &ty) {
+        out.report(rule, value.text_range(), msg, Some(fix));
     }
 }
 
@@ -738,9 +802,9 @@ fn literal_return(e: &Engine, ret: &SyntaxNode, out: &mut Sink) {
         return;
     }
     let Some(ty) = ast::FunDecl::cast(f).and_then(|d| d.return_type()) else { return };
-    if let Some((rule, msg)) = literal_mismatch(e, &value, &ty) {
+    if let Some((rule, msg, fix)) = mismatch(e, &value, &ty) {
         let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
-        out.report(rule, value.text_range(), msg, None);
+        out.report(rule, value.text_range(), msg, Some(Fix { title: fix.title.replace("Change type", "Change return type"), ..fix }));
     }
 }
 
@@ -748,8 +812,8 @@ fn literal_expression_body(e: &Engine, f: &SyntaxNode, out: &mut Sink) {
     let decl = ast::FunDecl::cast(f.clone()).unwrap();
     let (Some(ty), true) = (decl.return_type(), decl.has_expression_body()) else { return };
     let Some(value) = initializer(f) else { return };
-    if let Some((rule, msg)) = literal_mismatch(e, &value, &ty) {
+    if let Some((rule, msg, fix)) = mismatch(e, &value, &ty) {
         let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
-        out.report(rule, value.text_range(), msg, None);
+        out.report(rule, value.text_range(), msg, Some(Fix { title: fix.title.replace("Change type", "Change return type"), ..fix }));
     }
 }

@@ -197,6 +197,46 @@ fn same_member(a: &Symbol, b: &Symbol) -> bool {
         )
 }
 
+/// Do two resolved parameter types denote the same type? Type parameters match each
+/// other; `None` when either side is not resolved.
+fn same_type(a: &TypeRef, b: &TypeRef) -> Option<bool> {
+    match (strip(a), strip(b)) {
+        (TypeRef::Error, _) | (_, TypeRef::Error) | (TypeRef::Named { fq: None, .. }, _) | (_, TypeRef::Named { fq: None, .. }) => None,
+        (TypeRef::TypeParam { nullable: x, .. }, TypeRef::TypeParam { nullable: y, .. }) => Some(x == y),
+        (TypeRef::Named { fq: Some(f), args: xa, nullable: x, .. }, TypeRef::Named { fq: Some(g), args: ya, nullable: y, .. }) => {
+            if f != g || x != y || xa.len() != ya.len() {
+                return Some(false);
+            }
+            for (p, q) in xa.iter().zip(ya) {
+                match (p, q) {
+                    (TypeArg::Star, TypeArg::Star) => {}
+                    (TypeArg::Type { ty: p, .. }, TypeArg::Type { ty: q, .. }) => {
+                        if !same_type(p, q)? {
+                            return Some(false);
+                        }
+                    }
+                    _ => return Some(false),
+                }
+            }
+            Some(true)
+        }
+        (TypeRef::Function { params: xp, ret: xr, receiver: xv, nullable: x, .. }, TypeRef::Function { params: yp, ret: yr, receiver: yv, nullable: y, .. }) => {
+            if x != y || xp.len() != yp.len() || xv.is_some() != yv.is_some() {
+                return Some(false);
+            }
+            for (p, q) in xp.iter().chain(xv.as_deref()).chain(std::iter::once(xr.as_ref())).zip(yp.iter().chain(yv.as_deref()).chain(std::iter::once(yr.as_ref()))) {
+                if !same_type(p, q)? {
+                    return Some(false);
+                }
+            }
+            Some(true)
+        }
+        (TypeRef::Dynamic, TypeRef::Dynamic) => Some(true),
+        // A type parameter against a concrete type, or different kinds.
+        _ => Some(false),
+    }
+}
+
 /// Bind type parameters in `pattern` (those in `vars`) by matching against `actual`.
 fn unify(pattern: &TypeRef, actual: &TypeRef, vars: &HashSet<String>, s: &mut Subst, engine: &Engine) {
     let pattern = strip(pattern);
@@ -1864,6 +1904,80 @@ impl<'s> Engine<'s> {
             }
         }
         out
+    }
+
+    /// Is a value of class type `actual` (nullability aside) assignable to class
+    /// `expected`? `None` when unsure: unknown supertypes, Java classes (mapped to Kotlin
+    /// types), type aliases, non-class types.
+    pub fn conforms(&self, actual: &TypeRef, expected: &str) -> Option<bool> {
+        let fq = match actual {
+            TypeRef::Named { fq: Some(fq), .. } => fq.to_string(),
+            _ => return None,
+        };
+        if fq == "kotlin.Nothing" || expected == "kotlin.Any" {
+            return Some(true);
+        }
+        if matches!(self.res.find_classifier(expected)?, Classifier::Library(lc) if !lc.is_kotlin) {
+            return None;
+        }
+        let classes = std::iter::once(TypeRef::named(&fq)).chain(self.known_supertypes(&TypeRef::named(&fq))?);
+        let mut found = false;
+        for st in classes {
+            let f = fq_of(&st)?;
+            match self.res.find_classifier(f)? {
+                Classifier::Library(lc) if !lc.is_kotlin && f != "java.lang.Object" => return None,
+                Classifier::LibraryAlias(_) => return None,
+                Classifier::Source(s) if s.kind == SymbolKind::TypeAlias => return None,
+                _ => {}
+            }
+            found |= f == expected;
+        }
+        Some(found)
+    }
+
+    /// The supertype member that `m` (declared in the class of type `t` without
+    /// `override`) has the same signature as, with the FQ name of its class. `None` when
+    /// there is none or the supertypes are not fully known. Java classes other than
+    /// `Object` are skipped (mapped collection members have Java names).
+    pub fn hidden_member(&self, t: &TypeRef, m: &Symbol) -> Option<(Symbol, String)> {
+        if !matches!(m.kind, SymbolKind::Function | SymbolKind::Property) {
+            return None;
+        }
+        for st in self.known_supertypes(t)? {
+            let fq = fq_of(&st)?;
+            let (c, alias_args) = self.classifier_for(fq)?;
+            if matches!(&c, Classifier::Library(lc) if !lc.is_kotlin) {
+                continue;
+            }
+            let args = if alias_args.is_empty() { args_of(&st).to_vec() } else { alias_args };
+            let s = self.type_subst(&c, &args);
+            for sm in self.members_of(&c) {
+                if sm.kind != m.kind || sm.name != m.name || sm.params.len() != m.params.len() || sm.receiver.is_some() != m.receiver.is_some() {
+                    continue;
+                }
+                if sm.visibility == crate::symbols::Visibility::Private || sm.modifiers.has(Modifiers::STATIC) {
+                    continue;
+                }
+                let theirs = |t: &TypeRef| substitute(&self.resolve_declared(&sm, t), &s);
+                let ours = |t: &TypeRef| self.resolve_declared(m, t);
+                let pairs = m.params.iter().map(|p| &p.ty).zip(sm.params.iter().map(|p| &p.ty));
+                let mut same = true;
+                for (a, b) in pairs.chain(m.receiver.iter().zip(sm.receiver.iter())) {
+                    match same_type(&ours(a), &theirs(b)) {
+                        Some(true) => {}
+                        Some(false) => {
+                            same = false;
+                            break;
+                        }
+                        None => return None,
+                    }
+                }
+                if same {
+                    return Some((sm, fq.to_string()));
+                }
+            }
+        }
+        None
     }
 
     /// Explicitly imported names: classifiers `(name, FQ)` and callables (aliases applied).

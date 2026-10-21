@@ -401,6 +401,8 @@ fn editing_assists_session() {
 
     let r = c.request("textDocument/implementation", json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 5 } }));
     assert_eq!(r[0]["range"]["start"], json!({ "line": 2, "character": 4 }));
+    let r = c.request("textDocument/declaration", json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 5 } }));
+    assert_eq!(r[0]["range"]["start"], json!({ "line": 2, "character": 4 }));
 
     let items = c.request("textDocument/prepareCallHierarchy", json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 5 } }));
     assert_eq!(items[0]["name"], "add");

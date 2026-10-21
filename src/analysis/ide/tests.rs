@@ -848,6 +848,17 @@ fn implementations_and_type_definitions() {
     assert_eq!(tdef(&mut fx, &main("fun f(sq: Square) = s$0q.area()")), vec!["Shapes.kt:7:Square"]);
     assert_eq!(tdef(&mut fx, &main("fun mk(): Circle = Circle(1.0)\nfun f() = m$0k()")), vec!["Shapes.kt:10:Circle"]);
     assert_eq!(tdef(&mut fx, &main("fun f(c: Circle) = c.r$0")).len(), 1);
+    // Declaration: the overridden member, the `expect`, or the definition.
+    let decl = |fx: &mut Fx, text: &str| {
+        let (path, offset) = fx.open(text);
+        let found = hierarchy::declaration(&fx.host.snapshot(), &path, offset);
+        fx.names(found)
+    };
+    assert_eq!(decl(&mut fx, &main("class Mine : Shape {\n    override fun ar$0ea() = 1.0\n}")), vec!["Shapes.kt:4:area"]);
+    assert_eq!(decl(&mut fx, &main("fun f(s: Sub) = s.ar$0ea()")), vec!["Sub.kt:6:area"]);
+    assert_eq!(decl(&mut fx, &main("fun f(s: Circle) = s.r$0")), vec!["Shapes.kt:10:r"]);
+    fx.host.set_file(fx.root.join("src/app/Platform.kt"), Arc::from("package app\n\nexpect fun platform(): String\n"), Some(1));
+    assert_eq!(decl(&mut fx, "package app\n\nactual fun plat$0form(): String = \"jvm\"\n"), vec!["Platform.kt:3:platform"]);
 }
 
 impl Fx {
@@ -1025,4 +1036,36 @@ fn folding_and_selection() {
     assert!(ranges.contains(&"{\n            it + x\n        }"), "{ranges:#?}");
     assert!(ranges.iter().any(|r| r.starts_with("fun f(x: Int)")), "{ranges:#?}");
     assert_eq!(*ranges.last().unwrap(), text);
+}
+
+#[test]
+fn postfix_templates() {
+    let Some(mut fx) = fixture() else { return };
+    let src = |body: &str| format!("{HEADER}fun run(u: User, xs: List<User>, n: String?, ok: Boolean) {{\n{body}\n}}\n");
+    // The snippet replaces the template name; the receiver and dot are removed.
+    let expand = |fx: &mut Fx, body: &str, label: &str| {
+        let text = src(body);
+        let c = fx.complete(&text);
+        let item = c.items.iter().find(|i| i.label == label && i.kind == completion::ItemKind::Snippet).unwrap_or_else(|| panic!("no {label}"));
+        let clean = text.replace("$0", "");
+        let mut out = clean.clone();
+        out.replace_range(usize::from(c.range.start())..usize::from(c.range.end()), item.insert.as_deref().unwrap());
+        let (r, t) = &item.additional[0];
+        out.replace_range(usize::from(r.start())..usize::from(r.end()), t);
+        out[HEADER.len()..].to_string()
+    };
+    assert!(expand(&mut fx, "    u.name.va$0", "val").contains("    val ${1:s} = u.name$0\n"));
+    assert!(expand(&mut fx, "    xs.va$0", "val").contains("val ${1:users} = xs$0"));
+    assert!(expand(&mut fx, "    xs.fo$0", "for").contains("    for (${1:item} in xs) {\n    $0\n}"));
+    assert!(expand(&mut fx, "    ok.i$0", "if").contains("    if (ok) {\n    $0\n}"));
+    assert!(expand(&mut fx, "    (u.age > 1).no$0", "not").contains("    !(u.age > 1)$0"));
+    assert!(expand(&mut fx, "    n.notn$0", "notnull").contains("    if (n != null) {"));
+    // Only the templates that fit the type and position.
+    let labels = |fx: &mut Fx, body: &str| fx.complete(&src(body)).items.into_iter().filter(|i| i.kind == completion::ItemKind::Snippet).map(|i| i.label).collect::<Vec<_>>();
+    let on_user = labels(&mut fx, "    u.$0");
+    assert!(on_user.contains(&"val".to_string()) && !on_user.contains(&"if".to_string()) && !on_user.contains(&"for".to_string()) && !on_user.contains(&"notnull".to_string()), "{on_user:?}");
+    let in_expr = labels(&mut fx, "    val x = ok.$0");
+    assert!(in_expr.contains(&"not".to_string()) && !in_expr.contains(&"val".to_string()) && !in_expr.contains(&"if".to_string()), "{in_expr:?}");
+    // Snippet syntax in the receiver is escaped.
+    assert!(expand(&mut fx, "    \"${u.name}\".va$0", "val").contains("= \"\\${u.name\\}\"$0"));
 }

@@ -100,6 +100,8 @@ rules! {
     ABSTRACT_MEMBER_NOT_IMPLEMENTED = "ABSTRACT_MEMBER_NOT_IMPLEMENTED", Compiler, Error, false, [], "Concrete class missing an implementation of an interface member";
     ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED = "ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED", Compiler, Error, false, [], "Concrete class missing an implementation of an abstract class member";
     NOTHING_TO_OVERRIDE = "NOTHING_TO_OVERRIDE", Compiler, Error, false, [], "'override' of a member no supertype declares";
+    VIRTUAL_MEMBER_HIDDEN = "VIRTUAL_MEMBER_HIDDEN", Compiler, Error, false, [], "Member with the signature of a supertype member but no 'override'";
+    OVERRIDING_FINAL_MEMBER = "OVERRIDING_FINAL_MEMBER", Compiler, Error, false, [], "'override' of a final member";
     NO_ELSE_IN_WHEN = "NO_ELSE_IN_WHEN", Compiler, Error, false, [], "'when' that is not exhaustive";
     REPEATED_MODIFIER = "REPEATED_MODIFIER", Compiler, Error, false, [], "The same modifier twice";
     INCOMPATIBLE_MODIFIERS = "INCOMPATIBLE_MODIFIERS", Compiler, Error, false, [], "Modifiers that cannot be combined";
@@ -130,8 +132,8 @@ rules! {
     FINAL_SUPERTYPE = "FINAL_SUPERTYPE", Compiler, Error, false, [], "Extending a final class";
     REDECLARATION_LOCAL = "REDECLARATION", Compiler, Error, false, [], "Two declarations with the same name in one scope";
     CONFLICTING_OVERLOADS = "CONFLICTING_OVERLOADS", Compiler, Error, false, [], "Two functions with the same signature in one scope";
-    INITIALIZER_TYPE_MISMATCH = "INITIALIZER_TYPE_MISMATCH", Compiler, Error, false, [], "Literal of the wrong type as an initializer or default value";
-    RETURN_TYPE_MISMATCH = "RETURN_TYPE_MISMATCH", Compiler, Error, false, [], "Literal of the wrong type returned";
+    INITIALIZER_TYPE_MISMATCH = "INITIALIZER_TYPE_MISMATCH", Compiler, Error, false, [], "Value of the wrong type (literal, typed local/parameter, constructor call) as an initializer or default value";
+    RETURN_TYPE_MISMATCH = "RETURN_TYPE_MISMATCH", Compiler, Error, false, [], "Value of the wrong type returned";
     NULL_FOR_NONNULL_TYPE = "NULL_FOR_NONNULL_TYPE", Compiler, Error, false, [], "'null' for a non-null type";
     TOO_MANY_ARGUMENTS = "TOO_MANY_ARGUMENTS", Compiler, Error, false, [], "More arguments than parameters";
     NO_VALUE_FOR_PARAMETER = "NO_VALUE_FOR_PARAMETER", Compiler, Error, false, [], "Required parameter without an argument";
@@ -260,6 +262,8 @@ pub struct Lint {
     pub range: TextRange,
     pub message: String,
     pub fix: Option<Fix>,
+    /// Further fixes, offered after `fix` (which `source.fixAll` applies).
+    pub alternatives: Vec<Fix>,
 }
 
 impl Lint {
@@ -318,9 +322,15 @@ pub(crate) struct Sink<'a> {
 
 impl Sink<'_> {
     pub fn report(&mut self, rule: &'static Rule, range: TextRange, message: impl Into<String>, fix: Option<Fix>) {
+        self.report_fixes(rule, range, message, fix.into_iter().collect());
+    }
+
+    /// Report with several fixes; the first is the preferred one.
+    pub fn report_fixes(&mut self, rule: &'static Rule, range: TextRange, message: impl Into<String>, mut fixes: Vec<Fix>) {
         let level = self.config.level(rule);
         if level != Level::Off {
-            self.lints.push(Lint { rule, level, range, message: message.into(), fix });
+            let fix = (!fixes.is_empty()).then(|| fixes.remove(0));
+            self.lints.push(Lint { rule, level, range, message: message.into(), fix, alternatives: fixes });
         }
     }
 }
