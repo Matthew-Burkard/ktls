@@ -473,6 +473,11 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     if narrowed {
         return;
     }
+    // Still nullable after the checks the engine understands.
+    let still_nullable = e.type_of(&recv).is_some_and(|t| matches!(crate::analysis::ide::infer::strip(&t), TypeRef::Named { nullable: true, .. } | TypeRef::TypeParam { nullable: true, .. } | TypeRef::Function { nullable: true, .. }));
+    if !still_nullable {
+        return;
+    }
     let Some(dot) = n.children_with_tokens().filter_map(|t| t.into_token()).find(|t| t.kind() == SyntaxKind::DOT) else { return };
     out.report_fixes(
         &UNSAFE_CALL,
@@ -485,10 +490,46 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     );
 }
 
+/// `x == null`, `x != null` (also `===`/`!==`), or `x is T` / `x !is T`.
+fn null_check_or_is(p: &SyntaxNode) -> bool {
+    match p.kind() {
+        SyntaxKind::IS_EXPR => true,
+        SyntaxKind::BINARY_EXPR => {
+            binary_op(p).is_some_and(|op| matches!(op.kind(), SyntaxKind::EQ2 | SyntaxKind::NOT_EQ | SyntaxKind::EQ3 | SyntaxKind::NOT_EQ2))
+                && p.children().any(|c| c.kind() == SyntaxKind::LITERAL && c.text() == "null")
+        }
+        _ => false,
+    }
+}
+
+/// The check `n` sits (through `!`, parentheses, `&&`, `||`) in a condition the engine's
+/// smart casts understand.
+fn in_modeled_condition(n: &SyntaxNode) -> bool {
+    let mut cur = n.clone();
+    while let Some(p) = cur.parent() {
+        match p.kind() {
+            SyntaxKind::PAREN_EXPR | SyntaxKind::PREFIX_EXPR => {}
+            SyntaxKind::BINARY_EXPR if binary_op(&p).is_some_and(|op| matches!(op.kind(), SyntaxKind::AMP2 | SyntaxKind::PIPE2)) => {}
+            SyntaxKind::CONDITION => return p.parent().is_some_and(|s| matches!(s.kind(), SyntaxKind::IF_EXPR | SyntaxKind::WHILE_EXPR)),
+            SyntaxKind::WHEN_CONDITION => return true,
+            SyntaxKind::VALUE_ARGUMENT => {
+                let call = p.parent().and_then(|l| l.parent());
+                return call.and_then(|c| c.first_child()).is_some_and(|c| matches!(c.text().to_string().as_str(), "require" | "check" | "assert"));
+            }
+            _ => return false,
+        }
+        cur = p;
+    }
+    false
+}
+
 /// A use of a name that could smart-cast it to non-null afterwards.
 fn may_narrow(e: &Engine, r: &SyntaxNode) -> bool {
     let Some(p) = r.parent() else { return false };
     match p.kind() {
+        // `x == null` / `x is T` where the engine applies them (an `if`/`while` condition,
+        // `when` entry, `&&`/`||` operand, `require`): the smart-cast type decides.
+        SyntaxKind::BINARY_EXPR | SyntaxKind::IS_EXPR if null_check_or_is(&p) && in_modeled_condition(&p) => false,
         SyntaxKind::BINARY_EXPR => binary_op(&p).is_some_and(|op| {
             matches!(op.kind(), SyntaxKind::EQ2 | SyntaxKind::NOT_EQ | SyntaxKind::EQ3 | SyntaxKind::NOT_EQ2 | SyntaxKind::ELVIS)
                 || op.kind() == SyntaxKind::EQ && p.first_child().as_ref() == Some(r)
@@ -838,7 +879,7 @@ fn literal_type(n: &SyntaxNode) -> Option<Option<&'static str>> {
 
 /// A literal, or a value of certain type (see `certain_type`), where type `t` (written
 /// `shown`) is expected: the rule, message and the type the declaration could change to.
-fn type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: &str) -> Option<(&'static Rule, String, String, Option<Fix>)> {
+pub(super) fn type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: &str) -> Option<(&'static Rule, String, String, Option<Fix>)> {
     let (fq, nullable) = match t {
         TypeRef::Named { fq: Some(fq), nullable, .. } => (fq.to_string(), *nullable),
         TypeRef::Function { nullable, .. } => ("kotlin.Function".to_string(), *nullable),
@@ -956,7 +997,7 @@ fn literal_initializer(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
 }
 
 fn literal_return(e: &Engine, ret: &SyntaxNode, out: &mut Sink) {
-    if ret.children().any(|c| c.kind() == SyntaxKind::LABEL) {
+    if ret.children().any(|c| matches!(c.kind(), SyntaxKind::LABEL | SyntaxKind::LABEL_QUALIFIER)) {
         return;
     }
     let Some(value) = ret.children().last() else { return };

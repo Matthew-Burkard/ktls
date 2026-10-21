@@ -136,6 +136,14 @@ rules! {
     CONFLICTING_OVERLOADS = "CONFLICTING_OVERLOADS", Compiler, Error, false, [], "Two functions with the same signature in one scope";
     INITIALIZER_TYPE_MISMATCH = "INITIALIZER_TYPE_MISMATCH", Compiler, Error, false, [], "Value of the wrong type (literal, typed local/parameter, constructor call) as an initializer or default value";
     RETURN_TYPE_MISMATCH = "RETURN_TYPE_MISMATCH", Compiler, Error, false, [], "Value of the wrong type returned";
+    CREATING_AN_INSTANCE_OF_ABSTRACT_CLASS = "CREATING_AN_INSTANCE_OF_ABSTRACT_CLASS", Compiler, Error, false, [], "Constructor call of an abstract or sealed class, an interface or an enum";
+    INVISIBLE_REFERENCE = "INVISIBLE_REFERENCE", Compiler, Error, false, [], "Use of a private, protected or internal declaration where it is not visible";
+    INFIX_MODIFIER_REQUIRED = "INFIX_MODIFIER_REQUIRED", Compiler, Error, false, [], "Infix call of a function that is not 'infix'";
+    VARIABLE_EXPECTED = "VARIABLE_EXPECTED", Compiler, Error, false, [], "Assignment to something that is not a variable";
+    RETURN_NOT_ALLOWED = "RETURN_NOT_ALLOWED", Compiler, Error, false, [], "'return' in an initializer block, or a value returned from a constructor";
+    BREAK_OR_CONTINUE_OUTSIDE_A_LOOP = "BREAK_OR_CONTINUE_OUTSIDE_A_LOOP", Compiler, Error, false, [], "'break' or 'continue' outside a loop";
+    UNINITIALIZED_VARIABLE = "UNINITIALIZED_VARIABLE", Compiler, Error, false, [], "Local variable read before it is assigned";
+    WRONG_NUMBER_OF_TYPE_ARGUMENTS = "WRONG_NUMBER_OF_TYPE_ARGUMENTS", Compiler, Error, false, [], "Type with the wrong number of type arguments";
     ILLEGAL_SUSPEND_FUNCTION_CALL = "ILLEGAL_SUSPEND_FUNCTION_CALL", Compiler, Error, false, [], "Call to a 'suspend' function outside a coroutine or 'suspend' function";
     ARGUMENT_TYPE_MISMATCH = "ARGUMENT_TYPE_MISMATCH", Compiler, Error, false, [], "Argument of the wrong type (literal, typed local/parameter, constructor call) for a function without overloads";
     NULL_FOR_NONNULL_TYPE = "NULL_FOR_NONNULL_TYPE", Compiler, Error, false, [], "'null' for a non-null type";

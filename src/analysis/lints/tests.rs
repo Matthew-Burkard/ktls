@@ -1106,3 +1106,126 @@ fn add_parameter_from_call() {
     assert!(fixed(text, "TOO_MANY_ARGUMENTS").contains("fun two(a: Int, b: Int, label: String, value: Double) = a + b"));
     assert!(fixed(text, "NAMED_PARAMETER_NOT_FOUND").contains("fun two(a: Int, b: Int, c: Boolean) = a + b"));
 }
+
+#[test]
+fn more_compiler_errors() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    fx.run("src/main/kotlin/a/Other.kt", "package a\n\nclass Vault {\n    private val secret = 1\n    private fun hide() {}\n    protected fun guarded() {}\n    fun open() = secret\n}\nprivate fun fileOnly() = 1\n");
+    let text = r#"package a
+
+abstract class Shape
+interface Named
+enum class Color { RED }
+sealed class Result
+
+fun Int.twice() = this * 2
+
+fun make(v: Vault) {
+    Shape()
+    Named()
+    Color()
+    Result()
+    v.secret
+    v.hide()
+    v.guarded()
+    v.open()
+    fileOnly()
+    val n = 1 twice 2
+    make(v) = 3
+    break
+    val x: Int
+    println(x)
+    val y: Int
+    if (n > 1) y = 1 else y = 2
+    println(y)
+    val list: List<Int, Int> = listOf()
+    val map: Map<String> = mapOf()
+    val raw: List = listOf()
+    val ok: Map<String, *> = mapOf()
+    val check = (raw as Any) is List<*>
+}
+
+fun count(): Int {
+    return
+}
+
+fun nothing() {
+    return 1
+}
+
+class C {
+    init {
+        return
+    }
+    constructor(i: Int) {
+        return
+    }
+}
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{}: {}", l.rule.id, &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    for expected in [
+        "CREATING_AN_INSTANCE_OF_ABSTRACT_CLASS: Shape",
+        "CREATING_AN_INSTANCE_OF_ABSTRACT_CLASS: Named",
+        "CREATING_AN_INSTANCE_OF_ABSTRACT_CLASS: Color",
+        "CREATING_AN_INSTANCE_OF_ABSTRACT_CLASS: Result",
+        "INVISIBLE_REFERENCE: secret",
+        "INVISIBLE_REFERENCE: hide",
+        "INVISIBLE_REFERENCE: guarded",
+        "INFIX_MODIFIER_REQUIRED: twice",
+        "VARIABLE_EXPECTED: make(v)",
+        "BREAK_OR_CONTINUE_OUTSIDE_A_LOOP: break",
+        "UNINITIALIZED_VARIABLE: x",
+        "WRONG_NUMBER_OF_TYPE_ARGUMENTS: List<Int, Int>",
+        "WRONG_NUMBER_OF_TYPE_ARGUMENTS: Map<String>",
+        "WRONG_NUMBER_OF_TYPE_ARGUMENTS: List",
+        "RETURN_TYPE_MISMATCH: return",
+        "RETURN_TYPE_MISMATCH: 1",
+        "RETURN_NOT_ALLOWED: return",
+    ] {
+        has(&found, expected);
+    }
+    // Not: visible members, the second initialized val, star projections, `is` checks,
+    // a bare `return` in a constructor.
+    for unexpected in ["INVISIBLE_REFERENCE: open", "UNINITIALIZED_VARIABLE: y", "WRONG_NUMBER_OF_TYPE_ARGUMENTS: Map<String, *>", "WRONG_NUMBER_OF_TYPE_ARGUMENTS: List<*>"] {
+        assert!(!found.iter().any(|f| f == unexpected), "{unexpected} in {found:#?}");
+    }
+    assert_eq!(found.iter().filter(|f| f.starts_with("RETURN_NOT_ALLOWED")).count(), 1, "{found:#?}");
+}
+
+#[test]
+fn unsafe_calls_with_smart_casts() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let text = r#"package a
+
+class Node(val next: Node?, val name: String)
+
+fun f(s: String?, t: String?, start: Node?) {
+    if (s != null) println(s.length)
+    s.length
+    if (t == null) return
+    t.length
+    var n: Node? = start
+    while (n != null) {
+        println(n.name)
+        n = n.next
+    }
+    var m: Node? = start
+    if (m != null) {
+        m = m.next
+        m.name
+    }
+}
+"#;
+    let found: Vec<String> = compiler(text).into_iter().filter(|f| f.starts_with("UNSAFE_CALL")).collect();
+    // The use after the `if` block, and the use after reassignment; not the checked ones.
+    assert_eq!(found.len(), 2, "{found:#?}");
+    let (lints, _) = Fixture::new().run("src/main/kotlin/a/A.kt", text);
+    let lines: Vec<usize> = lints.iter().filter(|l| l.rule.id == "UNSAFE_CALL").map(|l| text[..usize::from(l.range.start())].matches('\n').count() + 1).collect();
+    assert_eq!(lines, vec![7, 18]);
+}

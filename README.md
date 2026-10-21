@@ -1,4 +1,6 @@
-# kotlin-lsp-rust
+# kotlin-lsp-rus
+
+Vibe coded kotlin-lsp in rust.
 
 A Kotlin language server written in Rust. This is the core infrastructure: protocol
 handling, an error-tolerant parser, Gradle/Maven import with native dependency
@@ -126,6 +128,14 @@ supertypes, generated code).
 | `INITIALIZER_TYPE_MISMATCH` | error | Value of the wrong type (literal, typed local/parameter, constructor call) as an initializer or default value |
 | `RETURN_TYPE_MISMATCH` | error | Value of the wrong type returned |
 | `ILLEGAL_SUSPEND_FUNCTION_CALL` | error | Call to a 'suspend' function outside a coroutine or 'suspend' function |
+| `CREATING_AN_INSTANCE_OF_ABSTRACT_CLASS` | error | Constructor call of an abstract or sealed class, an interface or an enum |
+| `INVISIBLE_REFERENCE` | error | Use of a private, protected or internal declaration where it is not visible |
+| `INFIX_MODIFIER_REQUIRED` | error | Infix call of a function that is not 'infix' |
+| `VARIABLE_EXPECTED` | error | Assignment to something that is not a variable |
+| `RETURN_NOT_ALLOWED` | error | 'return' in an initializer block, or a value returned from a constructor |
+| `BREAK_OR_CONTINUE_OUTSIDE_A_LOOP` | error | 'break' or 'continue' outside a loop |
+| `UNINITIALIZED_VARIABLE` | error | Local variable read before it is assigned |
+| `WRONG_NUMBER_OF_TYPE_ARGUMENTS` | error | Type with the wrong number of type arguments |
 | `ARGUMENT_TYPE_MISMATCH` | error | Argument of the wrong type (literal, typed local/parameter, constructor call) for a function without overloads |
 | `NULL_FOR_NONNULL_TYPE` | error | 'null' for a non-null type |
 | `TOO_MANY_ARGUMENTS` | error | More arguments than parameters |

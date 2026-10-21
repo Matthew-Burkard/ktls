@@ -49,7 +49,7 @@ fn missing_return(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
     let block = block.syntax().clone();
     // Any `return`/`throw` (labelled returns leave lambdas, not the function).
     let exits = own_descendants(&block).any(|d| match d.kind() {
-        SyntaxKind::RETURN_EXPR => !d.children().any(|c| c.kind() == SyntaxKind::LABEL),
+        SyntaxKind::RETURN_EXPR => !d.children().any(|c| matches!(c.kind(), SyntaxKind::LABEL | SyntaxKind::LABEL_QUALIFIER)),
         SyntaxKind::THROW_EXPR => true,
         _ => false,
     });

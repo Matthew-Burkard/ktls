@@ -742,7 +742,8 @@ impl<'s> Engine<'s> {
         self.resolve_simple(at, name, None)
     }
 
-    fn top_level_named(&self, name: &str) -> Vec<Symbol> {
+    /// Top-level callables `name` in scope (imported, same package, default imports).
+    pub fn top_level_named(&self, name: &str) -> Vec<Symbol> {
         let mut out = self.imported_callables(name);
         if !out.is_empty() {
             return out;
@@ -2542,11 +2543,23 @@ impl<'s> Engine<'s> {
     /// The type of the local `l` at the use `at`, narrowed by the checks that must have
     /// passed to get there: enclosing `if`/`when` branches, `&&`/`||` operands, and earlier
     /// guards in the same block (`if (x == null) return`, `require(x is T)`). Only for
-    /// locals that cannot change: `val`s, parameters and `var`s never assigned again.
+    /// locals that cannot change between the check and the use: `val`s, parameters, and
+    /// `var`s not assigned in between (nor in a lambda).
     pub fn smart_cast(&self, at: &SyntaxNode, l: &LocalDef, declared: TypeRef) -> TypeRef {
-        if !matches!(l.kind, LocalKind::Val | LocalKind::Var | LocalKind::Parameter) || !self.narrowable(at, l) || l.kind == LocalKind::Var && !self.never_reassigned(at, l) {
+        if !matches!(l.kind, LocalKind::Val | LocalKind::Var | LocalKind::Parameter) || !self.narrowable(at, l) {
             return declared;
         }
+        let assignments = if l.kind == LocalKind::Var {
+            match self.var_assignments(at, l) {
+                Some(a) => a,
+                None => return declared,
+            }
+        } else {
+            Vec::new()
+        };
+        let use_at = at.text_range().start();
+        // A check holds at the use if the variable is not assigned after it, before the use.
+        let holds = |site: &SyntaxNode| !assignments.iter().any(|&a| a > site.text_range().end() && a <= use_at);
         let mut facts: Vec<Fact> = Vec::new();
         let mut child = at.clone();
         while let Some(parent) = child.parent() {
@@ -2558,15 +2571,15 @@ impl<'s> Engine<'s> {
                 SyntaxKind::IF_EXPR => {
                     if let Some(cond) = parent.children().find(|c| c.kind() == SyntaxKind::CONDITION).and_then(|c| c.first_child()) {
                         match child.kind() {
-                            SyntaxKind::THEN_BRANCH => self.facts(&cond, l, true, &mut facts),
-                            SyntaxKind::ELSE_BRANCH => self.facts(&cond, l, false, &mut facts),
+                            SyntaxKind::THEN_BRANCH if holds(&cond) => self.facts(&cond, l, true, &mut facts),
+                            SyntaxKind::ELSE_BRANCH if holds(&cond) => self.facts(&cond, l, false, &mut facts),
                             _ => {}
                         }
                     }
                 }
                 SyntaxKind::BINARY_EXPR if parent.first_child().as_ref() != Some(&child) => {
                     let op = parent.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE).map(|o| o.text().to_string());
-                    if let Some(left) = parent.first_child() {
+                    if let Some(left) = parent.first_child().filter(|l| holds(l)) {
                         match op.as_deref() {
                             Some("&&") => self.facts(&left, l, true, &mut facts),
                             Some("||") => self.facts(&left, l, false, &mut facts),
@@ -2574,10 +2587,23 @@ impl<'s> Engine<'s> {
                         }
                     }
                 }
-                SyntaxKind::WHEN_ENTRY if child.kind() == SyntaxKind::BODY => self.when_facts(&parent, l, &mut facts),
+                SyntaxKind::WHEN_ENTRY if child.kind() == SyntaxKind::BODY => {
+                    // No assignment from the `when` to the use.
+                    let start = parent.parent().map_or(parent.text_range().start(), |w| w.text_range().start());
+                    if !assignments.iter().any(|&a| a >= start && a < use_at) {
+                        self.when_facts(&parent, l, &mut facts);
+                    }
+                }
+                SyntaxKind::WHILE_EXPR if child.kind() == SyntaxKind::BODY => {
+                    if let Some(cond) = parent.children().find(|c| c.kind() == SyntaxKind::CONDITION).and_then(|c| c.first_child()).filter(|c| holds(c)) {
+                        self.facts(&cond, l, true, &mut facts);
+                    }
+                }
                 SyntaxKind::BLOCK => {
                     for stmt in parent.children().take_while(|s| *s != child) {
-                        self.guard_facts(&stmt, l, &mut facts);
+                        if holds(&stmt) {
+                            self.guard_facts(&stmt, l, &mut facts);
+                        }
                     }
                     if parent.text_range().contains_range(l.name_range) {
                         break;
@@ -2743,17 +2769,28 @@ impl<'s> Engine<'s> {
         }
     }
 
-    /// A `var` with no assignment, increment or decrement anywhere in its scope.
-    fn never_reassigned(&self, at: &SyntaxNode, l: &LocalDef) -> bool {
-        let Some(scope) = at.ancestors().find(|a| a.text_range().contains_range(l.name_range) && matches!(a.kind(), SyntaxKind::BLOCK | SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR)) else { return false };
-        !scope.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == l.name.as_str()).any(|r| {
-            let Some(p) = r.parent() else { return false };
-            match p.kind() {
+    /// Where the `var` `l` is assigned (or incremented) in its scope; `None` when a lambda
+    /// assigns it (it may change at any time).
+    fn var_assignments(&self, at: &SyntaxNode, l: &LocalDef) -> Option<Vec<crate::syntax::TextSize>> {
+        let scope = at.ancestors().find(|a| a.text_range().contains_range(l.name_range) && matches!(a.kind(), SyntaxKind::BLOCK | SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR))?;
+        let mut out = Vec::new();
+        for r in scope.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == l.name.as_str()) {
+            let Some(p) = r.parent() else { continue };
+            let assigned = match p.kind() {
                 SyntaxKind::BINARY_EXPR => p.first_child().as_ref() == Some(&r) && crate::analysis::lints::assignment_op(&p).is_some(),
                 SyntaxKind::PREFIX_EXPR | SyntaxKind::POSTFIX_EXPR => p.descendants_with_tokens().any(|t| matches!(t.kind(), SyntaxKind::PLUS2 | SyntaxKind::MINUS2)),
                 _ => false,
+            };
+            if !assigned || self.find_local(&r, &l.name).is_none_or(|x| x.name_range != l.name_range) {
+                continue;
             }
-        })
+            if r.ancestors().take_while(|a| *a != scope).any(|a| matches!(a.kind(), SyntaxKind::LAMBDA_EXPR | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::FUN | SyntaxKind::OBJECT_LITERAL)) {
+                return None;
+            }
+            // The new value counts once the assignment completes (`x = x.next` reads the old).
+            out.push(p.text_range().end());
+        }
+        Some(out)
     }
 }
 
