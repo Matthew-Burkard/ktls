@@ -32,26 +32,10 @@ pub fn link_at(tok: &SyntaxToken, offset: TextSize, partial: bool) -> Option<Lin
     let text = tok.text();
     let base = tok.text_range().start();
     let rel = usize::from(offset - base);
-    let bytes: Vec<(usize, char)> = text.char_indices().collect();
-    // Start of the dotted name around the cursor.
-    let mut start = rel;
-    while let Some(&(i, c)) = bytes.iter().rev().find(|(i, _)| *i < start) {
-        if is_name_char(c) || c == '.' {
-            start = i;
-        } else {
-            break;
-        }
-    }
-    let mut end = rel;
-    if !partial {
-        while let Some(&(_, c)) = bytes.iter().find(|(i, _)| *i == end) {
-            if is_name_char(c) || c == '.' {
-                end += c.len_utf8();
-            } else {
-                break;
-            }
-        }
-    }
+    // The dotted name around the cursor.
+    let in_name = |c: char| is_name_char(c) || c == '.';
+    let start = text[..rel].char_indices().rev().take_while(|(_, c)| in_name(*c)).last().map_or(rel, |(i, _)| i);
+    let end = if partial { rel } else { text[rel..].char_indices().find(|(_, c)| !in_name(*c)).map_or(text.len(), |(i, _)| rel + i) };
     let before = text[..start].trim_end_matches(' ');
     let linked = text[..start].ends_with('[') || TAGS.iter().any(|t| before.ends_with(t) && before.len() < start);
     if !linked {

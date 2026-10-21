@@ -9,7 +9,7 @@ use super::{DECLARATIONS, declaration_def, qualified_name_segment, type_segment}
 use crate::analysis::Snapshot;
 use crate::symbols::{Modifiers, Origin, Symbol, SymbolKind};
 use crate::syntax::ast;
-use crate::syntax::{SyntaxKind, SyntaxToken, TextRange};
+use crate::syntax::{SyntaxKind, SyntaxToken, TextRange, TextSize};
 
 /// Token types, in legend order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +104,10 @@ pub fn semantic_tokens(snap: &Snapshot, path: &Path, range: Option<TextRange>) -
         }
         let lexical = match tok.kind() {
             SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::SHEBANG => Some((TokenType::Comment, 0)),
-            SyntaxKind::KDOC => Some((TokenType::Comment, modifier::DOCUMENTATION)),
+            SyntaxKind::KDOC => {
+                kdoc_tokens(&e, &tok, &mut out);
+                continue;
+            }
             SyntaxKind::INT_LITERAL | SyntaxKind::FLOAT_LITERAL => Some((TokenType::Number, 0)),
             SyntaxKind::STRING_OPEN | SyntaxKind::STRING_CLOSE | SyntaxKind::STRING_TEXT | SyntaxKind::CHAR_LITERAL => Some((TokenType::String, 0)),
             k if k.is_keyword() => Some((TokenType::Keyword, 0)),
@@ -154,6 +157,55 @@ fn identifier(e: &Engine, tok: &SyntaxToken) -> Option<(TokenType, u32)> {
             Some((ty, m | modifier::DECLARATION))
         }
         _ => soft_keyword(tok).or_else(|| label_reference(tok)),
+    }
+}
+
+/// A KDoc comment: comment text, `@tags` as decorators and links by what they resolve to.
+fn kdoc_tokens(e: &Engine, tok: &SyntaxToken, out: &mut Vec<Token>) {
+    let doc = modifier::DOCUMENTATION;
+    let text = tok.text();
+    let base = tok.text_range().start();
+    let at = |i: usize| base + TextSize::from(i as u32);
+    let mut special: Vec<(TextRange, TokenType, u32)> = Vec::new();
+    for (i, _) in text.match_indices('@') {
+        let len = text[i + 1..].find(|c: char| !c.is_alphanumeric()).unwrap_or(text.len() - i - 1);
+        if len > 0 && text[..i].trim_end_matches(' ').ends_with(['*', '\n']) {
+            special.push((TextRange::new(at(i), at(i + 1 + len)), TokenType::Decorator, doc));
+        }
+    }
+    // Every name start that is part of a link (`[a.b]` or a tag subject).
+    let mut i = 0;
+    while i < text.len() {
+        let c = text[i..].chars().next().unwrap();
+        // Cheap pre-check before parsing the link: after `[`, `.` or a tag.
+        let before = text[..i].trim_end_matches(' ');
+        let candidate = text[..i].ends_with(['[', '.']) || before.len() < i && before.rsplit(char::is_whitespace).next().is_some_and(|w| w.starts_with('@'));
+        let starts = candidate && (c.is_alphanumeric() || c == '_' || c == '`');
+        if starts && let Some(link) = super::kdoc::link_at(tok, at(i) + TextSize::from(1), false) {
+            let (_, range) = link.segments.last().unwrap();
+            if range.start() == at(i) {
+                let ty = super::kdoc::resolve(e, &link).first().map(|d| def_token(d, false));
+                if let Some((ty, m)) = ty {
+                    special.push((*range, ty, m | doc));
+                }
+            }
+        }
+        i += c.len_utf8();
+    }
+    special.sort_by_key(|(r, _, _)| r.start());
+    let mut pos = base;
+    for (r, ty, m) in special {
+        if r.start() < pos {
+            continue;
+        }
+        if r.start() > pos {
+            out.push(Token { range: TextRange::new(pos, r.start()), ty: TokenType::Comment, modifiers: doc });
+        }
+        out.push(Token { range: r, ty, modifiers: m });
+        pos = r.end();
+    }
+    if pos < tok.text_range().end() {
+        out.push(Token { range: TextRange::new(pos, tok.text_range().end()), ty: TokenType::Comment, modifiers: doc });
     }
 }
 

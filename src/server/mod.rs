@@ -134,6 +134,8 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
             code_action_kinds: Some(vec![
                 lsp_types::CodeActionKind::QUICKFIX,
                 lsp_types::CodeActionKind::REFACTOR_REWRITE,
+                lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                lsp_types::CodeActionKind::new("source.generate"),
                 lsp_types::CodeActionKind::SOURCE_FIX_ALL,
                 lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
             ]),

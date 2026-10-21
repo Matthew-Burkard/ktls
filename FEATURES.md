@@ -74,7 +74,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P1] `textDocument/declaration` — the member an `override` overrides (also in libraries), the `expect` of an `actual`, otherwise the definition
 - [x] [P1] `textDocument/typeDefinition`
 - [~] [P1] `textDocument/implementation` — overrides, subclasses, `actual` declarations, SAM implementations — *partial: project subclasses (transitive), overriding members and the `actual`s of an `expect`; not anonymous objects or SAM lambdas*
-- [~] [P0] `textDocument/references` — incl. operator conventions (`plus`, `get`, `invoke`, `component1`), property accessors, delegated properties, KDoc links, Java usages — *partial: name references in Kotlin sources (incl. imports, types, constructor calls, the whole override family incl. `super` calls and anonymous objects, and operator-convention call sites: arithmetic/compound assignment, unary, `++`/`--`, ranges, `in`/`!in`, indexing, `==`, comparisons, `invoke`, destructuring `componentN`, `for` iterators, `by` delegates); not KDoc links or Java files*
+- [~] [P0] `textDocument/references` — (KDoc `[links]` included) incl. operator conventions (`plus`, `get`, `invoke`, `component1`), property accessors, delegated properties, KDoc links, Java usages — *partial: name references in Kotlin sources (incl. imports, types, constructor calls, the whole override family incl. `super` calls and anonymous objects, and operator-convention call sites: arithmetic/compound assignment, unary, `++`/`--`, ranges, `in`/`!in`, indexing, `==`, comparisons, `invoke`, destructuring `componentN`, `for` iterators, `by` delegates); not KDoc links or Java files*
 - [~] [P1] `textDocument/documentHighlight` — read vs write occurrences, exit points (`return`), loop `break` targets — *partial: read/write occurrences (incl. the override family); no exit points or loop targets*
 - [x] [P0] `textDocument/documentSymbol` — hierarchical outline (classes, objects, functions, properties, typealiases, enum entries)
 - [~] [P0] `workspace/symbol` — fuzzy/camel-hump search across project + libraries — *partial: project sources only*
@@ -116,6 +116,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P0] Token types: namespace, class, interface, enum, enumMember, typeParameter, function, method, property, parameter, variable, keyword, modifier, annotation, string, number, comment, operator, label
 - [~] [P1] Modifiers: declaration, readonly (`val`), mutable (`var`), static/companion, deprecated, abstract, suspend, extension, backing field, smart-cast, documentation — *partial: all but backing field and smart-cast; plus `defaultLibrary` for library symbols*
 - [x] [P1] Soft keywords highlighted contextually (`data`, `value`, `sealed`, `by`, `get`, `set`…)
+- [x] [P1] KDoc: `@tags` as decorators, `[links]` and tag subjects by what they resolve to (with the `documentation` modifier)
 - [ ] [P2] String template injections, regex/SQL/JSON language injection highlighting
 
 ### 3.5 Other display
@@ -358,15 +359,15 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 ### 6.2 Source actions
 - [~] [P0] `source.organizeImports` — remove unused, sort per code style, collapse to `*` per threshold, handle aliases — *partial: removes unused/duplicate imports and sorts by `.editorconfig` `ij_kotlin_imports_layout` (default IntelliJ layout); no `*` collapsing*
 - [~] [P1] `source.fixAll` — apply all safe fixes — *partial: unused and redundant code*
-- [ ] [P1] **Generate**: `equals()`/`hashCode()`, `toString()`, secondary constructor, KDoc stub, test class/method, `serialVersionUID`
+- [~] [P1] **Generate**: `equals()`/`hashCode()`, `toString()`, secondary constructor, KDoc stub, test class/method, `serialVersionUID` — *partial: `equals()`/`hashCode()` and `toString()` from constructor and backing-field properties (arrays via `contentEquals`), KDoc stub with `@param`/`@property`/`@return` (code action kind `source.generate`)*
 - [ ] [P1] **Implement members…** / **Override members…** (with selection)
 - [ ] [P1] **Add missing imports** for whole file (on paste / on save)
 - [ ] [P2] **Optimize imports on the fly**, **convert star imports to explicit**
 
 ### 6.3 Intentions / refactor.rewrite (cursor-context actions)
 **Declarations**
-- [~] [P1] Convert to expression body ↔ block body — *partial: to expression body (`UseExpressionBody`)*
-- [ ] [P1] Specify type explicitly ↔ remove explicit type
+- [x] [P1] Convert to expression body ↔ block body (block body adds the inferred return type)
+- [x] [P1] Specify type explicitly ↔ remove explicit type (adds imports; removal only when the initializer has exactly the declared type)
 - [ ] [P1] Convert property to function ↔ function to property
 - [ ] [P1] Convert property initializer to getter ↔ getter to initializer
 - [ ] [P1] Convert parameter to property (`val`/`var` in constructor) ↔ property to parameter
@@ -383,7 +384,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P1] Convert `lazy` property ↔ eager, introduce backing property
 - [ ] [P1] Convert to `typealias`, inline `typealias`
 - [ ] [P2] Convert to `fun interface`, SAM ↔ lambda
-- [ ] [P2] Add KDoc / generate `@param` tags
+- [x] [P2] Add KDoc / generate `@param` tags
 
 **Expressions & control flow**
 - [ ] [P1] `if` ↔ `when`; `when` with subject ↔ without subject; flatten / merge `when` branches
@@ -396,9 +397,9 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P1] `try/finally` → `use {}`
 - [ ] [P1] Lambda ↔ anonymous function ↔ callable reference
 - [ ] [P1] Move lambda argument out of / into parentheses
-- [ ] [P1] Add/remove explicit lambda parameter (`it` ↔ named), specify explicit lambda signature
+- [~] [P1] Add/remove explicit lambda parameter (`it` ↔ named), specify explicit lambda signature — *partial: `it` → named (from `it` or the lambda's `{`)*
 - [ ] [P1] Scope functions: convert between `let`/`run`/`also`/`apply`/`with`
-- [ ] [P1] Add/remove named arguments (single / all)
+- [~] [P1] Add/remove named arguments (single / all) — *partial: add names to all positional arguments (Kotlin functions)*
 - [ ] [P1] Add/remove trailing comma, put arguments/parameters on separate lines ↔ one line
 - [ ] [P1] Swap binary expression operands, flip `equals`, De Morgan's law
 - [ ] [P1] Replace `a.compareTo(b) < 0` ↔ `a < b`, `contains` ↔ `in`, `invoke()` ↔ `()`
@@ -442,7 +443,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P2] Rename backing field / accessor pair, rename test along with subject
 
 ### 7.2 Extract (`refactor.extract`)
-- [ ] [P0] Extract variable (introduce local `val`; with "replace all occurrences")
+- [~] [P0] Extract variable (introduce local `val`; with "replace all occurrences") — *partial: the selected expression, named from the call/property or type; refused out of conditional, short-circuit, loop or lambda code; no "replace all"*
 - [ ] [P0] Extract function (local, member, top-level, extension; infers params/return, handles multiple outputs via data class/pair)
 - [ ] [P1] Extract property (member / top-level), extract constant (`const val`)
 - [ ] [P1] Extract parameter (introduce parameter, with default value), extract lambda parameter (functional parameter)

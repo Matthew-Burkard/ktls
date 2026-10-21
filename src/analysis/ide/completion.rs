@@ -1035,7 +1035,7 @@ fn snippet_escape(s: &str) -> String {
 }
 
 /// A variable name for a value of type `t`: `User` → `user`, `List<User>` → `users`.
-fn suggested_name(t: &TypeRef) -> String {
+pub(super) fn suggested_name(t: &TypeRef) -> String {
     let simple = |t: &TypeRef| t.fq_name().map(|f| f.rsplit('.').next().unwrap_or(f).to_string());
     let decap = |s: &str| {
         let mut c = s.chars();

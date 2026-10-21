@@ -73,7 +73,7 @@ pub fn inlay_hints(snap: &Snapshot, path: &Path, range: TextRange, config: &Inla
 }
 
 /// A type worth showing: known, and not an error.
-fn shown(t: &TypeRef) -> Option<String> {
+pub(super) fn shown(t: &TypeRef) -> Option<String> {
     let s = t.display();
     (!s.is_empty() && !s.contains("<error>") && !s.starts_with('<')).then_some(s)
 }
@@ -101,7 +101,7 @@ fn type_params(t: &TypeRef, out: &mut Vec<String>) {
 
 /// `t` only mentions type parameters declared around `at` (not ones of a called function
 /// that inference failed to bind).
-fn in_scope(t: &TypeRef, at: &SyntaxToken) -> bool {
+pub(super) fn in_scope(t: &TypeRef, at: &SyntaxToken) -> bool {
     let mut names = Vec::new();
     type_params(t, &mut names);
     names.iter().all(|n| {
@@ -168,7 +168,7 @@ fn results(n: &SyntaxNode, out: &mut Vec<SyntaxNode>) {
 
 /// The type of `expr`, unless its branches disagree (without smart casts and common
 /// supertypes, the engine takes the first branch, which may be wrong).
-fn value_type(e: &Engine, expr: &SyntaxNode) -> Option<TypeRef> {
+pub(super) fn value_type(e: &Engine, expr: &SyntaxNode) -> Option<TypeRef> {
     let mut values = Vec::new();
     results(expr, &mut values);
     let t = e.type_of(expr)?;

@@ -1,8 +1,10 @@
 //! IDE features built on the analysis: completion, definition, hover, references, rename
 //! and signature help.
 
+pub mod assists;
 pub mod completion;
 pub mod create;
+pub mod generate;
 pub mod hierarchy;
 pub mod imports;
 pub mod infer;
@@ -311,8 +313,7 @@ fn declaration_target(e: &Engine, d: &Def) -> Option<NavTarget> {
 pub fn references(snap: &Snapshot, path: &Path, offset: TextSize, include_declaration: bool, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Vec<NavTarget>> {
     use rayon::prelude::*;
     let e = Engine::new(snap, path)?;
-    let tok = token_at(&e.root, offset)?;
-    let (_, defs) = defs_of_token(&e, &tok)?;
+    let (_, defs) = kdoc::defs_at(&e, offset).or_else(|| defs_of_token(&e, &token_at(&e.root, offset)?))?;
     let target = defs.into_iter().next()?;
     // `it` and similar implicit names have no written declaration.
     let name = match &target {
@@ -378,6 +379,18 @@ pub fn references(snap: &Snapshot, path: &Path, offset: TextSize, include_declar
             let Some(fe) = Engine::new(snap, file) else { return Vec::new() };
             let mut out = Vec::new();
             for t in fe.root.descendants_with_tokens().filter_map(|el| el.into_token()) {
+                // KDoc links: each `name` in the comment that is a link resolving here.
+                if t.kind() == SyntaxKind::KDOC {
+                    for (i, _) in t.text().match_indices(name.as_str()) {
+                        let at = t.text_range().start() + TextSize::from(i as u32);
+                        let Some(link) = kdoc::link_at(&t, at + TextSize::from(1), false) else { continue };
+                        let Some((last, range)) = link.segments.last() else { continue };
+                        if *last == name && range.start() == at && kdoc::resolve(&fe, &link).iter().any(|d| in_family(&fe, d)) {
+                            out.push(NavTarget { path: file.clone(), range: *range });
+                        }
+                    }
+                    continue;
+                }
                 let by = t.kind() == SyntaxKind::IDENT && t.text() == "by" && op_kinds.contains(&SyntaxKind::IDENT);
                 let entry = destructuring && t.kind() == SyntaxKind::IDENT && t.parent().is_some_and(|p| p.kind() == SyntaxKind::DESTRUCTURING_ENTRY);
                 let matches_name = t.kind() == SyntaxKind::IDENT && ast::ident_text(&t) == name;

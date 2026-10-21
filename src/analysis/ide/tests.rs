@@ -1105,4 +1105,120 @@ fn kdoc_links() {
     has_all(&fx.labels(&doc("[User.$0")), &["name", "age", "greet"]);
     let c = fx.complete(&doc("[Us$0"));
     assert!(c.items.iter().all(|i| i.insert.is_none() && i.additional.is_empty()));
+    // References include KDoc links (from the link or from the declaration).
+    let refs = |fx: &mut Fx, text: &str| {
+        let (path, offset) = fx.open(text);
+        let found = crate::analysis::ide::references(&fx.host.snapshot(), &path, offset, false, &|| false).unwrap();
+        fx.names(found)
+    };
+    let main = "package app\n\nimport app.model.User\n\n/** Uses [User] and [user], not [Users]. */\nfun greet(user: User) = user.name\n";
+    let r = refs(&mut fx, &main.replace("[user]", "[us$0er]"));
+    assert_eq!(r, vec!["Main.kt:5:user", "Main.kt:6:user"]);
+    let r = refs(&mut fx, &main.replace("fun greet(user: User)", "fun greet(user: Us$0er)"));
+    assert!(r.contains(&"Main.kt:5:User".to_string()) && r.contains(&"Main.kt:3:User".to_string()), "{r:?}");
+}
+
+#[test]
+fn kdoc_semantic_tokens() {
+    let Some(mut fx) = fixture() else { return };
+    let text = format!("{HEADER}/**\n * Greets [User.name] of [user].\n * @param user who\n */\nfun greet(user: User) {{}}\n");
+    let (path, _) = fx.open(&format!("{text}$0"));
+    let tokens = semantic::semantic_tokens(&fx.host.snapshot(), &path, None);
+    let shown: Vec<String> = tokens
+        .iter()
+        .filter(|t| t.modifiers & semantic::modifier::DOCUMENTATION != 0 && t.ty != semantic::TokenType::Comment)
+        .map(|t| format!("{:?}:{}", t.ty, &text[usize::from(t.range.start())..usize::from(t.range.end())]))
+        .collect();
+    assert_eq!(shown, vec!["Class:User", "Property:name", "Parameter:user", "Decorator:@param", "Parameter:user"]);
+    // The comment around them is still covered, without overlaps.
+    let kdoc: Vec<_> = tokens.iter().filter(|t| t.modifiers & semantic::modifier::DOCUMENTATION != 0).collect();
+    assert!(kdoc.windows(2).all(|w| w[0].range.end() == w[1].range.start()));
+}
+
+#[test]
+fn generate_actions() {
+    let Some(mut fx) = fixture() else { return };
+    let run = |fx: &mut Fx, text: &str, title: &str| -> Option<String> {
+        let (path, offset) = fx.open(text);
+        let gs = crate::analysis::ide::generate::actions(&fx.host.snapshot(), &path, offset);
+        let g = gs.into_iter().find(|g| g.title == title)?;
+        let mut out = text.replace("$0", "");
+        out.replace_range(usize::from(g.range.start())..usize::from(g.range.end()), &g.text);
+        Some(out[HEADER.len()..].to_string())
+    };
+    let class = format!("{HEADER}class Po$0int(val x: Int, val label: String?, ids: Int) {{\n    val tags = arrayOf(\"a\")\n    val sum get() = x + 1\n}}\n");
+    let eq = run(&mut fx, &class, "Generate equals() and hashCode()").unwrap();
+    assert!(eq.contains("    override fun equals(other: Any?): Boolean {\n        if (this === other) return true\n        if (other !is Point) return false\n        if (x != other.x) return false\n        if (label != other.label) return false\n        if (!tags.contentEquals(other.tags)) return false\n        return true\n    }\n\n    override fun hashCode(): Int {\n        var result = x.hashCode()\n        result = 31 * result + (label?.hashCode() ?: 0)\n        result = 31 * result + tags.contentHashCode()\n        return result\n    }\n}\n"), "{eq}");
+    let ts = run(&mut fx, &class, "Generate toString()").unwrap();
+    assert!(ts.contains("    override fun toString(): String = \"Point(x=$x, label=$label, tags=${tags.contentToString()})\"\n}"), "{ts}");
+    // Without a body, and not for data classes or classes that already have them.
+    let bare = run(&mut fx, &format!("{HEADER}class B$0ox(val v: Int)\n"), "Generate toString()").unwrap();
+    assert_eq!(bare, "class Box(val v: Int) {\n    override fun toString(): String = \"Box(v=$v)\"\n}\n");
+    assert!(run(&mut fx, &format!("{HEADER}data class B$0ox(val v: Int)\n"), "Generate toString()").is_none());
+    assert!(run(&mut fx, &format!("{HEADER}class B$0ox(val v: Int) {{\n    override fun toString() = \"\"\n}}\n"), "Generate toString()").is_none());
+    // KDoc stub.
+    let doc = run(&mut fx, &format!("{HEADER}class A {{\n    fun ad$0d(a: Int, b: Int): Int = a + b\n}}\n"), "Add KDoc").unwrap();
+    assert_eq!(doc, "class A {\n    /**\n     * \n     *\n     * @param a \n     * @param b \n     * @return \n     */\n    fun add(a: Int, b: Int): Int = a + b\n}\n");
+    assert!(run(&mut fx, &format!("{HEADER}/** Doc. */\nfun ad$0d() {{}}\n"), "Add KDoc").is_none());
+    // Nothing from inside a function body.
+    let (path, offset) = fx.open(&format!("{HEADER}class A(val v: Int) {{
+    fun f() {{
+        prin$0tln()
+    }}
+}}
+"));
+    assert!(crate::analysis::ide::generate::actions(&fx.host.snapshot(), &path, offset).is_empty());
+}
+
+impl Fx {
+    /// Apply the assist titled `title` (starting with it) at `$0`, or on the selection
+    /// between `$0` and `$1`.
+    fn assist(&mut self, text: &str, title: &str) -> Option<String> {
+        let start = text.find("$0").unwrap();
+        let clean0 = text.replacen("$0", "", 1);
+        let end = clean0.find("$1").unwrap_or(start);
+        let clean = clean0.replacen("$1", "", 1);
+        let path = self.root.join("src/app/Main.kt");
+        self.host.set_file(path.clone(), Arc::from(clean.as_str()), Some(1));
+        let range = TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32));
+        let found = crate::analysis::ide::assists::assists(&self.host.snapshot(), &path, range);
+        let (_, fix) = found.into_iter().find(|(_, f)| f.title.starts_with(title))?;
+        let mut edits = fix.edits.clone();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.range.start()));
+        let mut out = clean;
+        for e in edits {
+            out.replace_range(usize::from(e.range.start())..usize::from(e.range.end()), &e.text);
+        }
+        Some(out.strip_prefix(HEADER).map_or(out.clone(), str::to_string))
+    }
+}
+
+#[test]
+fn refactoring_assists() {
+    let Some(mut fx) = fixture() else { return };
+    let f = |body: &str| format!("{HEADER}fun run(u: User, xs: List<User>, ok: Boolean) {{\n{body}\n}}\n");
+    let body = |out: String| out.trim_start_matches("fun run(u: User, xs: List<User>, ok: Boolean) {\n").trim_end_matches("\n}\n").to_string();
+    // Extract variable.
+    assert_eq!(body(fx.assist(&f("    println($0u.name.length + 1$1)"), "Extract variable").unwrap()), "    val value = u.name.length + 1\n    println(value)");
+    assert_eq!(body(fx.assist(&f("    println($0u.greet()$1)"), "Extract variable").unwrap()), "    val greet = u.greet()\n    println(greet)");
+    assert_eq!(body(fx.assist(&f("    val name = 1\n    println($0u.name$1)"), "Extract variable").unwrap()), "    val name = 1\n    val name2 = u.name\n    println(name2)");
+    // Not out of conditional or lambda code.
+    assert!(fx.assist(&f("    if (ok) println($0u.name$1)"), "Extract variable").is_none());
+    assert!(fx.assist(&f("    ok && $0u.name.isEmpty()$1"), "Extract variable").is_none());
+    // Inside a lambda: into the lambda's body.
+    assert_eq!(body(fx.assist(&f("    xs.forEach {\n        println($0it.name$1)\n    }"), "Extract variable").unwrap()), "    xs.forEach {\n        val name = it.name\n        println(name)\n    }");
+    assert!(fx.assist(&f("    println($0u.na$1me)"), "Extract variable").is_none());
+    // Explicit types.
+    assert_eq!(body(fx.assist(&f("    val n$0ames = xs.map { it.name }"), "Specify type explicitly").unwrap()), "    val names: List<String> = xs.map { it.name }");
+    assert_eq!(body(fx.assist(&f("    val n$0: Int = u.age"), "Remove explicit type").unwrap()), "    val n = u.age");
+    assert!(fx.assist(&f("    val n$0: Any = u.age"), "Remove explicit type").is_none());
+    let imported = fx.assist(&format!("{HEADER}fun f() {{\n    val f$0ile = java.io.File(\"a\")\n}}\n"), "Specify type explicitly").unwrap();
+    assert!(imported.contains("import java.io.File") && imported.contains("val file: File = "), "{imported}");
+    // Block body.
+    assert_eq!(fx.assist(&format!("{HEADER}fun t$0wice(x: Int) = x * 2\n"), "Convert to block body").unwrap(), "fun twice(x: Int): Int {\n    return x * 2\n}\n");
+    assert_eq!(fx.assist(&format!("{HEADER}fun s$0ay() = println(1)\n"), "Convert to block body").unwrap(), "fun say() {\n    println(1)\n}\n");
+    // Argument names.
+    assert_eq!(fx.assist(&format!("{HEADER}fun f() = User($0\"a\", 3)\n"), "Add names").unwrap(), "fun f() = User(name = \"a\", age = 3)\n");
+    // `it` → named.
+    assert_eq!(body(fx.assist(&f("    xs.forEach { println($0it.name + it.greet()) }"), "Replace 'it'").unwrap()), "    xs.forEach { user -> println(user.name + user.greet()) }");
 }

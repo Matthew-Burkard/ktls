@@ -264,6 +264,18 @@ pub fn code_actions(cx: &Ctx, path: &Path, range: lsp_types::Range, context: &ls
             }
         }
     }
+    for (kind, fix) in crate::analysis::ide::assists::assists(cx.snap, path, wanted) {
+        let kind = CodeActionKind::from(kind.to_string());
+        if wants(&kind) {
+            out.push(action(&fix.title, kind, None, &fix, false));
+        }
+    }
+    let generate = CodeActionKind::new("source.generate");
+    if wants(&generate) {
+        for g in crate::analysis::ide::generate::actions(cx.snap, path, wanted.start()) {
+            out.push(action(&g.title, generate.clone(), None, &Fix::replace(g.title.clone(), g.range, g.text), false));
+        }
+    }
     if wants(&CodeActionKind::SOURCE_ORGANIZE_IMPORTS)
         && let Some((range, new_text)) = crate::analysis::ide::imports::organize_imports(cx.snap, path)
     {

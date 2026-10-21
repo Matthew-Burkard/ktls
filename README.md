@@ -5,8 +5,10 @@ handling, an error-tolerant parser, Gradle/Maven import with native dependency
 resolution, binary classpath indexing (jars, the JDK image, Kotlin metadata), a
 module-aware declaration index, import/type resolution with diagnostics, navigation
 (definition, declaration, type definition, implementation, hover, references, highlights, rename,
-call/type hierarchy), completion (incl. postfix templates), signature help, inlay hints, semantic tokens, folding and
-selection ranges, import and create-from-usage fixes, organize imports and lint rules with
+call/type hierarchy), completion (incl. postfix templates and KDoc links), signature help, inlay hints, semantic tokens, folding and
+selection ranges, import and create-from-usage fixes, refactoring assists (extract variable,
+explicit types, block body, argument names, named lambda parameter), generate
+`equals`/`hashCode`/`toString`/KDoc, organize imports and lint rules with
 quick fixes.
 
 See [FEATURES.md](FEATURES.md) for the full feature catalog and what is implemented.
