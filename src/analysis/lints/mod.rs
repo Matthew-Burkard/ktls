@@ -95,6 +95,7 @@ rules! {
     // Compiler errors.
     UNRESOLVED_REFERENCE_EXPR = "UNRESOLVED_REFERENCE", Compiler, Error, false, [], "Name that does not resolve to any declaration";
     VAL_REASSIGNMENT = "VAL_REASSIGNMENT", Compiler, Error, false, [], "Assignment to a 'val' or parameter";
+    UNSAFE_CALL = "UNSAFE_CALL", Compiler, Error, false, [], "Member access with '.' on a nullable local or parameter that is never null-checked";
     NO_RETURN = "NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY", Compiler, Error, false, [], "Function with a return type whose block body has no 'return'";
     ABSTRACT_MEMBER_NOT_IMPLEMENTED = "ABSTRACT_MEMBER_NOT_IMPLEMENTED", Compiler, Error, false, [], "Concrete class missing an implementation of an interface member";
     ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED = "ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED", Compiler, Error, false, [], "Concrete class missing an implementation of an abstract class member";

@@ -926,3 +926,103 @@ fn semantic_token_kinds() {
     assert_eq!(at("val", 0).0, T::Keyword);
     assert_eq!(at("\"a\"", 0).0, T::String);
 }
+
+impl Fx {
+    /// Titles of the create fixes at the cursor, and each result applied (to its file).
+    fn creates(&mut self, text: &str) -> Vec<(String, String)> {
+        let (path, offset) = self.open(text);
+        let snap = self.host.snapshot();
+        create::create_fixes(&snap, &path, TextRange::empty(offset))
+            .into_iter()
+            .map(|f| {
+                let (p, _, _) = &f.edits[0];
+                let mut content = snap.file(p).unwrap().text.to_string();
+                let mut edits = f.edits.clone();
+                edits.sort_by_key(|(_, r, _)| std::cmp::Reverse(r.start()));
+                for (_, r, t) in edits {
+                    content.replace_range(usize::from(r.start())..usize::from(r.end()), &t);
+                }
+                (f.title, content)
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn create_from_usage() {
+    let Some(mut fx) = fixture() else { return };
+    // Function from a call, with parameter types from the arguments and the expected type.
+    let fixes = fx.creates("package app\n\nimport app.model.User\n\nfun run(u: User) {\n    val n: Int = coun$0t(u, \"x\")\n}\n");
+    assert_eq!(fixes.len(), 1, "{fixes:?}");
+    assert_eq!(fixes[0].0, "Create function 'count'");
+    assert!(fixes[0].1.ends_with("}\n\nfun count(u: User, p2: String): Int {\n    TODO(\"Not yet implemented\")\n}\n"), "{}", fixes[0].1);
+    // Inside a class: a private member too.
+    let fixes = fx.creates("package app\n\nclass C {\n    fun f() {\n        hel$0per(1)\n    }\n}\n");
+    assert_eq!(fixes[0].0, "Create member function 'helper'");
+    assert!(fixes[0].1.contains("    }\n\n    private fun helper(p1: Int) {\n        TODO(\"Not yet implemented\")\n    }\n}\n"), "{}", fixes[0].1);
+    // Member of a project class in another file, or an extension.
+    let fixes = fx.creates("package app\n\nimport app.model.User\n\nfun run(u: User) {\n    u.ren$0ame(\"b\")\n}\n");
+    assert_eq!(fixes.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), vec!["Create member function 'User.rename'", "Create extension function 'User.rename'"]);
+    assert!(fixes[0].1.contains("        fun create(): User = User(\"default\")\n    }\n\n    fun rename(p1: String) {\n        TODO(\"Not yet implemented\")\n    }\n}\n"), "{}", fixes[0].1);
+    assert!(fixes[1].1.ends_with("}\n\nfun User.rename(p1: String) {\n    TODO(\"Not yet implemented\")\n}\n"), "{}", fixes[1].1);
+    // Class from a capitalized call.
+    let fixes = fx.creates("package app\n\nfun run() {\n    val p = Poi$0nt(1, 2)\n}\n");
+    assert!(fixes[0].1.ends_with("\nclass Point(val p1: Int, val p2: Int)\n"), "{}", fixes[0].1);
+    // A plain name: local variable, parameter.
+    let fixes = fx.creates("package app\n\nfun run(a: Int) {\n    println(lim$0it)\n}\n");
+    let titles: Vec<&str> = fixes.iter().map(|f| f.0.as_str()).collect();
+    assert_eq!(titles, vec!["Create local variable 'limit'", "Create parameter 'limit'"]);
+    assert!(fixes[0].1.contains("    val limit: Any = TODO(\"Not yet implemented\")\n    println(limit)"), "{}", fixes[0].1);
+    assert!(fixes[1].1.contains("fun run(a: Int, limit: Any)"), "{}", fixes[1].1);
+    // Resolved names get nothing.
+    assert!(fx.creates("package app\n\nfun run() {\n    print$0ln()\n}\n").is_empty());
+}
+
+#[test]
+fn call_and_type_hierarchies() {
+    let Some(mut fx) = fixture() else { return };
+    let text = "package app\n\nimport app.model.User\n\nfun leaf(u: User) = u.greet(\"x\")\nfun mid() {\n    leaf(User(\"a\"))\n    leaf(User(\"b\"))\n}\nclass Top {\n    val v = mid()\n    fun run() { mid(); println(1) }\n}\n";
+    let (path, offset) = fx.open(&text.replacen("fun mid", "fun m$0id", 1));
+    let snap = fx.host.snapshot();
+    let root = hierarchy::prepare_call_hierarchy(&snap, &path, offset).unwrap();
+    assert_eq!((root.name.as_str(), root.kind), ("mid", crate::symbols::SymbolKind::Function));
+    let mut incoming: Vec<(String, usize)> = hierarchy::incoming_calls(&snap, &root.anchor, &|| false).into_iter().map(|(i, r)| (i.name, r.len())).collect();
+    incoming.sort();
+    assert_eq!(incoming, vec![("run".to_string(), 1), ("v".to_string(), 1)]);
+    let outgoing: Vec<(String, usize)> = hierarchy::outgoing_calls(&snap, &root.anchor).into_iter().map(|(i, r)| (i.name, r.len())).collect();
+    assert_eq!(outgoing, vec![("leaf".to_string(), 2), ("User".to_string(), 2)]);
+    // From an outgoing item onwards: `leaf` calls `greet` (in another file).
+    let leaf = hierarchy::outgoing_calls(&snap, &root.anchor).remove(0).0;
+    let next: Vec<String> = hierarchy::outgoing_calls(&snap, &leaf.anchor).into_iter().map(|(i, _)| format!("{}:{}", i.path.file_name().unwrap().to_string_lossy(), i.name)).collect();
+    assert_eq!(next, vec!["Model.kt:greet"]);
+
+    // Types: supertypes (into the library) and direct subtypes.
+    let text = "package app\n\ninterface Shape\nopen class Base : Shape, Comparable<Base> {\n    override fun compareTo(other: Base) = 0\n}\nclass Sub : Base()\nclass Leaf : Sub()\n";
+    let (path, offset) = fx.open(&text.replacen("open class Base", "open class Ba$0se", 1));
+    let snap = fx.host.snapshot();
+    let root = hierarchy::prepare_type_hierarchy(&snap, &path, offset).unwrap();
+    assert_eq!(root.name, "Base");
+    let supers: Vec<String> = hierarchy::supertypes(&snap, &root.anchor).into_iter().map(|i| i.name).collect();
+    assert_eq!(supers, vec!["Shape", "Comparable"]);
+    let subs = hierarchy::subtypes(&snap, &root.anchor);
+    assert_eq!(subs.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), vec!["Sub"]);
+    let subs2: Vec<String> = hierarchy::subtypes(&snap, &subs[0].anchor).into_iter().map(|i| i.name).collect();
+    assert_eq!(subs2, vec!["Leaf"]);
+}
+
+#[test]
+fn folding_and_selection() {
+    let text = "package a\n\nimport a.b\nimport a.c\n\n/**\n * Doc.\n */\nclass C {\n    // one\n    // two\n    fun f(x: Int) {\n        val y = listOf(1).map {\n            it + x\n        }\n    }\n    // region helpers\n    fun g() = 1\n    // endregion\n}\n";
+    let root = crate::syntax::parse(text, false).syntax();
+    let line = |o: TextSize| text[..usize::from(o)].matches('\n').count();
+    let folds: Vec<String> = structure::folding_ranges(&root, text).iter().map(|f| format!("{:?} {}-{}", f.kind, line(f.start), line(f.end))).collect();
+    assert_eq!(folds, vec!["Imports 2-3", "Comment 5-7", "Code 8-19", "Comment 9-10", "Code 11-15", "Code 12-14", "Region 16-18"]);
+    // Selection: identifier, expression, …, the braces' content, the block, the function.
+    let at = TextSize::from(text.find("it + x").unwrap() as u32 + 5);
+    let ranges: Vec<&str> = structure::selection_ranges(&root, text, at).iter().map(|r| &text[usize::from(r.start())..usize::from(r.end())]).collect();
+    assert_eq!(ranges[0], "x");
+    assert_eq!(ranges[1], "it + x");
+    assert!(ranges.contains(&"{\n            it + x\n        }"), "{ranges:#?}");
+    assert!(ranges.iter().any(|r| r.starts_with("fun f(x: Int)")), "{ranges:#?}");
+    assert_eq!(*ranges.last().unwrap(), text);
+}

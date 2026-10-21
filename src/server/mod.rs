@@ -97,6 +97,9 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
         implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
+        call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
+        folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
+        selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(true)),
         references_provider: Some(lsp_types::OneOf::Left(true)),
         document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
         inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
@@ -177,7 +180,10 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
         ),
         server_info: Some(ServerInfo { name: "kotlin-lsp-rust".into(), version: Some(env!("CARGO_PKG_VERSION").into()) }),
     };
-    connection.initialize_finish(id, serde_json::to_value(result)?)?;
+    let mut result = serde_json::to_value(result)?;
+    // Not modelled by lsp-types' ServerCapabilities.
+    result["capabilities"]["typeHierarchyProvider"] = serde_json::Value::Bool(true);
+    connection.initialize_finish(id, result)?;
 
     #[allow(deprecated)]
     let mut folders: Vec<PathBuf> = init.workspace_folders.iter().flatten().filter_map(|f| uri_to_path(&f.uri)).collect();
@@ -323,6 +329,61 @@ impl Server {
                     let locs = if implementation { handlers::implementation(cx, &path, tdp.position)? } else { handlers::type_definition(cx, &path, tdp.position)? };
                     Ok(serde_json::to_value(lsp_types::GotoDefinitionResponse::Array(locs)).unwrap())
                 });
+            }
+            FoldingRangeRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::FoldingRangeParams>(FoldingRangeRequest::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                let line_only = self
+                    .caps
+                    .text_document
+                    .as_ref()
+                    .and_then(|t| t.folding_range.as_ref())
+                    .and_then(|f| f.line_folding_only)
+                    .unwrap_or(false);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::folding_ranges(cx, &path, line_only)?).unwrap())
+                });
+            }
+            SelectionRangeRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::SelectionRangeParams>(SelectionRangeRequest::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::selection_ranges(cx, &path, &params.positions)?).unwrap())
+                });
+            }
+            CallHierarchyPrepare::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::CallHierarchyPrepareParams>(CallHierarchyPrepare::METHOD) else { return };
+                let tdp = params.text_document_position_params;
+                let path = self.path_of(&tdp.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::prepare_call_hierarchy(cx, &path, tdp.position)?).unwrap())
+                });
+            }
+            CallHierarchyIncomingCalls::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::CallHierarchyIncomingCallsParams>(CallHierarchyIncomingCalls::METHOD) else { return };
+                self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::incoming_calls(cx, &params.item)?).unwrap()));
+            }
+            CallHierarchyOutgoingCalls::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::CallHierarchyOutgoingCallsParams>(CallHierarchyOutgoingCalls::METHOD) else { return };
+                self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::outgoing_calls(cx, &params.item)?).unwrap()));
+            }
+            TypeHierarchyPrepare::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::TypeHierarchyPrepareParams>(TypeHierarchyPrepare::METHOD) else { return };
+                let tdp = params.text_document_position_params;
+                let path = self.path_of(&tdp.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::prepare_type_hierarchy(cx, &path, tdp.position)?).unwrap())
+                });
+            }
+            TypeHierarchySupertypes::METHOD | TypeHierarchySubtypes::METHOD => {
+                let method = req.method.clone();
+                let sub = method == TypeHierarchySubtypes::METHOD;
+                let Ok((id, params)) = req.extract::<lsp_types::TypeHierarchySupertypesParams>(&method) else { return };
+                self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::type_hierarchy(cx, &params.item, sub)?).unwrap()));
             }
             References::METHOD => {
                 let Ok((id, params)) = req.extract::<lsp_types::ReferenceParams>(References::METHOD) else { return };

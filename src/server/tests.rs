@@ -401,5 +401,15 @@ fn editing_assists_session() {
 
     let r = c.request("textDocument/implementation", json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 5 } }));
     assert_eq!(r[0]["range"]["start"], json!({ "line": 2, "character": 4 }));
+
+    let items = c.request("textDocument/prepareCallHierarchy", json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 5 } }));
+    assert_eq!(items[0]["name"], "add");
+    let calls = c.request("callHierarchy/incomingCalls", json!({ "item": items[0] }));
+    assert_eq!(calls[0]["from"]["name"], "g");
+    assert_eq!(calls[0]["fromRanges"].as_array().unwrap().len(), 2, "{calls}");
+    let types = c.request("textDocument/prepareTypeHierarchy", json!({ "textDocument": { "uri": path_to_uri(&project.join("src/main/kotlin/demo/Model.kt")).as_str() }, "position": { "line": 2, "character": 12 } }));
+    assert_eq!(types[0]["name"], "User");
+    let supers = c.request("typeHierarchy/supertypes", json!({ "item": types[0] }));
+    assert_eq!(supers[0]["name"], "Any", "{supers}");
     c.shutdown();
 }

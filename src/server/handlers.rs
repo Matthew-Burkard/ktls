@@ -216,6 +216,23 @@ pub fn code_actions(cx: &Ctx, path: &Path, range: lsp_types::Range, context: &ls
             let fix = Fix::replace(format!("Import '{}'", f.fq), f.edit.0, f.edit.1);
             out.push(action(&fix.title, CodeActionKind::QUICKFIX, diag.cloned(), &fix, single));
         }
+        for f in crate::analysis::ide::create::create_fixes(cx.snap, path, wanted) {
+            // `WorkspaceEdit::changes` is keyed by `Uri`.
+            #[allow(clippy::mutable_key_type)]
+            let mut changes: std::collections::HashMap<lsp_types::Uri, Vec<TextEdit>> = std::collections::HashMap::new();
+            for (p, r, t) in &f.edits {
+                let Some(target) = cx.snap.file(p) else { continue };
+                let li = LineIndex::new(&target.text);
+                changes.entry(path_to_uri(p)).or_default().push(TextEdit { range: li.range(&target.text, *r, cx.enc), new_text: t.clone() });
+            }
+            out.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: f.title,
+                kind: Some(CodeActionKind::QUICKFIX),
+                edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+                ..Default::default()
+            }));
+        }
+        cx.check()?;
         let root = file.parse().syntax();
         for l in found.iter().filter(|l| l.range.intersect(wanted).is_some() && l.level != Level::Action) {
             let diag = to_proto::diagnostic(text, &index, &l.diagnostic(), cx.enc);
@@ -297,6 +314,118 @@ pub fn type_definition(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Resul
     let targets = crate::analysis::ide::hierarchy::type_definition(cx.snap, path, offset);
     cx.check()?;
     Ok(locations(cx, targets))
+}
+
+fn anchor_data(a: &crate::analysis::ide::hierarchy::Anchor) -> serde_json::Value {
+    use crate::analysis::ide::hierarchy::Anchor;
+    match a {
+        Anchor::Token(p, o) => serde_json::json!({ "path": p, "offset": u32::from(*o) }),
+        Anchor::Type(p, fq) => serde_json::json!({ "path": p, "fq": fq }),
+    }
+}
+
+fn anchor_of(data: Option<&serde_json::Value>) -> Option<crate::analysis::ide::hierarchy::Anchor> {
+    use crate::analysis::ide::hierarchy::Anchor;
+    let d = data?;
+    let path = std::path::PathBuf::from(d.get("path")?.as_str()?);
+    match (d.get("offset").and_then(|o| o.as_u64()), d.get("fq").and_then(|f| f.as_str())) {
+        (Some(o), _) => Some(Anchor::Token(path, crate::syntax::TextSize::from(o as u32))),
+        (_, Some(fq)) => Some(Anchor::Type(path, fq.to_string())),
+        _ => None,
+    }
+}
+
+/// A hierarchy item's file text (library stubs and sources live outside the snapshot).
+fn item_text(cx: &Ctx, path: &Path) -> Option<std::sync::Arc<str>> {
+    match cx.snap.file(path) {
+        Some(f) => Some(f.text.clone()),
+        None => std::fs::read_to_string(path).ok().map(Into::into),
+    }
+}
+
+fn call_item(cx: &Ctx, i: &crate::analysis::ide::hierarchy::HierItem) -> Option<lsp_types::CallHierarchyItem> {
+    let text = item_text(cx, &i.path)?;
+    let index = LineIndex::new(&text);
+    Some(lsp_types::CallHierarchyItem {
+        name: i.name.clone(),
+        kind: to_proto::symbol_kind(i.kind, Default::default(), i.detail.is_some()),
+        tags: i.deprecated.then(|| vec![lsp_types::SymbolTag::DEPRECATED]),
+        detail: i.detail.clone(),
+        uri: path_to_uri(&i.path),
+        range: index.range(&text, i.range, cx.enc),
+        selection_range: index.range(&text, i.selection, cx.enc),
+        data: Some(anchor_data(&i.anchor)),
+    })
+}
+
+pub fn prepare_call_hierarchy(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Option<Vec<lsp_types::CallHierarchyItem>>> {
+    let Some((_, offset)) = offset_of(cx, path, pos) else { return Ok(None) };
+    let item = crate::analysis::ide::hierarchy::prepare_call_hierarchy(cx.snap, path, offset);
+    cx.check()?;
+    Ok(item.and_then(|i| call_item(cx, &i)).map(|i| vec![i]))
+}
+
+/// Ranges of calls in `path`.
+fn ranges_in(cx: &Ctx, path: &Path, ranges: &[crate::syntax::TextRange]) -> Vec<lsp_types::Range> {
+    let Some(text) = item_text(cx, path) else { return Vec::new() };
+    let index = LineIndex::new(&text);
+    ranges.iter().map(|r| index.range(&text, *r, cx.enc)).collect()
+}
+
+pub fn incoming_calls(cx: &Ctx, item: &lsp_types::CallHierarchyItem) -> Result<Vec<lsp_types::CallHierarchyIncomingCall>> {
+    let Some(anchor) = anchor_of(item.data.as_ref()) else { return Ok(Vec::new()) };
+    let cancelled = || cx.cancelled.load(Ordering::Relaxed);
+    let calls = crate::analysis::ide::hierarchy::incoming_calls(cx.snap, &anchor, &cancelled);
+    cx.check()?;
+    Ok(calls
+        .into_iter()
+        .filter_map(|(from, ranges)| Some(lsp_types::CallHierarchyIncomingCall { from_ranges: ranges_in(cx, &from.path, &ranges), from: call_item(cx, &from)? }))
+        .collect())
+}
+
+pub fn outgoing_calls(cx: &Ctx, item: &lsp_types::CallHierarchyItem) -> Result<Vec<lsp_types::CallHierarchyOutgoingCall>> {
+    use crate::analysis::ide::hierarchy::Anchor;
+    let Some(anchor) = anchor_of(item.data.as_ref()) else { return Ok(Vec::new()) };
+    let calls = crate::analysis::ide::hierarchy::outgoing_calls(cx.snap, &anchor);
+    cx.check()?;
+    // `fromRanges` are in the caller's file, where the call sites (anchors) are.
+    Ok(calls
+        .into_iter()
+        .filter_map(|(to, ranges)| {
+            let Anchor::Token(site, _) = &to.anchor else { return None };
+            Some(lsp_types::CallHierarchyOutgoingCall { from_ranges: ranges_in(cx, site, &ranges), to: call_item(cx, &to)? })
+        })
+        .collect())
+}
+
+fn type_item(cx: &Ctx, i: &crate::analysis::ide::hierarchy::HierItem) -> Option<lsp_types::TypeHierarchyItem> {
+    let c = call_item(cx, i)?;
+    Some(lsp_types::TypeHierarchyItem {
+        name: c.name,
+        kind: c.kind,
+        tags: i.deprecated.then_some(lsp_types::SymbolTag::DEPRECATED),
+        detail: c.detail,
+        uri: c.uri,
+        range: c.range,
+        selection_range: c.selection_range,
+        data: c.data,
+    })
+}
+
+pub fn prepare_type_hierarchy(cx: &Ctx, path: &Path, pos: lsp_types::Position) -> Result<Option<Vec<lsp_types::TypeHierarchyItem>>> {
+    let Some((_, offset)) = offset_of(cx, path, pos) else { return Ok(None) };
+    let item = crate::analysis::ide::hierarchy::prepare_type_hierarchy(cx.snap, path, offset);
+    cx.check()?;
+    Ok(item.and_then(|i| type_item(cx, &i)).map(|i| vec![i]))
+}
+
+/// Direct supertypes (`sub == false`) or direct project subtypes of a type hierarchy item.
+pub fn type_hierarchy(cx: &Ctx, item: &lsp_types::TypeHierarchyItem, sub: bool) -> Result<Vec<lsp_types::TypeHierarchyItem>> {
+    use crate::analysis::ide::hierarchy;
+    let Some(anchor) = anchor_of(item.data.as_ref()) else { return Ok(Vec::new()) };
+    let items = if sub { hierarchy::subtypes(cx.snap, &anchor) } else { hierarchy::supertypes(cx.snap, &anchor) };
+    cx.check()?;
+    Ok(items.iter().filter_map(|i| type_item(cx, i)).collect())
 }
 
 /// LSP locations of targets, which may be extracted library sources outside the snapshot.
@@ -525,6 +654,59 @@ pub fn semantic_tokens(cx: &Ctx, path: &Path, range: Option<lsp_types::Range>) -
             start += piece.len();
         }
     }
+    Ok(out)
+}
+
+pub fn folding_ranges(cx: &Ctx, path: &Path, line_only: bool) -> Result<Vec<lsp_types::FoldingRange>> {
+    use crate::analysis::ide::structure::{self, FoldKind};
+    use lsp_types::FoldingRangeKind;
+    let Some(file) = cx.snap.file(path) else { return Ok(Vec::new()) };
+    let text = &file.text;
+    let index = LineIndex::new(text);
+    let folds = structure::folding_ranges(&file.parse().syntax(), text);
+    cx.check()?;
+    let mut out: Vec<lsp_types::FoldingRange> = Vec::new();
+    for f in folds {
+        let start = index.position(text, f.start, cx.enc);
+        let end = index.position(text, f.end, cx.enc);
+        let end_line = if f.keep_end_line { end.line.saturating_sub(1) } else { end.line };
+        if end_line <= start.line || out.iter().any(|o| o.start_line == start.line) {
+            continue;
+        }
+        out.push(lsp_types::FoldingRange {
+            start_line: start.line,
+            start_character: (!line_only).then_some(start.character),
+            end_line,
+            end_character: None,
+            kind: match f.kind {
+                FoldKind::Imports => Some(FoldingRangeKind::Imports),
+                FoldKind::Comment => Some(FoldingRangeKind::Comment),
+                FoldKind::Region => Some(FoldingRangeKind::Region),
+                FoldKind::Code => None,
+            },
+            collapsed_text: None,
+        });
+    }
+    Ok(out)
+}
+
+pub fn selection_ranges(cx: &Ctx, path: &Path, positions: &[lsp_types::Position]) -> Result<Vec<lsp_types::SelectionRange>> {
+    let Some(file) = cx.snap.file(path) else { return Ok(Vec::new()) };
+    let text = &file.text;
+    let index = LineIndex::new(text);
+    let root = file.parse().syntax();
+    let mut out = Vec::new();
+    for pos in positions {
+        let offset = index.offset(text, *pos, cx.enc);
+        let ranges = crate::analysis::ide::structure::selection_ranges(&root, text, offset);
+        // Outermost first, each wrapping the next.
+        let mut sel: Option<lsp_types::SelectionRange> = None;
+        for r in ranges.iter().rev() {
+            sel = Some(lsp_types::SelectionRange { range: index.range(text, *r, cx.enc), parent: sel.map(Box::new) });
+        }
+        out.push(sel.unwrap_or(lsp_types::SelectionRange { range: lsp_types::Range { start: *pos, end: *pos }, parent: None }));
+    }
+    cx.check()?;
     Ok(out)
 }
 

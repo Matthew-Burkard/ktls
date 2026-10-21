@@ -32,6 +32,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 not_null_assertion(e, &n, out);
             }
             SyntaxKind::SAFE_QUALIFIED_EXPR => safe_call(e, &n, out),
+            SyntaxKind::DOT_QUALIFIED_EXPR => unsafe_call(cx, e, &n, out),
             SyntaxKind::CALL_EXPR => call_arguments(e, &n, out),
             SyntaxKind::PROPERTY | SyntaxKind::VALUE_PARAMETER => literal_initializer(e, &n, out),
             SyntaxKind::RETURN_EXPR => literal_return(e, &n, out),
@@ -416,6 +417,88 @@ fn declared_non_null(e: &Engine, expr: &SyntaxNode) -> Option<String> {
         }
         TypeRef::Function { nullable: false, .. } => Some(shown),
         _ => None,
+    }
+}
+
+/// `x.member` where `x` is a local or parameter declared with a nullable type. Smart casts
+/// are not modelled, so this only reports when no use of the name in the declaring scope
+/// could narrow it (null comparisons, `!!`, `?:`, `is`, assignments, arguments, `when`
+/// subjects, extension calls with contracts such as `isNullOrEmpty`).
+fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&UNSAFE_CALL) {
+        return;
+    }
+    let (Some(recv), Some(sel)) = (n.first_child(), n.last_child()) else { return };
+    if recv.kind() != SyntaxKind::NAME_REF || recv == sel {
+        return;
+    }
+    let member_ref = match sel.kind() {
+        SyntaxKind::NAME_REF => sel.clone(),
+        SyntaxKind::CALL_EXPR => match sel.first_child() {
+            Some(c) if c.kind() == SyntaxKind::NAME_REF => c,
+            _ => return,
+        },
+        _ => return,
+    };
+    let Some(name_tok) = recv.first_token() else { return };
+    let name = ast::ident_text(&name_tok);
+    let recv_defs = e.resolve_name_ref(&recv);
+    let [Def::Local(local)] = recv_defs.as_slice() else { return };
+    if !matches!(local.kind, LocalKind::Parameter | LocalKind::Val | LocalKind::Var) {
+        return;
+    }
+    // Declared with an explicit nullable type.
+    let Some(decl) = crate::syntax::covering(&cx.root, local.name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::VALUE_PARAMETER | SyntaxKind::PROPERTY)) else { return };
+    let Some(ty) = ast::child::<ast::TypeRef>(&decl) else { return };
+    let ty_text = ty.syntax().text().to_string();
+    if !ty_text.trim_end().ends_with('?') || decl.kind() == SyntaxKind::PROPERTY && !is_local(&decl) {
+        return;
+    }
+    // A member (not an extension, which may accept a nullable receiver).
+    let member_defs = e.resolve_name_ref(&member_ref);
+    let [Def::Symbol { sym, .. }] = member_defs.as_slice() else { return };
+    if sym.receiver.is_some() || !matches!(sym.kind, SymbolKind::Function | SymbolKind::Property | SymbolKind::Field) || matches!(sym.name.as_str(), "toString" | "hashCode" | "equals") {
+        return;
+    }
+    // The scope the name is visible in.
+    let scope = match decl.kind() {
+        SyntaxKind::PROPERTY => decl.parent(),
+        _ => decl.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::LAMBDA_EXPR | SyntaxKind::CLASS | SyntaxKind::FOR_EXPR | SyntaxKind::CATCH_CLAUSE)),
+    };
+    let Some(scope) = scope else { return };
+    let narrowed = scope.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d.first_token().is_some_and(|t| ast::ident_text(&t) == name)).any(|r| may_narrow(e, &r));
+    if narrowed {
+        return;
+    }
+    let Some(dot) = n.children_with_tokens().filter_map(|t| t.into_token()).find(|t| t.kind() == SyntaxKind::DOT) else { return };
+    out.report(
+        &UNSAFE_CALL,
+        dot.text_range(),
+        format!("Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{}'.", ty_text.trim()),
+        Some(Fix::replace("Replace with safe (?.) call", dot.text_range(), "?.")),
+    );
+}
+
+/// A use of a name that could smart-cast it to non-null afterwards.
+fn may_narrow(e: &Engine, r: &SyntaxNode) -> bool {
+    let Some(p) = r.parent() else { return false };
+    match p.kind() {
+        SyntaxKind::BINARY_EXPR => binary_op(&p).is_some_and(|op| {
+            matches!(op.kind(), SyntaxKind::EQ2 | SyntaxKind::NOT_EQ | SyntaxKind::EQ3 | SyntaxKind::NOT_EQ2 | SyntaxKind::ELVIS)
+                || op.kind() == SyntaxKind::EQ && p.first_child().as_ref() == Some(r)
+                || op.kind() == SyntaxKind::IDENT // infix calls
+        }),
+        SyntaxKind::IS_EXPR | SyntaxKind::POSTFIX_EXPR | SyntaxKind::VALUE_ARGUMENT | SyntaxKind::WHEN_SUBJECT | SyntaxKind::BINARY_WITH_TYPE | SyntaxKind::PAREN_EXPR => true,
+        // `x?.size == 1 && x.values…` narrows through the comparison.
+        SyntaxKind::WHEN_CONDITION | SyntaxKind::SAFE_QUALIFIED_EXPR => true,
+        // `x.isNullOrEmpty()`, `x.let { … }`: extensions, possibly with contracts.
+        SyntaxKind::DOT_QUALIFIED_EXPR if p.first_child().as_ref() == Some(r) => {
+            let Some(sel) = p.last_child() else { return true };
+            let m = if sel.kind() == SyntaxKind::CALL_EXPR { sel.first_child() } else { Some(sel) };
+            let Some(m) = m.filter(|m| m.kind() == SyntaxKind::NAME_REF) else { return true };
+            !matches!(e.resolve_name_ref(&m).as_slice(), [Def::Symbol { sym, .. }] if sym.receiver.is_none())
+        }
+        _ => false,
     }
 }
 

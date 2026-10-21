@@ -878,3 +878,25 @@ operator fun String.getValue(thisRef: Any?, property: Any?): String = this
     assert_eq!(fixed(text, "UNUSED_PARAMETER"), "package a\n\nprivate fun last(a: Int) = a\nfun g() = last(1)\n");
     assert_eq!(fixed("fun f() = listOf(1).map { x -> 2 }\n", "UNUSED_ANONYMOUS_PARAMETER"), "fun f() = listOf(1).map { _ -> 2 }\n");
 }
+
+#[test]
+fn unsafe_calls() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let text = r#"package a
+
+fun f(s: String?, t: String?, u: String?, v: String?, w: List<String>?) {
+    s.length
+    if (t != null) t.length
+    u?.length == 1 && u.isEmpty()
+    if (!v.isNullOrEmpty()) v.length
+    w.orEmpty()
+    val x: String? = null
+    x.length
+}
+"#;
+    let found: Vec<String> = compiler(text).into_iter().filter(|f| f.starts_with("UNSAFE_CALL")).collect();
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(fixed(text, "UNSAFE_CALL").contains("    s?.length\n"));
+}

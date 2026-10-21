@@ -4,9 +4,10 @@ A Kotlin language server written in Rust. This is the core infrastructure: proto
 handling, an error-tolerant parser, Gradle/Maven import with native dependency
 resolution, binary classpath indexing (jars, the JDK image, Kotlin metadata), a
 module-aware declaration index, import/type resolution with diagnostics, navigation
-(definition, type definition, implementation, hover, references, highlights, rename),
-completion, signature help, inlay hints, semantic tokens, import fixes, organize imports
-and lint rules with quick fixes.
+(definition, type definition, implementation, hover, references, highlights, rename,
+call/type hierarchy), completion, signature help, inlay hints, semantic tokens, folding and
+selection ranges, import and create-from-usage fixes, organize imports and lint rules with
+quick fixes.
 
 See [FEATURES.md](FEATURES.md) for the full feature catalog and what is implemented.
 
@@ -80,6 +81,7 @@ supertypes, generated code).
 |---|---|---|
 | `UNRESOLVED_REFERENCE` | error | Name that does not resolve to any declaration |
 | `VAL_REASSIGNMENT` | error | Assignment to a 'val' or parameter |
+| `UNSAFE_CALL` | error | `.` member access on a nullable local/parameter that is never null-checked |
 | `NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY` | error | Function with a return type whose block body has no 'return' |
 | `ABSTRACT_MEMBER_NOT_IMPLEMENTED` | error | Concrete class missing an implementation of an interface member |
 | `ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED` | error | Concrete class missing an implementation of an abstract class member |
@@ -219,7 +221,8 @@ src/
   analysis/    file summaries (Kotlin + Java), source index, name resolution, diagnostics,
                snapshot-based database (AnalysisHost → Snapshot)
     ide/       expression typing, completion, definition, hover, references, rename, signature
-               help, inlay hints, semantic tokens, imports, implementations
+               help, inlay hints, semantic tokens, imports, create from usage, hierarchies,
+               folding/selection ranges
     lints/     lint rules with quick fixes and suppression
   server/      LSP main loop, document sync, scheduling/debouncing, cancellation, progress
 ```

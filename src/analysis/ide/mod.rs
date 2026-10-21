@@ -2,6 +2,7 @@
 //! and signature help.
 
 pub mod completion;
+pub mod create;
 pub mod hierarchy;
 pub mod imports;
 pub mod infer;
@@ -10,6 +11,7 @@ pub mod library;
 pub mod rename;
 pub mod semantic;
 pub mod signature;
+pub mod structure;
 
 use std::path::{Path, PathBuf};
 
@@ -67,7 +69,7 @@ const OPERATOR_TOKENS: &[SyntaxKind] = &[
 
 /// The identifier (or `this`, or an operator) at `offset`, preferring identifiers and
 /// the token to the right.
-fn token_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
+pub(super) fn token_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
     let tokens = root.token_at_offset(offset);
     let ident = |t: &SyntaxToken| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::THIS_KW | SyntaxKind::SUPER_KW);
     let op = |t: &SyntaxToken| OPERATOR_TOKENS.contains(&t.kind());
@@ -104,7 +106,7 @@ pub(super) fn defs_at(e: &Engine, offset: TextSize) -> Option<(TextRange, Vec<De
     defs_of_token(e, &tok)
 }
 
-fn defs_of_token(e: &Engine, tok: &SyntaxToken) -> Option<(TextRange, Vec<Def>)> {
+pub(super) fn defs_of_token(e: &Engine, tok: &SyntaxToken) -> Option<(TextRange, Vec<Def>)> {
     let tok = tok.clone();
     let range = tok.text_range();
     let parent = tok.parent()?;

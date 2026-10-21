@@ -79,8 +79,8 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P0] `textDocument/documentSymbol` — hierarchical outline (classes, objects, functions, properties, typealiases, enum entries)
 - [~] [P0] `workspace/symbol` — fuzzy/camel-hump search across project + libraries — *partial: project sources only*
 - [ ] [P2] `workspaceSymbol/resolve`
-- [ ] [P1] Call hierarchy: `prepareCallHierarchy`, `incomingCalls`, `outgoingCalls`
-- [ ] [P1] Type hierarchy: `prepareTypeHierarchy`, `supertypes`, `subtypes`
+- [x] [P1] Call hierarchy: `prepareCallHierarchy`, `incomingCalls`, `outgoingCalls` (functions and constructors; callers are functions, constructors, properties or classes)
+- [x] [P1] Type hierarchy: `prepareTypeHierarchy`, `supertypes`, `subtypes` (subtypes among project sources)
 - [ ] [P1] `textDocument/documentLink` — URLs in comments, `@see`, file paths in strings
 - [ ] [P2] Go to test / go to tested subject (custom command)
 - [ ] [P2] Go to super method (custom command or via `declaration`)
@@ -120,8 +120,8 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 
 ### 3.5 Other display
 - [ ] [P1] `textDocument/codeLens` — run/debug `main` & tests, references count, implementations count, overrides
-- [ ] [P1] `textDocument/foldingRange` — imports, blocks, KDoc, multiline comments, `when` branches, region comments
-- [ ] [P1] `textDocument/selectionRange` — expand/shrink selection syntactically
+- [x] [P1] `textDocument/foldingRange` — imports, blocks, KDoc, multiline comments, `when` branches, region comments
+- [x] [P1] `textDocument/selectionRange` — expand/shrink selection syntactically
 - [ ] [P2] `textDocument/inlineValue` (debugger)
 - [ ] [P2] `textDocument/documentColor` / `colorPresentation` (Compose `Color(...)`, Android colors)
 - [ ] [P2] `textDocument/linkedEditingRange` (e.g. label `foo@` ↔ `@foo`)
@@ -165,7 +165,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P0] `UNRESOLVED_REFERENCE`, `UNRESOLVED_IMPORT` — *partial: imports, types, and expression names that exist nowhere (typos, deleted declarations)*
 - [~] [P0] `TYPE_MISMATCH`, `ARGUMENT_TYPE_MISMATCH`, `RETURN_TYPE_MISMATCH`, `INITIALIZER_TYPE_MISMATCH` — *partial: literals as initializers, default values and return values*
 - [~] [P0] `NONE_APPLICABLE`, `OVERLOAD_RESOLUTION_AMBIGUITY`, `TOO_MANY_ARGUMENTS`, `NO_VALUE_FOR_PARAMETER`, `NAMED_PARAMETER_NOT_FOUND` — *partial: argument counts and names (not types), all overloads considered; no ambiguity*
-- [~] [P0] Null safety: `UNSAFE_CALL`, `UNSAFE_OPERATOR_CALL`, `UNSAFE_IMPLICIT_INVOKE_CALL`, `NULL_FOR_NONNULL_TYPE` — *partial: `NULL_FOR_NONNULL_TYPE` for literal `null`; no unsafe-call analysis (needs smart casts)*
+- [~] [P0] Null safety: `UNSAFE_CALL`, `UNSAFE_OPERATOR_CALL`, `UNSAFE_IMPLICIT_INVOKE_CALL`, `NULL_FOR_NONNULL_TYPE` — *partial: `NULL_FOR_NONNULL_TYPE` for literal `null`; `UNSAFE_CALL` for members of locals/parameters declared nullable that are never null-checked (no smart-cast analysis)*
 - [~] [P0] `VAL_REASSIGNMENT`, `UNINITIALIZED_VARIABLE`, `MUST_BE_INITIALIZED`, `MUST_BE_INITIALIZED_OR_BE_ABSTRACT` — *partial: all but `UNINITIALIZED_VARIABLE`*
 - [~] [P0] `NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY`, `RETURN_NOT_ALLOWED` — *partial: `NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY` (no `return`/`throw` anywhere)*
 - [~] [P0] `ABSTRACT_MEMBER_NOT_IMPLEMENTED`, `ABSTRACT_CLASS_MEMBER_NOT_IMPLEMENTED`, `MANY_IMPL_MEMBER_NOT_IMPLEMENTED` — *partial: the first two, with an "Implement members" fix*
@@ -320,7 +320,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 
 ### 6.1 Quick fixes (bound to diagnostics)
 - [~] [P0] **Import** unresolved symbol (with chooser when ambiguous; class, function, extension, operator, delegate accessor) — *partial: classes, top-level functions/properties and extensions applicable to the receiver, from the project and libraries; not operators or delegate accessors*
-- [ ] [P0] **Add `?.`** / **add `!!`** / **surround with null check** / **add elvis** for unsafe calls
+- [~] [P0] **Add `?.`** / **add `!!`** / **surround with null check** / **add elvis** for unsafe calls — *partial: replace with `?.`*
 - [ ] [P0] **Change type** of variable/parameter/return to match
 - [ ] [P0] **Add explicit cast** (`as T`) / **change to safe cast** (`as?`)
 - [~] [P0] **Implement members** / **make class abstract** — *partial: implement members*
@@ -330,7 +330,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P0] **Change `val` to `var`**
 - [ ] [P0] **Initialize property** / **make `lateinit`** / **make `abstract`** / **move to constructor**
 - [ ] [P0] **Add `suspend` modifier** to containing function / wrap in `runBlocking`/`launch`
-- [ ] [P0] **Create from usage**: function, extension function, property, local variable, parameter, class, interface, enum, object, enum entry, constructor, type parameter, annotation, `component`/operator functions
+- [~] [P0] **Create from usage**: function, extension function, property, local variable, parameter, class, interface, enum, object, enum entry, constructor, type parameter, annotation, `component`/operator functions — *partial: function (top-level or member, incl. in other files), extension function/property, property, local variable, parameter, class; types from arguments and the expected type*
 - [ ] [P0] **Add missing return** / **add `return` with expression**
 - [ ] [P1] **Add/remove argument**, **add named argument**, **change function signature** to match call, **add parameter to function**
 - [ ] [P1] **Add type arguments**, **specify type explicitly**
