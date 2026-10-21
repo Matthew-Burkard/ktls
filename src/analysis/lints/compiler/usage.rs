@@ -23,7 +23,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         match n.kind() {
             SyntaxKind::CALL_EXPR => instantiation(e, &n, out),
             SyntaxKind::NAME_REF => visibility(e, &n, out),
-            SyntaxKind::OPERATION_REFERENCE => infix(e, &n, out),
+            SyntaxKind::OPERATION_REFERENCE => {
+                infix(e, &n, out);
+                operator(e, &n, out);
+            }
             _ => {}
         }
     }
@@ -97,11 +100,20 @@ fn visibility(e: &Engine, nr: &SyntaxNode, out: &mut Sink) {
         }
     }
     let Some(reason) = why else { return };
-    // Only `receiver.name`: a bare name may come from an outer scope once invisible
-    // members are skipped. And only when no member or extension of that name is visible.
+    // `receiver.name`, or a bare name of private top-level declarations of other files (a
+    // bare member name may come from an outer scope once invisible members are skipped).
+    // And only when no member or extension of that name is visible.
     let name = ast::ident_text(&tok);
     let expr = nr.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR && p.first_child().as_ref() == Some(nr)).unwrap_or_else(|| nr.clone());
-    let Some(q) = expr.parent().filter(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(&expr)) else { return };
+    let qualified = expr.parent().filter(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(&expr));
+    let Some(q) = qualified else {
+        let top_level = syms.iter().all(|s| s.fq_name.rsplit_once('.').is_none_or(|(c, _)| e.classifier(c).is_none()) && s.visibility == Visibility::Private);
+        let in_scope = e.top_level_named(&name).iter().any(|s| hidden(e, s, nr).is_none());
+        if top_level && !in_scope && nr.parent().is_none_or(|p| p.kind() != SyntaxKind::CALLABLE_REFERENCE) {
+            out.report(&INVISIBLE_REFERENCE, tok.text_range(), format!("Cannot access '{name}': it is {reason}."), None);
+        }
+        return;
+    };
     let Some(t) = q.first_child().and_then(|r| e.type_of(&r)) else { return };
     if !e.extensions(&t, &name).is_empty() || e.members_named(&t, &name).iter().any(|(m, _)| hidden(e, m, nr).is_none()) {
         return;
@@ -180,6 +192,43 @@ fn infix(e: &Engine, op: &SyntaxNode, out: &mut Sink) {
         return;
     }
     out.report(&INFIX_MODIFIER_REQUIRED, tok.text_range(), format!("'infix' modifier is required on '{name}'."), None);
+}
+
+/// `a + b` (also `-`, `*`, `/`, `%`, `..`, `..<` and compound assignments) where no
+/// candidate function of the convention's name is declared `operator`.
+fn operator(e: &Engine, op: &SyntaxNode, out: &mut Sink) {
+    let Some(tok) = op.first_token() else { return };
+    let names: &[&str] = match tok.kind() {
+        SyntaxKind::PLUS => &["plus"],
+        SyntaxKind::MINUS => &["minus"],
+        SyntaxKind::STAR => &["times"],
+        SyntaxKind::SLASH => &["div"],
+        SyntaxKind::PERCENT => &["rem"],
+        SyntaxKind::RANGE => &["rangeTo"],
+        SyntaxKind::RANGE_UNTIL => &["rangeUntil"],
+        _ => return,
+    };
+    let Some(bin) = op.parent().filter(|p| p.kind() == SyntaxKind::BINARY_EXPR) else { return };
+    let Some(left) = bin.first_child().and_then(|l| e.type_of(&l)) else { return };
+    let defs = e.operator_defs(&tok).unwrap_or_default();
+    let funs: Vec<&Symbol> = defs.iter().filter_map(|d| if let Def::Symbol { sym, .. } = d { Some(sym) } else { None }).collect();
+    if funs.is_empty() || funs.len() != defs.len() || funs.iter().any(|f| f.modifiers.has(Modifiers::OPERATOR)) {
+        return;
+    }
+    // Only Kotlin declarations need the modifier (Java methods qualify by signature).
+    let kotlin = |s: &Symbol| match &s.origin {
+        Origin::Source { file, .. } => file.extension().is_some_and(|x| x == "kt" || x == "kts"),
+        _ => s.fq_name.rsplit_once('.').and_then(|(c, _)| e.classifier(c)).is_some_and(|c| matches!(c, crate::analysis::resolve::Classifier::Library(lc) if lc.is_kotlin)),
+    };
+    if !funs.iter().all(|f| kotlin(f)) {
+        return;
+    }
+    // Any `operator` candidate (member or extension) is used instead.
+    if names.iter().any(|n| e.members_named(&left, n).iter().chain(e.extensions(&left, n).iter()).any(|(m, _)| m.modifiers.has(Modifiers::OPERATOR))) {
+        return;
+    }
+    let name = names[0];
+    out.report(&OPERATOR_MODIFIER_REQUIRED, tok.text_range(), format!("'operator' modifier is required on '{name}' in '{}'.", left.display()), None);
 }
 
 /// `f() = 1`, `"a" = b`: the left side of `=` is not a variable.

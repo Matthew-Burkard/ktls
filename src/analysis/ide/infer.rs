@@ -576,6 +576,10 @@ impl<'s> Engine<'s> {
         if sym.kind == SymbolKind::Enum && !out.iter().any(|t| fq_of(t) == Some("kotlin.Enum")) {
             out.insert(0, TypeRef::with_args("kotlin.Enum", vec![TypeArg::Type { variance: crate::symbols::Variance::Invariant, ty: class_type(sym) }]));
         }
+        // Annotation classes implement `Annotation`.
+        if sym.kind == SymbolKind::Annotation && !out.iter().any(|t| fq_of(t) == Some("kotlin.Annotation")) {
+            out.insert(0, TypeRef::named("kotlin.Annotation"));
+        }
         if out.is_empty() && sym.fq_name != "kotlin.Any" {
             out.push(TypeRef::named("kotlin.Any"));
         }

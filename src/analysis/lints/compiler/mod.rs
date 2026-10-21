@@ -11,6 +11,7 @@ mod expressions;
 mod flow;
 mod jumps;
 mod types;
+mod typing;
 mod usage;
 mod when;
 
@@ -24,4 +25,5 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     usage::check(cx, out);
     jumps::check(cx, out);
     types::check(cx, out);
+    typing::check(cx, out);
 }

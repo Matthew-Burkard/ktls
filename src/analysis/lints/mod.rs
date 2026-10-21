@@ -138,6 +138,10 @@ rules! {
     RETURN_TYPE_MISMATCH = "RETURN_TYPE_MISMATCH", Compiler, Error, false, [], "Value of the wrong type returned";
     CREATING_AN_INSTANCE_OF_ABSTRACT_CLASS = "CREATING_AN_INSTANCE_OF_ABSTRACT_CLASS", Compiler, Error, false, [], "Constructor call of an abstract or sealed class, an interface or an enum";
     INVISIBLE_REFERENCE = "INVISIBLE_REFERENCE", Compiler, Error, false, [], "Use of a private, protected or internal declaration where it is not visible";
+    OPERATOR_MODIFIER_REQUIRED = "OPERATOR_MODIFIER_REQUIRED", Compiler, Error, false, [], "Operator use of a function that is not 'operator'";
+    UPPER_BOUND_VIOLATED = "UPPER_BOUND_VIOLATED", Compiler, Error, false, [], "Type argument outside its parameter's upper bound";
+    ASSIGNMENT_TYPE_MISMATCH = "ASSIGNMENT_TYPE_MISMATCH", Compiler, Error, false, [], "Assigned value of the wrong type (literal, typed local/parameter, constructor call)";
+    CONDITION_TYPE_MISMATCH = "CONDITION_TYPE_MISMATCH", Compiler, Error, false, [], "Condition that is not a Boolean";
     INFIX_MODIFIER_REQUIRED = "INFIX_MODIFIER_REQUIRED", Compiler, Error, false, [], "Infix call of a function that is not 'infix'";
     VARIABLE_EXPECTED = "VARIABLE_EXPECTED", Compiler, Error, false, [], "Assignment to something that is not a variable";
     RETURN_NOT_ALLOWED = "RETURN_NOT_ALLOWED", Compiler, Error, false, [], "'return' in an initializer block, or a value returned from a constructor";
@@ -152,6 +156,9 @@ rules! {
     NAMED_PARAMETER_NOT_FOUND = "NAMED_PARAMETER_NOT_FOUND", Compiler, Error, false, [], "Named argument for a parameter that does not exist";
     NONE_APPLICABLE = "NONE_APPLICABLE", Compiler, Error, false, [], "No overload accepts these arguments";
     // Compiler warnings.
+    USELESS_CAST = "USELESS_CAST", Compiler, Warning, true, [], "Cast to the type the value already has";
+    USELESS_IS_CHECK = "USELESS_IS_CHECK", Compiler, Warning, false, [], "'is' check that is always true or always false";
+    CAST_NEVER_SUCCEEDS = "CAST_NEVER_SUCCEEDS", Compiler, Warning, false, [], "Cast between unrelated classes";
     UNNECESSARY_SAFE_CALL = "UNNECESSARY_SAFE_CALL", Compiler, Warning, true, [], "'?.' on a non-null receiver";
     UNNECESSARY_NOT_NULL_ASSERTION = "UNNECESSARY_NOT_NULL_ASSERTION", Compiler, Warning, true, [], "'!!' on a non-null value";
     USELESS_ELVIS = "USELESS_ELVIS", Compiler, Warning, true, [], "'?:' after a non-null value";

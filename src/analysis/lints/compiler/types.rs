@@ -6,9 +6,59 @@ use crate::symbols::TypeRef;
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
-    for n in cx.root.descendants().filter(|n| n.kind() == SyntaxKind::USER_TYPE) {
-        if !in_error(&n) {
-            type_arguments(e, &n, out);
+    for n in cx.root.descendants() {
+        if in_error(&n) {
+            continue;
+        }
+        match n.kind() {
+            SyntaxKind::USER_TYPE => type_arguments(e, &n, out),
+            SyntaxKind::CALL_EXPR => call_type_arguments(e, &n, out),
+            _ => {}
+        }
+    }
+}
+
+/// Explicit type arguments of a call (`foo<String>()`) against the function's bounds.
+fn call_type_arguments(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
+    let Some(list) = call.children().find(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) else { return };
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let defs = e.resolve_name_ref(&callee);
+    let [crate::analysis::ide::infer::Def::Symbol { sym, .. }] = defs.as_slice() else { return };
+    if sym.kind != crate::symbols::SymbolKind::Function {
+        return;
+    }
+    bounds(e, sym, &list, out);
+}
+
+/// Each type argument in `list` is within the bounds of `owner`'s type parameter.
+fn bounds(e: &Engine, owner: &crate::symbols::Symbol, list: &SyntaxNode, out: &mut Sink) {
+    let projections: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::TYPE_PROJECTION).collect();
+    if projections.len() != owner.type_params.len() {
+        return;
+    }
+    for (p, tp) in projections.iter().zip(&owner.type_params) {
+        // `in`/`out` projections and star projections are not checked.
+        let text = p.text().to_string();
+        let text = text.trim_start();
+        if text.starts_with('*') || text.starts_with("in ") || text.starts_with("out ") {
+            continue;
+        }
+        let Some(arg) = p.children().find_map(ast::TypeRef::cast) else { continue };
+        let at = e.resolve_syntax_type(&arg);
+        let Some(afq) = crate::analysis::ide::infer::fq_of(&at).map(str::to_string) else { continue };
+        if matches!(crate::analysis::ide::infer::strip(&at), TypeRef::TypeParam { .. }) || afq == "kotlin.Nothing" {
+            continue;
+        }
+        for b in &tp.bounds {
+            let bound = e.resolve_declared(owner, b);
+            let Some(bfq) = crate::analysis::ide::infer::fq_of(&bound) else { continue };
+            if matches!(crate::analysis::ide::infer::strip(&bound), TypeRef::TypeParam { .. }) {
+                continue;
+            }
+            if e.conforms(&TypeRef::named(&afq), bfq) == Some(false) {
+                out.report(&UPPER_BOUND_VIOLATED, arg.syntax().text_range(), format!("Type argument is not within its bounds: expected '{}', actual '{}'.", bound.display(), at.display()), None);
+                break;
+            }
         }
     }
 }
@@ -51,6 +101,9 @@ fn type_arguments(e: &Engine, ut: &SyntaxNode, out: &mut Sink) {
     }
     let expected = sym.type_params.len();
     if given == expected {
+        if let Some(list) = last.children().find(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) {
+            bounds(e, sym, &list, out);
+        }
         return;
     }
     let shown = sym.name.clone();

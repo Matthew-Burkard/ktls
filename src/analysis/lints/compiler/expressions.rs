@@ -748,6 +748,14 @@ fn call_arguments(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
         // Argument types, when there is no overload to choose from.
         if let [(sym, subst)] = candidates.as_slice() {
             argument_types(e, sym, subst, &args, out);
+            return;
+        }
+        // Several overloads: none accepts a certain argument's type.
+        let fitting: Vec<&(Symbol, crate::analysis::ide::infer::Subst)> = candidates.iter().zip(&results).filter(|(_, (_, m))| m.is_none()).map(|(c, _)| c).collect();
+        if !fitting.is_empty() && fitting.iter().all(|(s, sub)| !argument_mismatches(e, s, sub, &args).is_empty()) {
+            let shown: Vec<String> = fitting.iter().take(3).map(|(s, _)| s.signature()).collect();
+            let more = if fitting.len() > 3 { format!("\n... and {} more", fitting.len() - 3) } else { String::new() };
+            out.report(&NONE_APPLICABLE, callee.text_range(), format!("None of the following candidates is applicable for '{}':\n{}{more}", callee.text(), shown.join("\n")), None);
         }
         return;
     }
@@ -779,26 +787,37 @@ fn call_arguments(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
 }
 
 /// Literal and certain-typed arguments of a call to the single candidate `sym`.
-fn argument_types(e: &Engine, sym: &Symbol, subst: &crate::analysis::ide::infer::Subst, args: &[SyntaxNode], out: &mut Sink) {
+/// A certain argument whose type does not fit its parameter.
+struct ArgMismatch {
+    value: SyntaxNode,
+    rule: &'static Rule,
+    message: String,
+    /// The type the parameter could change to.
+    to: String,
+    convert: Option<Fix>,
+    param: String,
+}
+
+/// The literal and certain-typed arguments of a call to `sym` that do not fit.
+fn argument_mismatches(e: &Engine, sym: &Symbol, subst: &crate::analysis::ide::infer::Subst, args: &[SyntaxNode]) -> Vec<ArgMismatch> {
+    let mut out = Vec::new();
     // The function's own type parameters shadow the class's (`fun <T> f(v: T)` in `C<T>`).
     let mut subst = subst.clone();
     for tp in &sym.type_params {
         subst.remove(&tp.name);
     }
-    let mut position = 0;
-    for a in args {
+    for (index, a) in args.iter().enumerate() {
         let name = a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| ast::token(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t));
+        // A positional argument takes the parameter at its own index (named ones before it
+        // must be in their own positions).
         let param = match &name {
             Some(n) => sym.params.iter().find(|p| p.name == *n),
-            None => {
-                position += 1;
-                sym.params.get(position - 1)
-            }
+            None => sym.params.get(index),
         };
         let Some(param) = param.filter(|p| !p.vararg) else {
             // Positions after a vararg are ambiguous.
             if name.is_none() {
-                return;
+                return out;
             }
             continue;
         };
@@ -808,11 +827,19 @@ fn argument_types(e: &Engine, sym: &Symbol, subst: &crate::analysis::ide::infer:
         if matches!(t, TypeRef::Platform(_)) || has_type_param(&t) {
             continue;
         }
-        if let Some((rule, msg, to, convert)) = type_mismatch(e, &value, &t, &t.display()) {
+        if let Some((rule, message, to, convert)) = type_mismatch(e, &value, &t, &t.display()) {
             let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ARGUMENT_TYPE_MISMATCH } else { rule };
-            let change = parameter_type_fix(e, sym, &param.name, &to);
-            out.report_fixes(rule, value.text_range(), msg, convert.into_iter().chain(change).collect());
+            out.push(ArgMismatch { value, rule, message, to, convert, param: param.name.clone() });
         }
+    }
+    out
+}
+
+/// Literal and certain-typed arguments of a call to the single candidate `sym`.
+fn argument_types(e: &Engine, sym: &Symbol, subst: &crate::analysis::ide::infer::Subst, args: &[SyntaxNode], out: &mut Sink) {
+    for m in argument_mismatches(e, sym, subst, args) {
+        let change = parameter_type_fix(e, sym, &m.param, &m.to);
+        out.report_fixes(m.rule, m.value.text_range(), m.message, m.convert.into_iter().chain(change).collect());
     }
 }
 
@@ -848,7 +875,7 @@ fn has_type_param(t: &TypeRef) -> bool {
 // ------------------------------------------------------------ literal types
 
 /// The type of a literal expression (`1` → `kotlin.Int`, `-1L`, `"a"`, `null` → `None`).
-fn literal_type(n: &SyntaxNode) -> Option<Option<&'static str>> {
+pub(super) fn literal_type(n: &SyntaxNode) -> Option<Option<&'static str>> {
     let lit = match n.kind() {
         SyntaxKind::LITERAL => n.clone(),
         SyntaxKind::PREFIX_EXPR if binary_op(n).is_some_and(|o| o.kind() == SyntaxKind::MINUS) => {
@@ -960,7 +987,16 @@ fn mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef, what: &str)
 
 /// Values whose type the engine knows for sure: a local or parameter declared with a
 /// type (and not smart cast with `is`), or a constructor call.
-fn certain_type(e: &Engine, value: &SyntaxNode) -> bool {
+pub(super) fn certain_type(e: &Engine, value: &SyntaxNode) -> bool {
+    certain_type_with(e, value, false)
+}
+
+/// Like [`certain_type`], trusting the engine's smart casts for names checked with `is`.
+pub(super) fn certain_type_smart(e: &Engine, value: &SyntaxNode) -> bool {
+    certain_type_with(e, value, true)
+}
+
+fn certain_type_with(e: &Engine, value: &SyntaxNode, smart: bool) -> bool {
     match value.kind() {
         SyntaxKind::NAME_REF => {
             let defs = e.resolve_name_ref(value);
@@ -973,7 +1009,7 @@ fn certain_type(e: &Engine, value: &SyntaxNode) -> bool {
             let name = ast::ident_text(&value.first_token().unwrap());
             let scope = decl.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR | SyntaxKind::CLASS_BODY | SyntaxKind::KOTLIN_FILE));
             // `is` checks smart cast the name.
-            !scope.is_some_and(|s| {
+            smart || !scope.is_some_and(|s| {
                 s.descendants().filter(|d| matches!(d.kind(), SyntaxKind::IS_EXPR | SyntaxKind::WHEN_CONDITION) && d.text().to_string().contains("is ")).any(|d| {
                     d.kind() == SyntaxKind::WHEN_CONDITION || d.descendants().any(|r| r.kind() == SyntaxKind::NAME_REF && r.first_token().is_some_and(|t| ast::ident_text(&t) == name))
                 })

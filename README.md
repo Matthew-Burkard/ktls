@@ -130,6 +130,10 @@ supertypes, generated code).
 | `ILLEGAL_SUSPEND_FUNCTION_CALL` | error | Call to a 'suspend' function outside a coroutine or 'suspend' function |
 | `CREATING_AN_INSTANCE_OF_ABSTRACT_CLASS` | error | Constructor call of an abstract or sealed class, an interface or an enum |
 | `INVISIBLE_REFERENCE` | error | Use of a private, protected or internal declaration where it is not visible |
+| `OPERATOR_MODIFIER_REQUIRED` | error | Operator use of a function that is not 'operator' |
+| `UPPER_BOUND_VIOLATED` | error | Type argument outside its parameter's upper bound |
+| `ASSIGNMENT_TYPE_MISMATCH` | error | Assigned value of the wrong type (literal, typed local/parameter, constructor call) |
+| `CONDITION_TYPE_MISMATCH` | error | Condition that is not a Boolean |
 | `INFIX_MODIFIER_REQUIRED` | error | Infix call of a function that is not 'infix' |
 | `VARIABLE_EXPECTED` | error | Assignment to something that is not a variable |
 | `RETURN_NOT_ALLOWED` | error | 'return' in an initializer block, or a value returned from a constructor |
@@ -142,6 +146,9 @@ supertypes, generated code).
 | `NO_VALUE_FOR_PARAMETER` | error | Required parameter without an argument |
 | `NAMED_PARAMETER_NOT_FOUND` | error | Named argument for a parameter that does not exist |
 | `NONE_APPLICABLE` | error | No overload accepts these arguments |
+| `USELESS_CAST` | warning | Cast to the type the value already has |
+| `USELESS_IS_CHECK` | warning | 'is' check that is always true or always false |
+| `CAST_NEVER_SUCCEEDS` | warning | Cast between unrelated classes |
 | `UNNECESSARY_SAFE_CALL` | warning | '?.' on a non-null receiver |
 | `UNNECESSARY_NOT_NULL_ASSERTION` | warning | '!!' on a non-null value |
 | `USELESS_ELVIS` | warning | '?:' after a non-null value |

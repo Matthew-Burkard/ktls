@@ -1229,3 +1229,70 @@ fun f(s: String?, t: String?, start: Node?) {
     let lines: Vec<usize> = lints.iter().filter(|l| l.rule.id == "UNSAFE_CALL").map(|l| text[..usize::from(l.range.start())].matches('\n').count() + 1).collect();
     assert_eq!(lines, vec![7, 18]);
 }
+
+#[test]
+fn typing_compiler_errors() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    fx.run("src/main/kotlin/a/Other.kt", "package a\n\nprivate fun hidden() = 1\n");
+    let text = r#"package a
+
+class Money(val cents: Int) {
+    fun plus(other: Money) = Money(cents + other.cents)
+}
+class Box<T : Number>(val v: T)
+fun <T : CharSequence> first(t: T) = t
+fun pick(i: Int) = i
+fun pick(d: Double) = d
+open class Animal
+class Dog : Animal()
+class Car
+
+fun f(a: Money, b: Money, n: Int, s: String, flag: Boolean?, dog: Dog, car: Car, any: Any) {
+    a + b
+    val box: Box<String>? = null
+    val ok: Box<Int>? = null
+    first<Int>(1)
+    var count: Int = 0
+    count = "x"
+    count = 2
+    if (n) println()
+    while (s) {}
+    if (flag) println()
+    if (flag != null && flag) println()
+    val same = s as String
+    val never = car as Dog
+    val fine = any as Dog
+    val always = dog is Animal
+    val never2 = dog !is Animal
+    pick("x")
+    pick(1)
+    hidden()
+}
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{}: {}", l.rule.id, &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    for expected in [
+        "OPERATOR_MODIFIER_REQUIRED: +",
+        "UPPER_BOUND_VIOLATED: String",
+        "UPPER_BOUND_VIOLATED: Int",
+        "ASSIGNMENT_TYPE_MISMATCH: \"x\"",
+        "CONDITION_TYPE_MISMATCH: n",
+        "CONDITION_TYPE_MISMATCH: s",
+        "CONDITION_TYPE_MISMATCH: flag",
+        "USELESS_CAST:  as String",
+        "CAST_NEVER_SUCCEEDS: as",
+        "USELESS_IS_CHECK: dog is Animal",
+        "USELESS_IS_CHECK: dog !is Animal",
+        "NONE_APPLICABLE: pick",
+        "INVISIBLE_REFERENCE: hidden",
+    ] {
+        has(&found, expected);
+    }
+    assert_eq!(found.iter().filter(|f| f.starts_with("CONDITION_TYPE_MISMATCH")).count(), 3, "{found:#?}");
+    assert_eq!(found.iter().filter(|f| f.starts_with("UPPER_BOUND_VIOLATED")).count(), 2, "{found:#?}");
+    assert_eq!(found.iter().filter(|f| f.starts_with("NONE_APPLICABLE")).count(), 1, "{found:#?}");
+    assert!(!found.iter().any(|f| f.contains("any as Dog") || f.starts_with("ASSIGNMENT_TYPE_MISMATCH: 2")), "{found:#?}");
+}
