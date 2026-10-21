@@ -162,7 +162,21 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
                 supported: Some(true),
                 change_notifications: Some(lsp_types::OneOf::Left(true)),
             }),
-            file_operations: None,
+            file_operations: Some(lsp_types::WorkspaceFileOperationsServerCapabilities {
+                will_rename: Some(lsp_types::FileOperationRegistrationOptions {
+                    filters: vec![
+                        lsp_types::FileOperationFilter {
+                            scheme: Some("file".into()),
+                            pattern: lsp_types::FileOperationPattern { glob: "**/*.kt".into(), matches: Some(lsp_types::FileOperationPatternKind::File), options: None },
+                        },
+                        lsp_types::FileOperationFilter {
+                            scheme: Some("file".into()),
+                            pattern: lsp_types::FileOperationPattern { glob: "**".into(), matches: Some(lsp_types::FileOperationPatternKind::Folder), options: None },
+                        },
+                    ],
+                }),
+                ..Default::default()
+            }),
         }),
         ..Default::default()
     }
@@ -392,6 +406,10 @@ impl Server {
                 let sub = method == TypeHierarchySubtypes::METHOD;
                 let Ok((id, params)) = req.extract::<lsp_types::TypeHierarchySupertypesParams>(&method) else { return };
                 self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::type_hierarchy(cx, &params.item, sub)?).unwrap()));
+            }
+            WillRenameFiles::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::RenameFilesParams>(WillRenameFiles::METHOD) else { return };
+                self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::will_rename_files(cx, &params)?).unwrap()));
             }
             CodeLensRequest::METHOD => {
                 let Ok((id, params)) = req.extract::<lsp_types::CodeLensParams>(CodeLensRequest::METHOD) else { return };

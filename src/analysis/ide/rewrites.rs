@@ -14,6 +14,7 @@ pub fn rewrites(e: &Engine, file: &FileData, tok: &SyntaxToken) -> Vec<Fix> {
     out.extend(if_to_when(file, tok));
     out.extend(when_to_if(file, tok));
     out.extend(lambda_out_of_parentheses(tok));
+    out.extend(lambda_into_parentheses(tok));
     out.extend(string_template(e, tok));
     out
 }
@@ -293,6 +294,32 @@ fn lambda_out_of_parentheses(tok: &SyntaxToken) -> Option<Fix> {
         vec![Edit { range: TextRange::new(prev.text_range().end(), list.text_range().end()), text: format!(") {}", lambda.text()) }]
     };
     Some(Fix::new("Move lambda argument out of parentheses", edits))
+}
+
+/// `foo(a) { … }` → `foo(a, { … })` (on the trailing lambda's `{`).
+fn lambda_into_parentheses(tok: &SyntaxToken) -> Option<Fix> {
+    if tok.kind() != SyntaxKind::L_CURLY {
+        return None;
+    }
+    let lambda = tok.parent().filter(|l| l.kind() == SyntaxKind::LAMBDA_EXPR)?;
+    let arg = lambda.parent().filter(|a| a.kind() == SyntaxKind::LAMBDA_ARGUMENT)?;
+    let call = arg.parent().filter(|c| c.kind() == SyntaxKind::CALL_EXPR)?;
+    if call.children().filter(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT).count() > 1 {
+        return None;
+    }
+    let list = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST);
+    let edits = match list {
+        Some(list) => {
+            let close = list.last_token().filter(|t| t.kind() == SyntaxKind::R_PAREN)?;
+            let sep = if list.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT) { ", " } else { "" };
+            vec![Edit { range: TextRange::new(close.text_range().start(), arg.text_range().end()), text: format!("{sep}{})", lambda.text()) }]
+        }
+        None => {
+            let callee = call.first_child()?;
+            vec![Edit { range: TextRange::new(callee.text_range().end(), arg.text_range().end()), text: format!("({})", lambda.text()) }]
+        }
+    };
+    Some(Fix::new("Move lambda argument into parentheses", edits))
 }
 
 // ------------------------------------------------------------ string templates

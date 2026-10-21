@@ -605,6 +605,12 @@ fn suspend_call(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
     out.report(&ILLEGAL_SUSPEND_FUNCTION_CALL, callee.text_range(), msg, fix);
 }
 
+/// A trailing lambda took the last parameter's place, so adding parameters after it
+/// would not match the call.
+fn trailing_lambda_extra(call: &SyntaxNode, sym: &Symbol) -> bool {
+    call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) && !sym.params.is_empty()
+}
+
 /// The call a lambda is passed to has exactly one candidate.
 fn lambda_callee_unique(e: &Engine, lambda: &SyntaxNode) -> bool {
     let call = lambda.ancestors().skip(1).find(|a| a.kind() == SyntaxKind::CALL_EXPR);
@@ -704,8 +710,17 @@ fn call_arguments(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
     if results.len() == 1 {
         let (sym, m) = &results[0];
         match m.as_ref().unwrap() {
-            Mismatch::TooMany(r) => out.report(&TOO_MANY_ARGUMENTS, *r, format!("Too many arguments for '{}'.", sym.signature()), None),
-            Mismatch::NamedNotFound(n, r) => out.report(&NAMED_PARAMETER_NOT_FOUND, *r, format!("No parameter with name '{n}' found."), None),
+            Mismatch::TooMany(r) => {
+                // The extra positional arguments become new parameters.
+                let extra: Vec<SyntaxNode> = positional.iter().filter(|(i, _)| *i >= sym.params.len()).map(|(_, a)| (*a).clone()).collect();
+                let fix = (!extra.is_empty() && !trailing_lambda_extra(call, sym)).then(|| crate::analysis::ide::signature_change::add_parameter_fix(e.snap, e, sym, &extra)).flatten();
+                out.report(&TOO_MANY_ARGUMENTS, *r, format!("Too many arguments for '{}'.", sym.signature()), fix);
+            }
+            Mismatch::NamedNotFound(n, r) => {
+                let arg = args.iter().find(|a| a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).is_some_and(|c| c.text_range().contains_range(*r)));
+                let fix = arg.and_then(|a| crate::analysis::ide::signature_change::add_parameter_fix(e.snap, e, sym, std::slice::from_ref(a)));
+                out.report(&NAMED_PARAMETER_NOT_FOUND, *r, format!("No parameter with name '{n}' found."), fix);
+            }
             Mismatch::Missing(p) => {
                 let at = list.as_ref().and_then(|l| l.last_token()).map(|t| t.text_range()).unwrap_or(callee.text_range());
                 out.report(&NO_VALUE_FOR_PARAMETER, at, format!("No value passed for parameter '{p}'."), None);

@@ -6,9 +6,9 @@ resolution, binary classpath indexing (jars, the JDK image, Kotlin metadata), a
 module-aware declaration index, import/type resolution with diagnostics, navigation
 (definition, declaration, type definition, implementation, hover, references, highlights, rename,
 call/type hierarchy), completion (incl. postfix templates and KDoc links), signature help, inlay hints, semantic tokens, folding and
-selection ranges, import and create-from-usage fixes, refactoring assists (extract variable/function, inline
-variable, explicit types, block body, braces, `if` ↔ `when`, string templates, argument names,
-named lambda parameter), reference-count code lenses, generate
+selection ranges, import and create-from-usage fixes, refactoring assists (extract variable/function/constant, inline
+variable/function, move/remove/add parameters, explicit types, block body, braces, `if` ↔ `when`, string templates, argument names,
+named lambda parameter), reference-count code lenses, package/import updates when files move, generate
 `equals`/`hashCode`/`toString`/KDoc, organize imports and lint rules with
 quick fixes.
 

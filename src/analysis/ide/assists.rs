@@ -25,6 +25,7 @@ pub fn assists(snap: &Snapshot, path: &Path, range: TextRange) -> Vec<(&'static 
     if !range.is_empty() {
         out.extend(extract_variable(&e, file, range).into_iter().map(|f| (EXTRACT, f)));
         out.extend(super::extract::extract_function(&e, file, range).map(|f| (EXTRACT, f)));
+        out.extend(extract_constant(&e, file, range).into_iter().map(|f| (EXTRACT, f)));
     }
     // Between two tokens: the name or keyword (`n|)` means `n`).
     let at = e.root.token_at_offset(range.start());
@@ -33,6 +34,8 @@ pub fn assists(snap: &Snapshot, path: &Path, range: TextRange) -> Vec<(&'static 
     out.extend(block_body(&e, file, &tok).map(|f| (REWRITE, f)));
     out.extend(argument_names(&e, &tok).map(|f| (REWRITE, f)));
     out.extend(name_it(&e, &tok).map(|f| (REWRITE, f)));
+    out.extend(super::signature_change::parameter_assists(snap, path, &tok).into_iter().map(|f| (REWRITE, f)));
+    out.extend(super::signature_change::inline_function(snap, path, &tok).map(|f| (INLINE, f)));
     out.extend(super::rewrites::rewrites(&e, file, &tok).into_iter().map(|f| (if f.title.starts_with("Inline") { INLINE } else { REWRITE }, f)));
     out
 }
@@ -131,6 +134,46 @@ fn extract_variable(e: &Engine, file: &FileData, range: TextRange) -> Vec<Fix> {
     let mut edits = vec![declare(&first_stmt, &name)];
     edits.extend(occurrences.iter().map(|o| Edit { range: o.text_range(), text: name.clone() }));
     out.push(Fix::new(format!("Extract variable (replace all {} occurrences)", occurrences.len()), edits));
+    out
+}
+
+/// A literal (number, char, boolean, string without templates) becomes a top-level
+/// `private const val` before the declaration that uses it.
+fn extract_constant(e: &Engine, file: &FileData, range: TextRange) -> Vec<Fix> {
+    let Some(lit) = selected_expression(e, file, range) else { return Vec::new() };
+    let constant = match lit.kind() {
+        SyntaxKind::LITERAL => lit.text() != "null",
+        SyntaxKind::STRING_TEMPLATE => !lit.descendants().any(|d| matches!(d.kind(), SyntaxKind::SHORT_STRING_TEMPLATE_ENTRY | SyntaxKind::LONG_STRING_TEMPLATE_ENTRY)),
+        _ => false,
+    };
+    // Not already a constant's value, and inside a top-level declaration.
+    let top = lit.ancestors().find(|a| a.parent().is_some_and(|p| p.kind() == SyntaxKind::KOTLIN_FILE));
+    let (true, Some(top)) = (constant, top) else { return Vec::new() };
+    if top.kind() == SyntaxKind::PROPERTY && crate::analysis::lints::has_modifier(&top, "const") {
+        return Vec::new();
+    }
+    let value = lit.text().to_string();
+    let words: Vec<String> = value.trim_matches('"').split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).take(4).map(|w| w.to_uppercase()).collect();
+    let base = if lit.kind() == SyntaxKind::STRING_TEMPLATE && !words.is_empty() && words[0].starts_with(|c: char| c.is_alphabetic()) { words.join("_") } else { "CONSTANT".to_string() };
+    let mut name = base.clone();
+    let mut i = 2;
+    while file.text.contains(&format!("val {name} ")) || file.text.contains(&format!("val {name}:")) {
+        name = format!("{base}_{i}");
+        i += 1;
+    }
+    // Its first line, keeping KDoc/annotations attached.
+    let first = top.children_with_tokens().find(|t| !t.kind().is_trivia() || t.kind() == SyntaxKind::KDOC).map_or(top.text_range().start(), |t| t.text_range().start());
+    let decl = Edit { range: TextRange::empty(first), text: format!("private const val {name} = {value}\n\n") };
+    let mut out = vec![Fix::new(format!("Extract constant '{name}'"), vec![decl.clone(), Edit { range: lit.text_range(), text: name.clone() }])];
+    // Every equal literal in the file.
+    let others: Vec<SyntaxNode> = e.root.descendants().filter(|d| d.kind() == lit.kind() && d.text() == value.as_str()).filter(|d| !d.ancestors().any(|a| a.kind() == SyntaxKind::ANNOTATION)).collect();
+    if others.len() > 1 {
+        let first_top = others[0].ancestors().find(|a| a.parent().is_some_and(|p| p.kind() == SyntaxKind::KOTLIN_FILE));
+        let at = first_top.map(|t| t.children_with_tokens().find(|x| !x.kind().is_trivia() || x.kind() == SyntaxKind::KDOC).map_or(t.text_range().start(), |x| x.text_range().start())).unwrap_or(first);
+        let mut edits = vec![Edit { range: TextRange::empty(at), text: decl.text.clone() }];
+        edits.extend(others.iter().map(|o| Edit { range: o.text_range(), text: name.clone() }));
+        out.push(Fix::new(format!("Extract constant '{name}' (replace all {} occurrences)", others.len()), edits));
+    }
     out
 }
 

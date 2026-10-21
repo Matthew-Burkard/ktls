@@ -23,7 +23,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P1] `workspace/configuration` + `workspace/didChangeConfiguration`
 - [x] [P1] `workspace/didChangeWatchedFiles` (build files, generated sources, jars)
 - [x] [P1] `workspace/didChangeWorkspaceFolders` (multi-root)
-- [ ] [P2] `workspace/didCreateFiles` / `didRenameFiles` / `didDeleteFiles` (+ `will*` variants that return edits)
+- [~] [P2] `workspace/didCreateFiles` / `didRenameFiles` / `didDeleteFiles` (+ `will*` variants that return edits) — *partial: `willRenameFiles` for `.kt` files and folders: `package` follows the directory, imports of the moved declarations are updated or added, and the moved file imports what it used from its old package*
 - [x] [P2] Position encoding negotiation (UTF-16 default, UTF-8 if supported)
 - [ ] [P2] `$/setTrace`, `$/logTrace`
 
@@ -333,7 +333,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [~] [P0] **Add `suspend` modifier** to containing function / wrap in `runBlocking`/`launch` — *partial: add `suspend`*
 - [~] [P0] **Create from usage**: function, extension function, property, local variable, parameter, class, interface, enum, object, enum entry, constructor, type parameter, annotation, `component`/operator functions — *partial: function (top-level or member, incl. in other files), extension function/property, property, local variable, parameter, class; types from arguments and the expected type*
 - [ ] [P0] **Add missing return** / **add `return` with expression**
-- [ ] [P1] **Add/remove argument**, **add named argument**, **change function signature** to match call, **add parameter to function**
+- [~] [P1] **Add/remove argument**, **add named argument**, **change function signature** to match call, **add parameter to function** — *partial: add parameter(s) to a project function from extra positional or unknown named arguments (typed from the arguments, also in another file)*
 - [ ] [P1] **Add type arguments**, **specify type explicitly**
 - [ ] [P1] **Make visible** (change visibility of referenced declaration), **make `public`/`internal`/`private`/`protected`**
 - [ ] [P1] **Add `open`** to class/member, **remove `final`**
@@ -396,7 +396,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P1] `for (i in 0 until n)` ↔ `repeat(n)`, `indices`, `withIndex()`
 - [ ] [P1] `try/finally` → `use {}`
 - [ ] [P1] Lambda ↔ anonymous function ↔ callable reference
-- [~] [P1] Move lambda argument out of / into parentheses — *partial: out of*
+- [x] [P1] Move lambda argument out of / into parentheses
 - [~] [P1] Add/remove explicit lambda parameter (`it` ↔ named), specify explicit lambda signature — *partial: `it` → named (from `it` or the lambda's `{`)*
 - [ ] [P1] Scope functions: convert between `let`/`run`/`also`/`apply`/`with`
 - [~] [P1] Add/remove named arguments (single / all) — *partial: add names to all positional arguments (Kotlin functions)*
@@ -445,7 +445,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 ### 7.2 Extract (`refactor.extract`)
 - [~] [P0] Extract variable (introduce local `val`; with "replace all occurrences") — *partial: the selected expression, named from the call/property or type; with "replace all occurrences" in the function's outermost block; refused out of conditional, short-circuit, loop or lambda code; no "replace all"*
 - [~] [P0] Extract function (local, member, top-level, extension; infers params/return, handles multiple outputs via data class/pair) — *partial: statements or an expression → private function after the enclosing one; read locals become parameters, one local used afterwards the result; refused with jumps out, assignments to caller locals, or receiver lambdas*
-- [ ] [P1] Extract property (member / top-level), extract constant (`const val`)
+- [~] [P1] Extract property (member / top-level), extract constant (`const val`) — *partial: extract constant (top-level `private const val` from a literal, optionally replacing all equal literals in the file)*
 - [ ] [P1] Extract parameter (introduce parameter, with default value), extract lambda parameter (functional parameter)
 - [ ] [P1] Extract interface / superclass
 - [ ] [P1] Extract `typealias`
@@ -454,14 +454,14 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 
 ### 7.3 Inline (`refactor.inline`)
 - [x] [P0] Inline local variable (`val`; parenthesized where needed, `$x` → `${…}`)
-- [ ] [P1] Inline function (single call / all calls), inline property, inline `typealias`, inline constant
+- [~] [P1] Inline function (single call / all calls), inline property, inline `typealias`, inline constant — *partial: inline a top-level/local single-expression function into all calls (arguments or defaults substituted, parenthesized where needed; refused for recursion, nested calls, or a non-trivial argument used twice)*
 - [ ] [P1] Inline super class / interface
 - [ ] [P2] Inline lambda / scope function (`x.let { it.foo() }` → `x.foo()`)
 
 ### 7.4 Move & structural
 - [ ] [P1] Move top-level declarations to another file / package (update imports)
 - [ ] [P1] Move member to companion ↔ companion to class; move nested class to top level ↔ top level into class
-- [ ] [P1] Change signature (reorder, add, remove, rename params; change return type; update all call sites & overrides; add/remove receiver)
+- [~] [P1] Change signature (reorder, add, remove, rename params; change return type; update all call sites & overrides; add/remove receiver) — *partial: move a parameter left/right and remove an unused parameter, updating calls across the project (functions without an override family; refused when a reference is not a plain call)*
 - [ ] [P1] Pull members up / push members down
 - [ ] [P1] Safe delete (with usages check)
 - [ ] [P2] Convert Java file to Kotlin (J2K)

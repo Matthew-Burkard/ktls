@@ -5,6 +5,7 @@ pub mod assists;
 pub mod completion;
 pub mod create;
 pub mod extract;
+pub mod file_rename;
 pub mod generate;
 pub mod hierarchy;
 pub mod imports;
@@ -16,6 +17,7 @@ pub mod rename;
 pub mod rewrites;
 pub mod semantic;
 pub mod signature;
+pub mod signature_change;
 pub mod structure;
 
 use std::path::{Path, PathBuf};
@@ -739,5 +741,13 @@ pub fn lens_targets(snap: &Snapshot, path: &Path) -> Vec<TextRange> {
     out.sort_by_key(|r| r.start());
     out.dedup();
     out
+}
+
+/// An expression that needs no parentheses as an operand.
+pub(super) fn rewrites_atomic(n: &SyntaxNode) -> bool {
+    matches!(
+        n.kind(),
+        SyntaxKind::NAME_REF | SyntaxKind::CALL_EXPR | SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR | SyntaxKind::LITERAL | SyntaxKind::STRING_TEMPLATE | SyntaxKind::PAREN_EXPR | SyntaxKind::INDEX_EXPR | SyntaxKind::THIS_EXPR | SyntaxKind::COLLECTION_LITERAL | SyntaxKind::CALLABLE_REFERENCE
+    )
 }
 

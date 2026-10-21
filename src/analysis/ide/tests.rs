@@ -1252,6 +1252,8 @@ fn rewrite_assists() {
     // Lambda out of parentheses.
     assert_eq!(body(fx.assist(&f("    xs.forEach({ println(i$0t) })"), "Move lambda").unwrap()), "    xs.forEach { println(it) }");
     assert_eq!(body(fx.assist(&f("    xs.fold(0, { a, x -> a$0 + x.age })"), "Move lambda").unwrap()), "    xs.fold(0) { a, x -> a + x.age }");
+    assert_eq!(body(fx.assist(&f("    xs.fold(0) $0{ a, x -> a + x.age }"), "Move lambda argument into").unwrap()), "    xs.fold(0, { a, x -> a + x.age })");
+    assert_eq!(body(fx.assist(&f("    xs.forEach $0{ println(it) }"), "Move lambda argument into").unwrap()), "    xs.forEach({ println(it) })");
     // Concatenation → template.
     assert_eq!(body(fx.assist(&f("    println(\"Hi \" + u.na$0me + \"!\" + n + \"x\")"), "Convert concatenation").unwrap()), "    println(\"Hi ${u.name}!${n}x\")");
     assert_eq!(body(fx.assist(&f("    println(\"n=\" + n$0)"), "Convert concatenation").unwrap()), "    println(\"n=$n\")");
@@ -1277,4 +1279,96 @@ fn extract_function_and_occurrences() {
     // Replace all occurrences.
     let out = fx.assist(&f("        println(u.name.length)\n        if (n > 0) println($0u.name.length$1 + 1)"), "Extract variable (replace all").unwrap();
     assert!(out.contains("        val length = u.name.length\n        println(length)\n        if (n > 0) println(length + 1)"), "{out}");
+}
+
+#[test]
+fn signature_changes() {
+    let Some(mut fx) = fixture() else { return };
+    // A function with calls in another file.
+    let lib = "package app\n\nfun greet(name: String, times: Int, loud: Boolean = false) {\n    repeat(times) { println(name) }\n}\n";
+    let lib_path = fx.root.join("src/app/Lib.kt");
+    fx.host.set_file(lib_path.clone(), Arc::from(lib), Some(1));
+    fx.host.set_file(fx.root.join("src/app/Use.kt"), Arc::from("package app\n\nfun use() {\n    greet(\"a\", 2)\n    greet(\"b\", 3, true)\n    greet(times = 1, name = \"c\")\n}\n"), Some(1));
+    let run = |fx: &mut Fx, at: &str, title: &str| -> Option<(String, String)> {
+        let offset = TextSize::from(lib.find(at).unwrap() as u32);
+        let snap = fx.host.snapshot();
+        let tok = snap.file(&lib_path).unwrap().parse().syntax().token_at_offset(offset).right_biased().unwrap();
+        let fix = crate::analysis::ide::signature_change::parameter_assists(&snap, &lib_path, &tok).into_iter().find(|f| f.title.starts_with(title))?;
+        let apply = |text: &str, edits: Vec<&crate::analysis::lints::Edit>| {
+            let mut edits = edits;
+            edits.sort_by_key(|e| std::cmp::Reverse(e.range.start()));
+            let mut out = text.to_string();
+            for e in edits {
+                out.replace_range(usize::from(e.range.start())..usize::from(e.range.end()), &e.text);
+            }
+            out
+        };
+        let use_text = snap.file(&fx.root.join("src/app/Use.kt")).unwrap().text.to_string();
+        Some((apply(lib, fix.edits.iter().collect()), apply(&use_text, fix.elsewhere.iter().map(|(_, e)| e).collect())))
+    };
+    let (decl, uses) = run(&mut fx, "times: Int", "Move parameter 'times' left").unwrap();
+    assert!(decl.contains("fun greet(times: Int, name: String, loud: Boolean = false)"), "{decl}");
+    assert!(uses.contains("greet(2, \"a\")\n    greet(3, \"b\", true)\n    greet(times = 1, name = \"c\")"), "{uses}");
+    // Only the first of the pair passed: it gets its name.
+    let (_, uses) = run(&mut fx, "times: Int", "Move parameter 'times' right").unwrap();
+    assert!(uses.contains("greet(\"a\", times = 2)\n    greet(\"b\", true, 3)"), "{uses}");
+    let (decl, uses) = run(&mut fx, "loud: Boolean", "Remove parameter").unwrap();
+    assert!(decl.contains("fun greet(name: String, times: Int)"), "{decl}");
+    assert!(uses.contains("greet(\"b\", 3)\n"), "{uses}");
+    // Used parameters are not removed.
+    assert!(run(&mut fx, "name: String", "Remove parameter").is_none());
+}
+
+#[test]
+fn inline_function() {
+    let Some(mut fx) = fixture() else { return };
+    let text = "package app\n\nfun area(w: Int, h: Int = 2) = w * h\n\nfun use(n: Int) {\n    println(ar$0ea(n + 1, 3))\n    val a = area(n)\n    println(area(h = n, w = 4) + 1)\n}\n";
+    let out = fx.assist(text, "Inline function").unwrap();
+    assert_eq!(out, "package app\n\nfun use(n: Int) {\n    println((n + 1) * 3)\n    val a = n * 2\n    println((4 * n) + 1)\n}\n");
+    // A non-trivial argument used twice is not duplicated.
+    let twice = "package app\n\nfun sq(x: Int) = x * x\n\nfun use(n: Int) = s$0q(n + 1)\n";
+    assert!(fx.assist(twice, "Inline function").is_none());
+    let rec = "package app\n\nfun f$0(n: Int): Int = if (n > 0) f(n - 1) else 0\n";
+    assert!(fx.assist(rec, "Inline function").is_none());
+}
+
+#[test]
+fn extract_constant() {
+    let Some(mut fx) = fixture() else { return };
+    let text = "package app\n\n/** Doc. */\nfun hello(n: Int) {\n    println($0\"Hello world!\"$1)\n    println(\"Hello world!\" + n)\n}\n";
+    assert_eq!(fx.assist(text, "Extract constant 'HELLO_WORLD'").unwrap(), "package app\n\nprivate const val HELLO_WORLD = \"Hello world!\"\n\n/** Doc. */\nfun hello(n: Int) {\n    println(HELLO_WORLD)\n    println(\"Hello world!\" + n)\n}\n");
+    let all = fx.assist(text, "Extract constant 'HELLO_WORLD' (replace all").unwrap();
+    assert!(all.contains("    println(HELLO_WORLD)\n    println(HELLO_WORLD + n)"), "{all}");
+    assert!(fx.assist("package app\n\nfun f(n: Int) = println($0\"n=$n\"$1)\n", "Extract constant").is_none());
+}
+
+#[test]
+fn moving_files_updates_packages_and_imports() {
+    let Some(mut fx) = fixture() else { return };
+    let text = "package app.util\n\nfun shout(s: String) = s.uppercase() + other()\n";
+    let files = [
+        ("src/app/util/Text.kt", text),
+        ("src/app/util/Other.kt", "package app.util\n\nfun other() = \"!\"\nfun twice() = shout(\"a\") + shout(\"b\")\n"),
+        ("src/app/Caller.kt", "package app\n\nimport app.util.shout\n\nfun m() = shout(\"a\")\n"),
+    ];
+    for (p, t) in files {
+        fx.host.set_file(fx.root.join(p), Arc::from(t), Some(1));
+    }
+    let snap = fx.host.snapshot();
+    let edits = crate::analysis::ide::file_rename::rename_file_edits(&snap, &fx.root.join("src/app/util/Text.kt"), &fx.root.join("src/app/text/Text.kt"));
+    let applied = |rel: &str| {
+        let path = fx.root.join(rel);
+        let mut out = snap.file(&path).unwrap().text.to_string();
+        let mut mine: Vec<_> = edits.iter().filter(|(p, _, _)| *p == path).collect();
+        mine.sort_by_key(|(_, r, _)| std::cmp::Reverse(r.start()));
+        for (_, r, t) in mine {
+            out.replace_range(usize::from(r.start())..usize::from(r.end()), t);
+        }
+        out
+    };
+    assert_eq!(applied("src/app/util/Text.kt"), "package app.text\n\nimport app.util.other\n\nfun shout(s: String) = s.uppercase() + other()\n");
+    assert_eq!(applied("src/app/util/Other.kt"), "package app.util\n\nimport app.text.shout\n\nfun other() = \"!\"\nfun twice() = shout(\"a\") + shout(\"b\")\n");
+    assert_eq!(applied("src/app/Caller.kt"), "package app\n\nimport app.text.shout\n\nfun m() = shout(\"a\")\n");
+    // A rename in the same directory changes nothing.
+    assert!(crate::analysis::ide::file_rename::rename_file_edits(&snap, &fx.root.join("src/app/util/Text.kt"), &fx.root.join("src/app/util/Words.kt")).is_empty());
 }

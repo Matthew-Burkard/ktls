@@ -1096,3 +1096,13 @@ fun seq() = sequence { yield(1) }
     assert_eq!(found, vec!["ILLEGAL_SUSPEND_FUNCTION_CALL: load"; 3], "{found:#?}");
     assert!(fixed(text, "ILLEGAL_SUSPEND_FUNCTION_CALL").contains("suspend fun bad() {"));
 }
+
+#[test]
+fn add_parameter_from_call() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let text = "package a\n\nfun two(a: Int, b: Int) = a + b\nfun f(label: String) {\n    two(1, 2, label, 3.5)\n    two(1, 2, c = true)\n}\n";
+    assert!(fixed(text, "TOO_MANY_ARGUMENTS").contains("fun two(a: Int, b: Int, label: String, value: Double) = a + b"));
+    assert!(fixed(text, "NAMED_PARAMETER_NOT_FOUND").contains("fun two(a: Int, b: Int, c: Boolean) = a + b"));
+}

@@ -813,6 +813,35 @@ pub fn new_flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
+/// Package and import updates for moved Kotlin files (folders: every file inside).
+pub fn will_rename_files(cx: &Ctx, params: &lsp_types::RenameFilesParams) -> Result<Option<lsp_types::WorkspaceEdit>> {
+    let mut moves: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for f in &params.files {
+        let (Some(old), Some(new)) = (f.old_uri.parse::<lsp_types::Uri>().ok().and_then(|u| crate::util::uri_to_path(&u)), f.new_uri.parse::<lsp_types::Uri>().ok().and_then(|u| crate::util::uri_to_path(&u))) else { continue };
+        if cx.snap.file(&old).is_some() {
+            moves.push((old, new));
+        } else {
+            for p in cx.snap.files.keys().filter(|p| p.starts_with(&old)) {
+                if let Ok(rest) = p.strip_prefix(&old) {
+                    moves.push((p.clone(), new.join(rest)));
+                }
+            }
+        }
+    }
+    // `WorkspaceEdit::changes` is keyed by `Uri`.
+    #[allow(clippy::mutable_key_type)]
+    let mut changes: std::collections::HashMap<lsp_types::Uri, Vec<lsp_types::TextEdit>> = std::collections::HashMap::new();
+    for (old, new) in &moves {
+        for (p, r, t) in crate::analysis::ide::file_rename::rename_file_edits(cx.snap, old, new) {
+            let Some(f) = cx.snap.file(&p) else { continue };
+            let li = LineIndex::new(&f.text);
+            changes.entry(path_to_uri(&p)).or_default().push(lsp_types::TextEdit { range: li.range(&f.text, r, cx.enc), new_text: t });
+        }
+        cx.check()?;
+    }
+    Ok((!changes.is_empty()).then(|| lsp_types::WorkspaceEdit { changes: Some(changes), ..Default::default() }))
+}
+
 pub fn code_lenses(cx: &Ctx, path: &Path) -> Result<Vec<lsp_types::CodeLens>> {
     let Some(file) = cx.snap.file(path) else { return Ok(Vec::new()) };
     let index = LineIndex::new(&file.text);
