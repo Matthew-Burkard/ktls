@@ -120,7 +120,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [ ] [P2] String template injections, regex/SQL/JSON language injection highlighting
 
 ### 3.5 Other display
-- [ ] [P1] `textDocument/codeLens` — run/debug `main` & tests, references count, implementations count, overrides
+- [~] [P1] `textDocument/codeLens` — run/debug `main` & tests, references count, implementations count, overrides — *partial: reference counts on classes, functions and properties, computed in `codeLens/resolve` (command `kotlin.showReferences` with uri, position, locations)*
 - [x] [P1] `textDocument/foldingRange` — imports, blocks, KDoc, multiline comments, `when` branches, region comments
 - [x] [P1] `textDocument/selectionRange` — expand/shrink selection syntactically
 - [ ] [P2] `textDocument/inlineValue` (debugger)
@@ -387,16 +387,16 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [x] [P2] Add KDoc / generate `@param` tags
 
 **Expressions & control flow**
-- [ ] [P1] `if` ↔ `when`; `when` with subject ↔ without subject; flatten / merge `when` branches
+- [~] [P1] `if` ↔ `when`; `when` with subject ↔ without subject; flatten / merge `when` branches — *partial: `if`/`else if` chain → `when`; `when` (subject a plain name) → `if` chain*
 - [ ] [P1] `if` → elvis / safe access, elvis → `if`, `!!` → `if` check / elvis
 - [ ] [P1] Invert `if` condition; split `if` (`&&`/`||`) ↔ merge nested `if`s
-- [ ] [P1] Add/remove braces
+- [x] [P1] Add/remove braces (`if`/`for`/`while`/`do`; not around a nested `if`)
 - [ ] [P1] Introduce / remove `when` subject; add `else` / remaining branches
 - [ ] [P1] `for` loop ↔ `forEach`; loop → collection operations (`map/filter/sumOf…`); `forEach` → `for`
 - [ ] [P1] `for (i in 0 until n)` ↔ `repeat(n)`, `indices`, `withIndex()`
 - [ ] [P1] `try/finally` → `use {}`
 - [ ] [P1] Lambda ↔ anonymous function ↔ callable reference
-- [ ] [P1] Move lambda argument out of / into parentheses
+- [~] [P1] Move lambda argument out of / into parentheses — *partial: out of*
 - [~] [P1] Add/remove explicit lambda parameter (`it` ↔ named), specify explicit lambda signature — *partial: `it` → named (from `it` or the lambda's `{`)*
 - [ ] [P1] Scope functions: convert between `let`/`run`/`also`/`apply`/`with`
 - [~] [P1] Add/remove named arguments (single / all) — *partial: add names to all positional arguments (Kotlin functions)*
@@ -414,7 +414,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P2] `listOf().map {}` → `List(n) {}` builder; `buildList`/`buildString` conversions
 
 **Strings**
-- [ ] [P1] Concatenation ↔ string template
+- [~] [P1] Concatenation ↔ string template — *partial: concatenation → template (starting from a String)*
 - [ ] [P1] Convert to raw string (`"""…"""`) ↔ escaped string; add `trimIndent()`/`trimMargin()`
 - [ ] [P1] Split / join string literals; convert to `buildString {}`
 - [ ] [P1] Add/remove curly braces in template, add/remove interpolation prefix (`$$`)
@@ -443,8 +443,8 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P2] Rename backing field / accessor pair, rename test along with subject
 
 ### 7.2 Extract (`refactor.extract`)
-- [~] [P0] Extract variable (introduce local `val`; with "replace all occurrences") — *partial: the selected expression, named from the call/property or type; refused out of conditional, short-circuit, loop or lambda code; no "replace all"*
-- [ ] [P0] Extract function (local, member, top-level, extension; infers params/return, handles multiple outputs via data class/pair)
+- [~] [P0] Extract variable (introduce local `val`; with "replace all occurrences") — *partial: the selected expression, named from the call/property or type; with "replace all occurrences" in the function's outermost block; refused out of conditional, short-circuit, loop or lambda code; no "replace all"*
+- [~] [P0] Extract function (local, member, top-level, extension; infers params/return, handles multiple outputs via data class/pair) — *partial: statements or an expression → private function after the enclosing one; read locals become parameters, one local used afterwards the result; refused with jumps out, assignments to caller locals, or receiver lambdas*
 - [ ] [P1] Extract property (member / top-level), extract constant (`const val`)
 - [ ] [P1] Extract parameter (introduce parameter, with default value), extract lambda parameter (functional parameter)
 - [ ] [P1] Extract interface / superclass
@@ -453,7 +453,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P2] Introduce parameter object
 
 ### 7.3 Inline (`refactor.inline`)
-- [ ] [P0] Inline local variable
+- [x] [P0] Inline local variable (`val`; parenthesized where needed, `$x` → `${…}`)
 - [ ] [P1] Inline function (single call / all calls), inline property, inline `typealias`, inline constant
 - [ ] [P1] Inline super class / interface
 - [ ] [P2] Inline lambda / scope function (`x.let { it.foo() }` → `x.foo()`)

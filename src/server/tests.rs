@@ -401,6 +401,12 @@ fn editing_assists_session() {
 
     let r = c.request("textDocument/implementation", json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 5 } }));
     assert_eq!(r[0]["range"]["start"], json!({ "line": 2, "character": 4 }));
+    let lenses = c.request("textDocument/codeLens", json!({ "textDocument": { "uri": uri } }));
+    let add = lenses.as_array().unwrap().iter().find(|l| l["range"]["start"] == json!({ "line": 2, "character": 4 })).expect("lens on add").clone();
+    assert!(add["command"].is_null());
+    let resolved = c.request("codeLens/resolve", add);
+    assert_eq!(resolved["command"]["title"], "2 references", "{resolved}");
+    assert_eq!(resolved["command"]["arguments"][2].as_array().unwrap().len(), 2);
     let r = c.request("textDocument/declaration", json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 5 } }));
     assert_eq!(r[0]["range"]["start"], json!({ "line": 2, "character": 4 }));
 

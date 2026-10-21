@@ -4,6 +4,7 @@
 pub mod assists;
 pub mod completion;
 pub mod create;
+pub mod extract;
 pub mod generate;
 pub mod hierarchy;
 pub mod imports;
@@ -12,6 +13,7 @@ pub mod inlay;
 pub mod kdoc;
 pub mod library;
 pub mod rename;
+pub mod rewrites;
 pub mod semantic;
 pub mod signature;
 pub mod structure;
@@ -715,3 +717,27 @@ fn inline(s: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// Name ranges of the file's declarations that get a reference-count code lens: classes,
+/// functions and properties, top-level and members (not locals or constructors).
+pub fn lens_targets(snap: &Snapshot, path: &Path) -> Vec<TextRange> {
+    fn walk(ds: &[super::source::SourceDecl], out: &mut Vec<TextRange>) {
+        for d in ds {
+            let s = &d.symbol;
+            if matches!(s.kind, SymbolKind::Class | SymbolKind::Interface | SymbolKind::Object | SymbolKind::Enum | SymbolKind::Annotation | SymbolKind::TypeAlias | SymbolKind::Function | SymbolKind::Property)
+                && let Origin::Source { name_range, .. } = &s.origin
+                && !name_range.is_empty()
+            {
+                out.push(*name_range);
+            }
+            walk(&d.children, out);
+        }
+    }
+    let Some(file) = snap.file(path) else { return Vec::new() };
+    let mut out = Vec::new();
+    walk(&file.summary().decls, &mut out);
+    out.sort_by_key(|r| r.start());
+    out.dedup();
+    out
+}
+

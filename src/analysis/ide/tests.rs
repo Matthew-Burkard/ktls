@@ -1222,3 +1222,59 @@ fn refactoring_assists() {
     // `it` → named.
     assert_eq!(body(fx.assist(&f("    xs.forEach { println($0it.name + it.greet()) }"), "Replace 'it'").unwrap()), "    xs.forEach { user -> println(user.name + user.greet()) }");
 }
+
+#[test]
+fn rewrite_assists() {
+    let Some(mut fx) = fixture() else { return };
+    let f = |body: &str| format!("{HEADER}fun run(u: User, xs: List<User>, ok: Boolean, n: Int) {{\n{body}\n}}\n");
+    let body = |out: String| out.trim_start_matches("fun run(u: User, xs: List<User>, ok: Boolean, n: Int) {\n").trim_end_matches("\n}\n").to_string();
+    // Inline variable (parenthesized where precedence needs it; templates get braces).
+    assert_eq!(
+        body(fx.assist(&f("    val s$0um = n + 1\n    println(sum * 2)\n    println(\"$sum\")\n    println(sum)"), "Inline variable").unwrap()),
+        "    println((n + 1) * 2)\n    println(\"${n + 1}\")\n    println(n + 1)"
+    );
+    assert_eq!(body(fx.assist(&f("    val name = u.name\n    println(na$0me.length)"), "Inline variable").unwrap()), "    println(u.name.length)");
+    assert!(fx.assist(&f("    var c$0 = 1\n    println(c)"), "Inline variable").is_none());
+    // Braces.
+    assert_eq!(body(fx.assist(&f("    i$0f (ok) println(1) else println(2)"), "Add braces").unwrap()), "    if (ok) {\n        println(1)\n    } else {\n        println(2)\n    }");
+    assert_eq!(body(fx.assist(&f("    f$0or (x in xs) {\n        println(x)\n    }"), "Remove braces").unwrap()), "    for (x in xs) println(x)");
+    assert!(fx.assist(&f("    i$0f (ok) {\n        if (n > 1) println(1)\n    } else println(2)"), "Remove braces").is_none());
+    // if ↔ when.
+    assert_eq!(
+        body(fx.assist(&f("    i$0f (n > 1) println(1) else if (ok) {\n        println(2)\n    } else println(3)"), "Replace 'if' with 'when'").unwrap()),
+        "    when {\n        n > 1 -> println(1)\n        ok -> {\n            println(2)\n        }\n        else -> println(3)\n    }"
+    );
+    assert_eq!(
+        body(fx.assist(&f("    wh$0en (n) {\n        1, 2 -> println(1)\n        in 3..4 -> println(2)\n        else -> println(3)\n    }"), "Replace 'when' with 'if'").unwrap()),
+        "    if (n == 1 || n == 2) {\n        println(1)\n    } else if (n in 3..4) {\n        println(2)\n    } else {\n        println(3)\n    }"
+    );
+    assert!(fx.assist(&f("    wh$0en (u.greet()) {\n        \"a\" -> println(1)\n        else -> {}\n    }"), "Replace 'when' with 'if'").is_none());
+    // Lambda out of parentheses.
+    assert_eq!(body(fx.assist(&f("    xs.forEach({ println(i$0t) })"), "Move lambda").unwrap()), "    xs.forEach { println(it) }");
+    assert_eq!(body(fx.assist(&f("    xs.fold(0, { a, x -> a$0 + x.age })"), "Move lambda").unwrap()), "    xs.fold(0) { a, x -> a + x.age }");
+    // Concatenation → template.
+    assert_eq!(body(fx.assist(&f("    println(\"Hi \" + u.na$0me + \"!\" + n + \"x\")"), "Convert concatenation").unwrap()), "    println(\"Hi ${u.name}!${n}x\")");
+    assert_eq!(body(fx.assist(&f("    println(\"n=\" + n$0)"), "Convert concatenation").unwrap()), "    println(\"n=$n\")");
+    assert!(fx.assist(&f("    println(n + n$0 + \"x\")"), "Convert concatenation").is_none());
+}
+
+#[test]
+fn extract_function_and_occurrences() {
+    let Some(mut fx) = fixture() else { return };
+    let f = |body: &str| format!("{HEADER}class Svc {{\n    fun run(u: User, n: Int) {{\n{body}\n    }}\n}}\n");
+    // Statements reading two locals, declaring one used afterwards.
+    let out = fx.assist(&f("        val k = 2\n        $0val greeting = u.name + n\n        println(greeting)$1\n        println(greeting + k)"), "Extract function").unwrap();
+    assert_eq!(
+        out,
+        "class Svc {\n    fun run(u: User, n: Int) {\n        val k = 2\n        val greeting = extracted(u, n)\n        println(greeting + k)\n    }\n\n    private fun extracted(u: User, n: Int): String {\n        val greeting = u.name + n\n        println(greeting)\n        return greeting\n    }\n}\n"
+    );
+    // An expression.
+    let out = fx.assist(&f("        println($0u.age * n$1)"), "Extract function").unwrap();
+    assert!(out.contains("        println(extracted(u, n))\n") && out.contains("    private fun extracted(u: User, n: Int): Int = u.age * n\n"), "{out}");
+    // Not with jumps out, or assignments to caller locals.
+    assert!(fx.assist(&f("        $0if (n > 1) return$1"), "Extract function").is_none());
+    assert!(fx.assist(&f("        var c = 0\n        $0c = n$1\n        println(c)"), "Extract function").is_none());
+    // Replace all occurrences.
+    let out = fx.assist(&f("        println(u.name.length)\n        if (n > 0) println($0u.name.length$1 + 1)"), "Extract variable (replace all").unwrap();
+    assert!(out.contains("        val length = u.name.length\n        println(length)\n        if (n > 0) println(length + 1)"), "{out}");
+}

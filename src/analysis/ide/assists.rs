@@ -17,18 +17,23 @@ use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize};
 
 pub const EXTRACT: &str = "refactor.extract";
 pub const REWRITE: &str = "refactor.rewrite";
+pub const INLINE: &str = "refactor.inline";
 
 pub fn assists(snap: &Snapshot, path: &Path, range: TextRange) -> Vec<(&'static str, Fix)> {
     let (Some(e), Some(file)) = (Engine::new(snap, path), snap.file(path)) else { return Vec::new() };
     let mut out = Vec::new();
     if !range.is_empty() {
-        out.extend(extract_variable(&e, file, range).map(|f| (EXTRACT, f)));
+        out.extend(extract_variable(&e, file, range).into_iter().map(|f| (EXTRACT, f)));
+        out.extend(super::extract::extract_function(&e, file, range).map(|f| (EXTRACT, f)));
     }
-    let Some(tok) = e.root.token_at_offset(range.start()).right_biased() else { return out };
+    // Between two tokens: the name or keyword (`n|)` means `n`).
+    let at = e.root.token_at_offset(range.start());
+    let Some(tok) = at.clone().find(|t| t.kind() == SyntaxKind::IDENT || t.kind().is_keyword()).or_else(|| at.right_biased()) else { return out };
     out.extend(explicit_type(&e, file, &tok).map(|f| (REWRITE, f)));
     out.extend(block_body(&e, file, &tok).map(|f| (REWRITE, f)));
     out.extend(argument_names(&e, &tok).map(|f| (REWRITE, f)));
     out.extend(name_it(&e, &tok).map(|f| (REWRITE, f)));
+    out.extend(super::rewrites::rewrites(&e, file, &tok).into_iter().map(|f| (if f.title.starts_with("Inline") { INLINE } else { REWRITE }, f)));
     out
 }
 
@@ -36,7 +41,7 @@ pub fn assists(snap: &Snapshot, path: &Path, range: TextRange) -> Vec<(&'static 
 
 /// `t` written in this file at `at`, with the imports it needs. `None` if it cannot be
 /// written (unknown parts, type parameters of a called function).
-fn type_text(e: &Engine, file: &FileData, t: &TypeRef, at: &SyntaxToken) -> Option<(String, Vec<Edit>)> {
+pub(super) fn type_text(e: &Engine, file: &FileData, t: &TypeRef, at: &SyntaxToken) -> Option<(String, Vec<Edit>)> {
     if !in_scope(t, at) {
         return None;
     }
@@ -83,7 +88,7 @@ fn named(t: &TypeRef, out: &mut Vec<String>) {
 
 /// Contexts that evaluate their contents conditionally or repeatedly: moving an expression
 /// out of them would change when it runs.
-const LAZY: &[SyntaxKind] = &[
+pub(super) const LAZY: &[SyntaxKind] = &[
     SyntaxKind::THEN_BRANCH,
     SyntaxKind::ELSE_BRANCH,
     SyntaxKind::WHEN_ENTRY,
@@ -96,9 +101,50 @@ const LAZY: &[SyntaxKind] = &[
     SyntaxKind::DO_WHILE_EXPR,
 ];
 
-fn extract_variable(e: &Engine, file: &FileData, range: TextRange) -> Option<Fix> {
+fn extract_variable(e: &Engine, file: &FileData, range: TextRange) -> Vec<Fix> {
+    let Some(expr) = selected_expression(e, file, range) else { return Vec::new() };
     let text = &file.text;
-    // The selection without surrounding whitespace, exactly one expression.
+    let value = expr.text().to_string();
+    let mut out = Vec::new();
+    let declare = |statement: &SyntaxNode, name: &str| Edit { range: TextRange::empty(statement.text_range().start()), text: format!("val {name} = {value}\n{}", indent_at(text, statement.text_range().start())) };
+    if let Some(statement) = statement_of(&expr) {
+        let name = unique_name(e, &statement, &name_for(e, &expr));
+        let edits = if statement == expr {
+            vec![Edit { range: expr.text_range(), text: format!("val {name} = {value}") }]
+        } else {
+            vec![declare(&statement, &name), Edit { range: expr.text_range(), text: name.clone() }]
+        };
+        out.push(Fix::new("Extract variable", edits));
+    }
+    // Every equal expression (whitespace aside) in the outermost block of the function or
+    // lambda, declared before the first one.
+    let Some(scope) = expr.ancestors().take_while(|a| !matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR | SyntaxKind::ANONYMOUS_FUNCTION)).filter(|a| a.kind() == SyntaxKind::BLOCK).last() else { return out };
+    let norm = |n: &SyntaxNode| n.text().to_string().split_whitespace().collect::<String>();
+    let key = norm(&expr);
+    let mut occurrences: Vec<SyntaxNode> = scope.descendants().filter(|d| d.kind() == expr.kind() && norm(d) == key).collect();
+    occurrences.dedup_by(|b, a| a.text_range().contains_range(b.text_range()));
+    if occurrences.len() < 2 {
+        return out;
+    }
+    let Some(first_stmt) = statement_of(&occurrences[0]).filter(|s| s.parent().as_ref() == Some(&scope) && *s != occurrences[0]) else { return out };
+    let name = unique_name(e, &first_stmt, &name_for(e, &expr));
+    let mut edits = vec![declare(&first_stmt, &name)];
+    edits.extend(occurrences.iter().map(|o| Edit { range: o.text_range(), text: name.clone() }));
+    out.push(Fix::new(format!("Extract variable (replace all {} occurrences)", occurrences.len()), edits));
+    out
+}
+
+/// The selected expression and the block statement it belongs to, when it can be moved
+/// in front of that statement.
+pub(super) fn extraction_site(e: &Engine, file: &FileData, range: TextRange) -> Option<(SyntaxNode, SyntaxNode)> {
+    let expr = selected_expression(e, file, range)?;
+    let statement = statement_of(&expr)?;
+    Some((expr, statement))
+}
+
+/// The expression exactly covered by the selection (whitespace aside).
+fn selected_expression(e: &Engine, file: &FileData, range: TextRange) -> Option<SyntaxNode> {
+    let text = &file.text;
     let sel = &text[usize::from(range.start())..usize::from(range.end())];
     let lead = sel.len() - sel.trim_start().len();
     let range = TextRange::new(range.start() + TextSize::from(lead as u32), range.start() + TextSize::from(sel.trim_end().len() as u32));
@@ -114,10 +160,12 @@ fn extract_variable(e: &Engine, file: &FileData, range: TextRange) -> Option<Fix
     while expr.parent().is_some_and(|p| p.text_range() == range && is_expression(&p)) {
         expr = expr.parent()?;
     }
-    if expr.text_range() != range || !is_expression(&expr) {
-        return None;
-    }
-    // The statement it belongs to, in a block.
+    (expr.text_range() == range && is_expression(&expr)).then_some(expr)
+}
+
+/// The statement of the enclosing block that `expr` can be evaluated in front of: not
+/// across conditional, short-circuit, loop or lambda code.
+fn statement_of(expr: &SyntaxNode) -> Option<SyntaxNode> {
     let mut statement = expr.clone();
     loop {
         let parent = statement.parent()?;
@@ -132,18 +180,10 @@ fn extract_variable(e: &Engine, file: &FileData, range: TextRange) -> Option<Fix
     if statement.kind() == SyntaxKind::PROPERTY && statement.text_range() == expr.text_range() {
         return None;
     }
-    let name = unique_name(e, &statement, &name_for(e, &expr));
-    let indent = indent_at(text, statement.text_range().start());
-    let value = expr.text().to_string();
-    let edits = if statement == expr {
-        vec![Edit { range, text: format!("val {name} = {value}") }]
-    } else {
-        vec![Edit { range: TextRange::empty(statement.text_range().start()), text: format!("val {name} = {value}\n{indent}") }, Edit { range, text: name.clone() }]
-    };
-    Some(Fix::new("Extract variable", edits))
+    Some(statement)
 }
 
-fn is_expression(n: &SyntaxNode) -> bool {
+pub(super) fn is_expression(n: &SyntaxNode) -> bool {
     use SyntaxKind::*;
     matches!(
         n.kind(),
@@ -152,7 +192,7 @@ fn is_expression(n: &SyntaxNode) -> bool {
 }
 
 /// `child` is the right operand of `&&`, `||`, `?:` or the selector of `?.` in `parent`.
-fn short_circuit_right(parent: &SyntaxNode, child: &SyntaxNode) -> bool {
+pub(super) fn short_circuit_right(parent: &SyntaxNode, child: &SyntaxNode) -> bool {
     let first = parent.first_child().as_ref() == Some(child);
     match parent.kind() {
         SyntaxKind::BINARY_EXPR => !first && parent.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE).is_some_and(|o| matches!(o.text().to_string().as_str(), "&&" | "||" | "?:")),
@@ -188,7 +228,7 @@ fn name_for(e: &Engine, expr: &SyntaxNode) -> String {
 }
 
 /// `base`, or `base2`, `base3`... if a local of that name is visible at `at`.
-fn unique_name(e: &Engine, at: &SyntaxNode, base: &str) -> String {
+pub(super) fn unique_name(e: &Engine, at: &SyntaxNode, base: &str) -> String {
     let taken: Vec<String> = e.locals_at(at).into_iter().map(|l| l.name).collect();
     let mut name = base.to_string();
     let mut i = 2;

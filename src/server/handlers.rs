@@ -813,6 +813,37 @@ pub fn new_flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
+pub fn code_lenses(cx: &Ctx, path: &Path) -> Result<Vec<lsp_types::CodeLens>> {
+    let Some(file) = cx.snap.file(path) else { return Ok(Vec::new()) };
+    let index = LineIndex::new(&file.text);
+    let uri = path_to_uri(path);
+    let lenses = crate::analysis::ide::lens_targets(cx.snap, path)
+        .into_iter()
+        .map(|r| {
+            let range = index.range(&file.text, r, cx.enc);
+            lsp_types::CodeLens { range, command: None, data: Some(serde_json::json!({ "uri": uri.as_str(), "position": range.start })) }
+        })
+        .collect();
+    cx.check()?;
+    Ok(lenses)
+}
+
+/// Count the references of the lens's declaration (`kotlin.showReferences` with the
+/// editor.action.showReferences arguments: uri, position, locations).
+pub fn resolve_code_lens(cx: &Ctx, mut lens: lsp_types::CodeLens) -> Result<lsp_types::CodeLens> {
+    let data = lens.data.clone().unwrap_or_default();
+    let (Some(uri), Ok(pos)) = (data["uri"].as_str(), serde_json::from_value::<lsp_types::Position>(data["position"].clone())) else { return Ok(lens) };
+    let Some(path) = uri.parse::<lsp_types::Uri>().ok().and_then(|u| crate::util::uri_to_path(&u)) else { return Ok(lens) };
+    let locations = references(cx, &path, pos, false)?;
+    let title = match locations.len() {
+        1 => "1 reference".to_string(),
+        n => format!("{n} references"),
+    };
+    lens.command = Some(lsp_types::Command { title, command: "kotlin.showReferences".into(), arguments: Some(vec![serde_json::json!(uri), serde_json::json!(pos), serde_json::json!(locations)]) });
+    Ok(lens)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

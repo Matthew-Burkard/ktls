@@ -135,6 +135,7 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
                 lsp_types::CodeActionKind::QUICKFIX,
                 lsp_types::CodeActionKind::REFACTOR_REWRITE,
                 lsp_types::CodeActionKind::REFACTOR_EXTRACT,
+                lsp_types::CodeActionKind::REFACTOR_INLINE,
                 lsp_types::CodeActionKind::new("source.generate"),
                 lsp_types::CodeActionKind::SOURCE_FIX_ALL,
                 lsp_types::CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
@@ -143,6 +144,7 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
             work_done_progress_options: Default::default(),
         })),
         workspace_symbol_provider: Some(lsp_types::OneOf::Left(true)),
+        code_lens_provider: Some(lsp_types::CodeLensOptions { resolve_provider: Some(true) }),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
             commands: vec![COMMAND_RELOAD.into(), COMMAND_MODEL.into()],
             work_done_progress_options: Default::default(),
@@ -390,6 +392,18 @@ impl Server {
                 let sub = method == TypeHierarchySubtypes::METHOD;
                 let Ok((id, params)) = req.extract::<lsp_types::TypeHierarchySupertypesParams>(&method) else { return };
                 self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::type_hierarchy(cx, &params.item, sub)?).unwrap()));
+            }
+            CodeLensRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::CodeLensParams>(CodeLensRequest::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::code_lenses(cx, &path)?).unwrap())
+                });
+            }
+            CodeLensResolve::METHOD => {
+                let Ok((id, lens)) = req.extract::<lsp_types::CodeLens>(CodeLensResolve::METHOD) else { return };
+                self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::resolve_code_lens(cx, lens)?).unwrap()));
             }
             References::METHOD => {
                 let Ok((id, params)) = req.extract::<lsp_types::ReferenceParams>(References::METHOD) else { return };
