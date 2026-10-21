@@ -566,6 +566,10 @@ fn null_checks(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
 /// lambda (inline lambdas inherit their context).
 fn suspend_call(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
     let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    // Cheap first: the resolved target is `suspend`.
+    if !e.resolve_name_ref(&callee).iter().any(|d| matches!(d, Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::SUSPEND))) {
+        return;
+    }
     // Every candidate (at all resolution levels) is `suspend`.
     let Some(candidates) = e.call_candidates(&callee) else { return };
     let suspend = !candidates.is_empty() && candidates.iter().all(|(sym, _)| sym.kind == SymbolKind::Function && sym.modifiers.has(Modifiers::SUSPEND));

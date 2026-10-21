@@ -325,6 +325,12 @@ pub struct Engine<'s> {
     imported: RefCell<HashMap<String, Vec<Symbol>>>,
     /// Memoized lambda signatures, by lambda range.
     lambdas: RefCell<HashMap<TextRange, Option<(Option<TypeRef>, Vec<TypeRef>)>>>,
+    /// Per local (by name range): its scope contains checks that may smart cast it.
+    narrowable: RefCell<HashMap<TextRange, bool>>,
+    /// Resolutions of NAME_REF nodes, by range.
+    names: RefCell<HashMap<TextRange, Vec<Def>>>,
+    call_targets: RefCell<HashMap<(TextRange, bool), Option<(Symbol, Subst)>>>,
+    candidates: RefCell<HashMap<TextRange, Option<Vec<(Symbol, Subst)>>>>,
 }
 
 impl<'s> Engine<'s> {
@@ -346,6 +352,10 @@ impl<'s> Engine<'s> {
             source_members: RefCell::new(HashMap::new()),
             imported: RefCell::new(HashMap::new()),
             lambdas: RefCell::new(HashMap::new()),
+            narrowable: RefCell::new(HashMap::new()),
+            names: RefCell::new(HashMap::new()),
+            call_targets: RefCell::new(HashMap::new()),
+            candidates: RefCell::new(HashMap::new()),
         })
     }
 
@@ -1183,7 +1193,10 @@ impl<'s> Engine<'s> {
                     },
                     Some(Def::Package(p)) => Qualifier::Package(p.clone()),
                     Some(d) => match self.def_type(d, None) {
-                        Some(t) => Qualifier::Value(t),
+                        Some(t) => Qualifier::Value(match d {
+                            Def::Local(l) => self.smart_cast(e, l, t),
+                            _ => t,
+                        }),
                         None => Qualifier::Unknown,
                     },
                     None => Qualifier::Unknown,
@@ -1229,6 +1242,20 @@ impl<'s> Engine<'s> {
 
     /// Resolve a NAME_REF node (in any position).
     pub fn resolve_name_ref(&self, nr: &SyntaxNode) -> Vec<Def> {
+        let key = nr.text_range();
+        if let Some(hit) = self.names.borrow().get(&key) {
+            return hit.clone();
+        }
+        // Results cut short by the recursion guard are not cached.
+        let complete = DEPTH.get() < 40;
+        let r = self.resolve_name_ref_uncached(nr);
+        if complete {
+            self.names.borrow_mut().insert(key, r.clone());
+        }
+        r
+    }
+
+    fn resolve_name_ref_uncached(&self, nr: &SyntaxNode) -> Vec<Def> {
         let Some(tok) = token_at(nr, SyntaxKind::IDENT).or_else(|| token_at(nr, SyntaxKind::THIS_KW)) else { return Vec::new() };
         let name = ast::ident_text(&tok);
         let parent = nr.parent();
@@ -1316,6 +1343,19 @@ impl<'s> Engine<'s> {
 
     /// Resolve the function invoked by a CALL_EXPR, binding type parameters from arguments.
     pub fn resolve_call_target(&self, call: &SyntaxNode, infer_lambdas: bool) -> Option<(Symbol, Subst)> {
+        let key = (call.text_range(), infer_lambdas);
+        if let Some(hit) = self.call_targets.borrow().get(&key) {
+            return hit.clone();
+        }
+        let complete = DEPTH.get() < 40;
+        let r = self.resolve_call_target_uncached(call, infer_lambdas);
+        if complete {
+            self.call_targets.borrow_mut().insert(key, r.clone());
+        }
+        r
+    }
+
+    fn resolve_call_target_uncached(&self, call: &SyntaxNode, infer_lambdas: bool) -> Option<(Symbol, Subst)> {
         let callee = first_expr_child(call)?;
         let defs = match callee.kind() {
             SyntaxKind::NAME_REF => self.resolve_name_ref(&callee),
@@ -1419,7 +1459,11 @@ impl<'s> Engine<'s> {
             PAREN_EXPR | ANNOTATED_EXPR | LABELED_EXPR => e.children().filter(|c| !matches!(c.kind(), LABEL | ANNOTATION)).last().and_then(|c| self.type_of(&c)),
             NAME_REF => {
                 let defs = self.resolve_name_ref(e);
-                defs.first().and_then(|d| self.def_type(d, None))
+                let t = defs.first().and_then(|d| self.def_type(d, None))?;
+                match defs.first() {
+                    Some(Def::Local(l)) => Some(self.smart_cast(e, l, t)),
+                    _ => Some(t),
+                }
             }
             THIS_EXPR => self.implicit_receivers(e).into_iter().next().map(|(t, _)| t),
             SUPER_EXPR => {
@@ -2360,6 +2404,19 @@ impl<'s> Engine<'s> {
     /// applies). `None` when the candidates are not fully known: local functions, values
     /// that may be invoked, unknown receivers, SAM constructors.
     pub fn call_candidates(&self, callee: &SyntaxNode) -> Option<Vec<(Symbol, Subst)>> {
+        let key = callee.text_range();
+        if let Some(hit) = self.candidates.borrow().get(&key) {
+            return hit.clone();
+        }
+        let complete = DEPTH.get() < 40;
+        let r = self.call_candidates_uncached(callee);
+        if complete {
+            self.candidates.borrow_mut().insert(key, r.clone());
+        }
+        r
+    }
+
+    fn call_candidates_uncached(&self, callee: &SyntaxNode) -> Option<Vec<(Symbol, Subst)>> {
         let tok = token_at(callee, SyntaxKind::IDENT)?;
         let name = ast::ident_text(&tok);
         let call = callee.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR)?;
@@ -2471,3 +2528,243 @@ fn ctor_params_visible(at: &SyntaxNode, class: &SyntaxNode) -> bool {
         _ => false,
     }
 }
+
+// ------------------------------------------------------------ smart casts
+
+/// What a condition says about a variable.
+#[derive(Clone, Debug)]
+enum Fact {
+    Is(TypeRef),
+    NotNull,
+}
+
+impl<'s> Engine<'s> {
+    /// The type of the local `l` at the use `at`, narrowed by the checks that must have
+    /// passed to get there: enclosing `if`/`when` branches, `&&`/`||` operands, and earlier
+    /// guards in the same block (`if (x == null) return`, `require(x is T)`). Only for
+    /// locals that cannot change: `val`s, parameters and `var`s never assigned again.
+    pub fn smart_cast(&self, at: &SyntaxNode, l: &LocalDef, declared: TypeRef) -> TypeRef {
+        if !matches!(l.kind, LocalKind::Val | LocalKind::Var | LocalKind::Parameter) || !self.narrowable(at, l) || l.kind == LocalKind::Var && !self.never_reassigned(at, l) {
+            return declared;
+        }
+        let mut facts: Vec<Fact> = Vec::new();
+        let mut child = at.clone();
+        while let Some(parent) = child.parent() {
+            // Facts established before the declaration are about something else.
+            if parent.text_range().contains_range(l.name_range) && parent.kind() != SyntaxKind::BLOCK {
+                break;
+            }
+            match parent.kind() {
+                SyntaxKind::IF_EXPR => {
+                    if let Some(cond) = parent.children().find(|c| c.kind() == SyntaxKind::CONDITION).and_then(|c| c.first_child()) {
+                        match child.kind() {
+                            SyntaxKind::THEN_BRANCH => self.facts(&cond, l, true, &mut facts),
+                            SyntaxKind::ELSE_BRANCH => self.facts(&cond, l, false, &mut facts),
+                            _ => {}
+                        }
+                    }
+                }
+                SyntaxKind::BINARY_EXPR if parent.first_child().as_ref() != Some(&child) => {
+                    let op = parent.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE).map(|o| o.text().to_string());
+                    if let Some(left) = parent.first_child() {
+                        match op.as_deref() {
+                            Some("&&") => self.facts(&left, l, true, &mut facts),
+                            Some("||") => self.facts(&left, l, false, &mut facts),
+                            _ => {}
+                        }
+                    }
+                }
+                SyntaxKind::WHEN_ENTRY if child.kind() == SyntaxKind::BODY => self.when_facts(&parent, l, &mut facts),
+                SyntaxKind::BLOCK => {
+                    for stmt in parent.children().take_while(|s| *s != child) {
+                        self.guard_facts(&stmt, l, &mut facts);
+                    }
+                    if parent.text_range().contains_range(l.name_range) {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            child = parent;
+        }
+        // The innermost `is` wins; `!= null` strips nullability.
+        let mut t = declared;
+        let mut not_null = false;
+        let mut cast = None;
+        for f in facts {
+            match f {
+                Fact::Is(ty) if cast.is_none() => cast = Some(ty),
+                Fact::NotNull => not_null = true,
+                _ => {}
+            }
+        }
+        if let Some(c) = cast {
+            t = c;
+        }
+        if not_null { non_null(t) } else { t }
+    }
+
+    /// Cheap pre-check: the scope of `l` has `is`/`!is`, `null` or a `require`-like call.
+    fn narrowable(&self, at: &SyntaxNode, l: &LocalDef) -> bool {
+        if let Some(&hit) = self.narrowable.borrow().get(&l.name_range) {
+            return hit;
+        }
+        let scope = at.ancestors().find(|a| a.text_range().contains_range(l.name_range) && matches!(a.kind(), SyntaxKind::BLOCK | SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR | SyntaxKind::KOTLIN_FILE));
+        let hit = scope.is_some_and(|s| {
+            s.descendants_with_tokens().filter_map(|t| t.into_token()).any(|t| match t.kind() {
+                SyntaxKind::IS_KW | SyntaxKind::NOT_IS_KW | SyntaxKind::NULL_KW => true,
+                SyntaxKind::IDENT => matches!(t.text(), "require" | "check" | "assert" | "requireNotNull" | "checkNotNull"),
+                _ => false,
+            })
+        });
+        self.narrowable.borrow_mut().insert(l.name_range, hit);
+        hit
+    }
+
+    /// `r` is a use of the local `l`.
+    fn refers(&self, r: &SyntaxNode, l: &LocalDef) -> bool {
+        r.kind() == SyntaxKind::NAME_REF && r.text() == l.name.as_str() && self.find_local(r, &l.name).is_some_and(|x| x.name_range == l.name_range)
+    }
+
+    /// What `cond` being `truth` says about `l` (facts are collected innermost first).
+    fn facts(&self, cond: &SyntaxNode, l: &LocalDef, truth: bool, out: &mut Vec<Fact>) {
+        match cond.kind() {
+            SyntaxKind::PAREN_EXPR => {
+                if let Some(inner) = cond.children().last() {
+                    self.facts(&inner, l, truth, out);
+                }
+            }
+            SyntaxKind::PREFIX_EXPR if cond.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE).is_some_and(|o| o.text() == "!") => {
+                if let Some(inner) = cond.children().last() {
+                    self.facts(&inner, l, !truth, out);
+                }
+            }
+            SyntaxKind::IS_EXPR => {
+                let negated = cond.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE).is_some_and(|o| o.text() == "!is");
+                if negated != truth
+                    && cond.first_child().is_some_and(|r| self.refers(&r, l))
+                    && let Some(ty) = cond.children().find_map(ast::TypeRef::cast)
+                {
+                    out.push(Fact::Is(self.resolve_syntax_type(&ty)));
+                }
+            }
+            SyntaxKind::BINARY_EXPR => {
+                let op = cond.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE).map(|o| o.text().to_string()).unwrap_or_default();
+                let operands: Vec<SyntaxNode> = cond.children().filter(|c| c.kind() != SyntaxKind::OPERATION_REFERENCE).collect();
+                let [left, right] = operands.as_slice() else { return };
+                match (op.as_str(), truth) {
+                    ("&&", true) | ("||", false) => {
+                        self.facts(right, l, truth, out);
+                        self.facts(left, l, truth, out);
+                    }
+                    ("!=" | "!==", _) | ("==" | "===", _) => {
+                        let null = |n: &SyntaxNode| n.kind() == SyntaxKind::LITERAL && n.text() == "null";
+                        let ours = (self.refers(left, l) && null(right)) || (self.refers(right, l) && null(left));
+                        let not_null = op.starts_with('!') == truth;
+                        if ours && not_null {
+                            out.push(Fact::NotNull);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The facts holding in the body of `entry`: its condition, and the earlier entries'
+    /// conditions not having matched.
+    fn when_facts(&self, entry: &SyntaxNode, l: &LocalDef, out: &mut Vec<Fact>) {
+        let Some(when) = entry.parent() else { return };
+        let subject = when.children().find(|c| c.kind() == SyntaxKind::WHEN_SUBJECT).and_then(|s| s.first_child());
+        let conditions = |e: &SyntaxNode| e.children().filter(|c| c.kind() == SyntaxKind::WHEN_CONDITION).collect::<Vec<_>>();
+        let about_l = subject.as_ref().is_some_and(|s| self.refers(s, l));
+        if subject.is_some() && !about_l {
+            return;
+        }
+        let fact_of = |c: &SyntaxNode, truth: bool, out: &mut Vec<Fact>| {
+            if about_l {
+                let is = c.children().find(|x| x.kind() == SyntaxKind::OPERATION_REFERENCE).map(|o| o.text().to_string());
+                match is.as_deref() {
+                    Some("is") if truth => {
+                        if let Some(ty) = c.children().find_map(ast::TypeRef::cast) {
+                            out.push(Fact::Is(self.resolve_syntax_type(&ty)));
+                        }
+                    }
+                    Some("!is") if !truth => {
+                        if let Some(ty) = c.children().find_map(ast::TypeRef::cast) {
+                            out.push(Fact::Is(self.resolve_syntax_type(&ty)));
+                        }
+                    }
+                    None if !truth && c.first_child().is_some_and(|x| x.kind() == SyntaxKind::LITERAL && x.text() == "null") => out.push(Fact::NotNull),
+                    _ => {}
+                }
+            } else if let Some(e) = c.first_child() {
+                self.facts(&e, l, truth, out);
+            }
+        };
+        // This entry's single condition held.
+        if let [c] = conditions(entry).as_slice() {
+            fact_of(c, true, out);
+        }
+        // Every condition of the earlier entries failed.
+        for prev in when.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY).take_while(|e| e != entry) {
+            for c in conditions(&prev) {
+                fact_of(&c, false, out);
+            }
+        }
+    }
+
+    /// Facts after the statement `stmt` completed normally: `if (c) return` (c was false),
+    /// `require(c)` / `check(c)` (c was true), `requireNotNull(x)` / `checkNotNull(x)`.
+    fn guard_facts(&self, stmt: &SyntaxNode, l: &LocalDef, out: &mut Vec<Fact>) {
+        match stmt.kind() {
+            SyntaxKind::IF_EXPR => {
+                let branch = |k: SyntaxKind| stmt.children().find(|c| c.kind() == k).and_then(|b| b.first_child());
+                let Some(cond) = stmt.children().find(|c| c.kind() == SyntaxKind::CONDITION).and_then(|c| c.first_child()) else { return };
+                let (then, els) = (branch(SyntaxKind::THEN_BRANCH), branch(SyntaxKind::ELSE_BRANCH));
+                match (then.as_ref().is_some_and(jumps), els.as_ref().is_some_and(jumps)) {
+                    (true, false) => self.facts(&cond, l, false, out),
+                    (false, true) => self.facts(&cond, l, true, out),
+                    _ => {}
+                }
+            }
+            SyntaxKind::CALL_EXPR => {
+                let name = stmt.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF).map(|c| c.text().to_string()).unwrap_or_default();
+                let first = stmt.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).and_then(|a| a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT)).and_then(|a| a.children().last());
+                let Some(arg) = first else { return };
+                match name.as_str() {
+                    "require" | "check" | "assert" => self.facts(&arg, l, true, out),
+                    "requireNotNull" | "checkNotNull" if self.refers(&arg, l) => out.push(Fact::NotNull),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A `var` with no assignment, increment or decrement anywhere in its scope.
+    fn never_reassigned(&self, at: &SyntaxNode, l: &LocalDef) -> bool {
+        let Some(scope) = at.ancestors().find(|a| a.text_range().contains_range(l.name_range) && matches!(a.kind(), SyntaxKind::BLOCK | SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR)) else { return false };
+        !scope.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == l.name.as_str()).any(|r| {
+            let Some(p) = r.parent() else { return false };
+            match p.kind() {
+                SyntaxKind::BINARY_EXPR => p.first_child().as_ref() == Some(&r) && crate::analysis::lints::assignment_op(&p).is_some(),
+                SyntaxKind::PREFIX_EXPR | SyntaxKind::POSTFIX_EXPR => p.descendants_with_tokens().any(|t| matches!(t.kind(), SyntaxKind::PLUS2 | SyntaxKind::MINUS2)),
+                _ => false,
+            }
+        })
+    }
+}
+
+/// A branch that never completes normally: `return`, `throw`, `break`, `continue`,
+/// `error()`/`TODO()`, or a block ending in one.
+fn jumps(n: &SyntaxNode) -> bool {
+    match n.kind() {
+        SyntaxKind::RETURN_EXPR | SyntaxKind::THROW_EXPR | SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR => true,
+        SyntaxKind::CALL_EXPR => n.first_child().is_some_and(|c| matches!(c.text().to_string().as_str(), "error" | "TODO" | "fail")),
+        SyntaxKind::BLOCK => n.children().last().is_some_and(|c| jumps(&c)),
+        _ => false,
+    }
+}
+

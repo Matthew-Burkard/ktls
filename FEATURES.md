@@ -40,9 +40,9 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 ### 1.3 Semantic analysis
 - [x] [P0] Symbol table: packages, imports (incl. aliases, star imports, default imports)
 - [~] [P0] Name resolution with Kotlin scope rules (locals, members, extensions, implicit receivers, companion, `this@label`) — *partial: imports and type references (type params, local/nested/inherited classifiers, imports, default imports); expressions not yet*
-- [ ] [P0] Type inference (locals, lambdas, generic calls, builder inference, smart casts)
+- [~] [P0] Type inference (locals, lambdas, generic calls, builder inference, smart casts) — *partial: locals, lambda parameters and receivers from the expected function type, type arguments bound from arguments and receivers, smart casts (see flow analysis); no builder inference*
 - [ ] [P0] Overload resolution (incl. extension vs member priority, SAM conversion, default/named args, varargs)
-- [ ] [P1] Flow analysis: smart casts, definite assignment, reachability, `Nothing` propagation, contracts
+- [~] [P1] Flow analysis: smart casts, definite assignment, reachability, `Nothing` propagation, contracts — *partial: smart casts of `val`s, parameters and never-reassigned `var`s from `is`/`!is`/`== null`/`!= null` in `if`/`else`, `&&`/`||`, `when` (with and without subject, earlier entries negated), early-exit guards (`if (…) return/throw/break/continue/error()`), `require`/`check`/`assert`, `requireNotNull`/`checkNotNull`*
 - [~] [P1] Nullability: platform types, `@Nullable/@NotNull` (JSR-305, JSpecify, AndroidX) — *partial: modelled for library signatures; not yet checked*
 - [~] [P1] Generics: variance (declaration & use-site), star projections, reified, type bounds, definitely-non-null `T & Any` — *partial: represented in symbols; not yet checked*
 - [ ] [P1] Delegation (`by lazy`, `by Delegates.observable`, class delegation, `provideDelegate`)
@@ -473,9 +473,9 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 
 ## 8. Formatting
 
-- [ ] [P0] `textDocument/formatting` — full-document format per Kotlin coding conventions
-- [ ] [P1] `textDocument/rangeFormatting` (+ `rangesFormatting`)
-- [ ] [P1] `textDocument/onTypeFormatting` — auto-indent on `\n`, `}`, `)`; KDoc `*` continuation
+- [~] [P0] `textDocument/formatting` — full-document format per Kotlin coding conventions — *partial: indentation (blocks, continuation of `.`/`?.`/`?:`/operators/`=`/`when` arrows, brace-less bodies, accessors, supertype lists, block comments moving with their first line; raw strings untouched), trailing whitespace and final newline, with the client's tab size/spaces; spacing inside lines is kept. On the corpus: whitespace-only, idempotent, 0.1–0.5% of lines re-indented on IntelliJ-formatted projects*
+- [~] [P1] `textDocument/rangeFormatting` (+ `rangesFormatting`) — *partial: `rangeFormatting` (lines starting in the range)*
+- [~] [P1] `textDocument/onTypeFormatting` — auto-indent on `\n`, `}`, `)`; KDoc `*` continuation — *partial: re-indent the line on `}`*
 - [ ] [P1] Respect `.editorconfig` (`ktlint_*`, `ij_kotlin_*` keys: indent, max line length, trailing commas, import layout, wildcard thresholds)
 - [ ] [P1] Code style presets: Kotlin official, ktlint (standard / Android), Android Studio
 - [ ] [P2] Pluggable external formatters: ktfmt (Google/Kotlinlang/Meta styles), ktlint

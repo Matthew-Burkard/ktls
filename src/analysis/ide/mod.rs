@@ -6,6 +6,7 @@ pub mod completion;
 pub mod create;
 pub mod extract;
 pub mod file_rename;
+pub mod format;
 pub mod generate;
 pub mod hierarchy;
 pub mod imports;

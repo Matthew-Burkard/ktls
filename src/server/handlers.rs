@@ -813,6 +813,22 @@ pub fn new_flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
+/// Indentation and trailing whitespace for the file, or the lines starting in `range`.
+pub fn format(cx: &Ctx, path: &Path, options: &lsp_types::FormattingOptions, range: Option<lsp_types::Range>) -> Result<Option<Vec<lsp_types::TextEdit>>> {
+    let Some(file) = cx.snap.file(path) else { return Ok(None) };
+    if file.language != crate::analysis::source::Language::Kotlin {
+        return Ok(None);
+    }
+    let text = &file.text;
+    let index = LineIndex::new(text);
+    let unit = if options.insert_spaces { " ".repeat(options.tab_size.max(1) as usize) } else { "\t".to_string() };
+    let range = range.map(|r| crate::syntax::TextRange::new(index.offset(text, r.start, cx.enc), index.offset(text, r.end, cx.enc)));
+    let root = file.parse().syntax();
+    let edits = crate::analysis::ide::format::format(&root, text, &unit, range);
+    cx.check()?;
+    Ok(Some(edits.into_iter().map(|(r, t)| lsp_types::TextEdit { range: index.range(text, r, cx.enc), new_text: t }).collect()))
+}
+
 /// Package and import updates for moved Kotlin files (folders: every file inside).
 pub fn will_rename_files(cx: &Ctx, params: &lsp_types::RenameFilesParams) -> Result<Option<lsp_types::WorkspaceEdit>> {
     let mut moves: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();

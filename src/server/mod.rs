@@ -145,6 +145,9 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
         })),
         workspace_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         code_lens_provider: Some(lsp_types::CodeLensOptions { resolve_provider: Some(true) }),
+        document_formatting_provider: Some(lsp_types::OneOf::Left(true)),
+        document_range_formatting_provider: Some(lsp_types::OneOf::Left(true)),
+        document_on_type_formatting_provider: Some(lsp_types::DocumentOnTypeFormattingOptions { first_trigger_character: "}".into(), more_trigger_character: None }),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
             commands: vec![COMMAND_RELOAD.into(), COMMAND_MODEL.into()],
             work_done_progress_options: Default::default(),
@@ -406,6 +409,24 @@ impl Server {
                 let sub = method == TypeHierarchySubtypes::METHOD;
                 let Ok((id, params)) = req.extract::<lsp_types::TypeHierarchySupertypesParams>(&method) else { return };
                 self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::type_hierarchy(cx, &params.item, sub)?).unwrap()));
+            }
+            Formatting::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::DocumentFormattingParams>(Formatting::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::format(cx, &path.ok_or(Cancelled)?, &params.options, None)?).unwrap()));
+            }
+            RangeFormatting::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::DocumentRangeFormattingParams>(RangeFormatting::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::format(cx, &path.ok_or(Cancelled)?, &params.options, Some(params.range))?).unwrap()));
+            }
+            OnTypeFormatting::METHOD => {
+                // `}` typed: re-indent its line.
+                let Ok((id, params)) = req.extract::<lsp_types::DocumentOnTypeFormattingParams>(OnTypeFormatting::METHOD) else { return };
+                let tdp = params.text_document_position;
+                let path = self.path_of(&tdp.text_document.uri);
+                let line = lsp_types::Range { start: lsp_types::Position { line: tdp.position.line, character: 0 }, end: lsp_types::Position { line: tdp.position.line, character: 0 } };
+                self.spawn(id, move |cx| Ok(serde_json::to_value(handlers::format(cx, &path.ok_or(Cancelled)?, &params.options, Some(line))?).unwrap()));
             }
             WillRenameFiles::METHOD => {
                 let Ok((id, params)) = req.extract::<lsp_types::RenameFilesParams>(WillRenameFiles::METHOD) else { return };

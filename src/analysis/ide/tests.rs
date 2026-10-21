@@ -1372,3 +1372,52 @@ fn moving_files_updates_packages_and_imports() {
     // A rename in the same directory changes nothing.
     assert!(crate::analysis::ide::file_rename::rename_file_edits(&snap, &fx.root.join("src/app/util/Text.kt"), &fx.root.join("src/app/util/Words.kt")).is_empty());
 }
+
+#[test]
+fn smart_casts() {
+    let Some(mut fx) = fixture() else { return };
+    // The type of the name before `$0`.
+    let ty = |fx: &mut Fx, body: &str| -> String {
+        let text = format!("{HEADER}open class Shape\nclass Circle(val r: Int) : Shape()\n\nfun run(s: Shape, n: String?, any: Any) {{\n{body}\n}}\n");
+        let (path, offset) = fx.open(&text);
+        let snap = fx.host.snapshot();
+        let e = crate::analysis::ide::infer::Engine::new(&snap, &path).unwrap();
+        let tok = e.root.token_at_offset(offset).left_biased().unwrap();
+        let nr = tok.parent().unwrap();
+        e.type_of(&nr).map(|t| t.display()).unwrap_or_default()
+    };
+    assert_eq!(ty(&mut fx, "    if (s is Circle) println(s$0)"), "Circle");
+    assert_eq!(ty(&mut fx, "    if (s !is Circle) return\n    println(s$0)"), "Circle");
+    assert_eq!(ty(&mut fx, "    if (s is Circle && s$0.r > 1) {}"), "Circle");
+    assert_eq!(ty(&mut fx, "    if (s !is Circle || s$0.r > 1) {}"), "Circle");
+    assert_eq!(ty(&mut fx, "    if (n != null) println(n$0)"), "String");
+    assert_eq!(ty(&mut fx, "    if (n == null) println(1) else println(n$0)"), "String");
+    assert_eq!(ty(&mut fx, "    requireNotNull(n)\n    println(n$0)"), "String");
+    assert_eq!(ty(&mut fx, "    require(any is String)\n    println(any$0)"), "String");
+    assert_eq!(ty(&mut fx, "    when (s) {\n        is Circle -> println(s$0)\n        else -> {}\n    }"), "Circle");
+    assert_eq!(ty(&mut fx, "    when {\n        n == null -> {}\n        else -> println(n$0)\n    }"), "String");
+    // No narrowing outside the branch or for reassigned vars.
+    assert_eq!(ty(&mut fx, "    if (s is Circle) println(1)\n    println(s$0)"), "Shape");
+    assert_eq!(ty(&mut fx, "    var v: String? = n\n    if (v != null) {\n        v = null\n        println(v$0)\n    }"), "String?");
+    // Members of the narrowed type resolve (completion, hover).
+    let labels = fx.labels(&format!("{HEADER}open class Shape\nclass Circle(val r: Int) : Shape()\nfun run(s: Shape) {{\n    if (s is Circle) s.$0\n}}\n"));
+    assert!(labels.iter().any(|l| l == "r"), "{labels:?}");
+}
+
+#[test]
+fn formatting() {
+    let fmt = |text: &str| {
+        let root = crate::syntax::parse(text, false).syntax();
+        let mut edits = crate::analysis::ide::format::format(&root, text, "    ", None);
+        edits.sort_by_key(|(r, _)| std::cmp::Reverse(r.start()));
+        let mut out = text.to_string();
+        for (r, t) in edits {
+            out.replace_range(usize::from(r.start())..usize::from(r.end()), &t);
+        }
+        out
+    };
+    let messy = "package a\n\nclass A(\nval x: Int,\n      val y: Int,\n) : Base() {\n  /**\n   * Doc.\n   */\n  fun f(n: Int?): Int {   \nif (n == null &&\nx > 0) {\n return 0\n      }\n  val s = n\n?.toString()\n   ?: \"\"\n        return when (n) {\n 1 ->\n2\nelse -> s.length\n}\n}\n\nval p: Int\nget() = 1\n\n  fun g() =\n  if (x > 1) 1\n  else 2\n\n      val t = \"\"\"\n   keep\n      \"\"\"\n}";
+    let want = "package a\n\nclass A(\n    val x: Int,\n    val y: Int,\n) : Base() {\n    /**\n     * Doc.\n     */\n    fun f(n: Int?): Int {\n        if (n == null &&\n            x > 0) {\n            return 0\n        }\n        val s = n\n            ?.toString()\n            ?: \"\"\n        return when (n) {\n            1 ->\n                2\n            else -> s.length\n        }\n    }\n\n    val p: Int\n        get() = 1\n\n    fun g() =\n        if (x > 1) 1\n        else 2\n\n    val t = \"\"\"\n   keep\n      \"\"\"\n}\n";
+    assert_eq!(fmt(messy), want);
+    assert_eq!(fmt(want), want);
+}
