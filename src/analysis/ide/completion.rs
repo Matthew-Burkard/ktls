@@ -110,6 +110,9 @@ pub fn complete(snap: &Snapshot, path: &Path, offset: TextSize, opts: Options) -
     if o > file.text.len() || !file.text.is_char_boundary(o) {
         return None;
     }
+    if let Some(c) = kdoc_completion(snap, file, offset, opts) {
+        return Some(c);
+    }
     // Parse the text with the marker; the rest of the snapshot is unchanged.
     let text = format!("{}{MARKER}{}", &file.text[..o], &file.text[o..]);
     let data = FileData::new(path.to_path_buf(), Arc::from(text.as_str()), file.version)?;
@@ -148,6 +151,57 @@ pub fn complete(snap: &Snapshot, path: &Path, offset: TextSize, opts: Options) -
     items.sort_by_cached_key(key);
     items.truncate(MAX_ITEMS);
     Some(Completion { range: TextRange::new(start, offset), items, incomplete: truncated || empty_prefix })
+}
+
+/// Names in a KDoc link (`[Na|`, `[Type.me|`, `@param |`): the declaration's parameters,
+/// names in its scope, or members of the qualifier. `None` outside a link.
+fn kdoc_completion(snap: &Snapshot, file: &Arc<FileData>, offset: TextSize, opts: Options) -> Option<Completion> {
+    use super::kdoc;
+    let root = file.parse().syntax();
+    let tok = kdoc::kdoc_at(&root, offset)?;
+    let link = kdoc::link_at(&tok, offset, true)?;
+    let e = Engine::new(snap, &file.path)?;
+    // The engine has its own tree: find the same declaration there.
+    let decl = e.root.covering_element(link.decl.text_range()).ancestors().find(|a| a.text_range() == link.decl.text_range() && a.kind() == link.decl.kind())?;
+    let (prefix, range) = link.segments.last()?.clone();
+    let range = TextRange::new(range.start(), offset);
+    let mut c = Collector { e: &e, file, prefix: prefix[..usize::from(range.len()).min(prefix.len())].to_string(), opts, next_char: None, offset, items: Vec::new(), seen: HashSet::new(), truncated: false };
+    let at = kdoc::anchor(&decl);
+    if link.segments.len() == 1 {
+        for (name, _) in kdoc::parameters(&decl) {
+            let mut item = Collector::item(&name, ItemKind::Variable, 0);
+            item.detail = Some("parameter".into());
+            c.push(item);
+        }
+        c.scope(&at, false, true);
+        c.types(&at, &[]);
+    } else {
+        let qualifier = kdoc::Link { segments: link.segments[..link.segments.len() - 1].to_vec(), decl };
+        match kdoc::resolve(&e, &qualifier).first() {
+            Some(Def::Package(p)) => c.package_contents(p, 3, false, false),
+            Some(Def::Symbol { sym, .. }) if sym.kind.is_classifier() => {
+                let cls = e.classifier(&sym.fq_name)?;
+                let (nested, statics) = e.all_static_members(&cls);
+                for (n, fq) in nested {
+                    c.classifier(&n, &fq, 1, false);
+                }
+                for (m, s) in statics.into_iter().chain(e.all_members(&class_type(cls.symbol()))) {
+                    c.symbol(&m, &s, 1, true, false);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Names only: no imports, parentheses or snippets.
+    let mut items: Vec<Item> = c.items.into_iter().filter(|i| i.additional.is_empty()).collect();
+    for i in &mut items {
+        i.insert = None;
+        i.snippet = false;
+        i.range = None;
+    }
+    items.sort_by_cached_key(|i| (i.rank, i.label.to_lowercase()));
+    items.dedup_by(|a, b| a.label == b.label);
+    Some(Completion { range, items, incomplete: c.truncated })
 }
 
 fn classify(tok: &SyntaxToken, text: &str) -> Option<Context> {
@@ -449,9 +503,32 @@ impl Collector<'_, '_> {
         if params.is_empty() {
             return;
         }
+        // The called function, for conventional names (`index`, `acc`).
+        let callee = lambda
+            .ancestors()
+            .skip(1)
+            .find(|a| a.kind() == SyntaxKind::CALL_EXPR)
+            .and_then(|c| c.first_child())
+            .filter(|c| c.kind() == SyntaxKind::NAME_REF)
+            .map(|c| c.text().to_string())
+            .unwrap_or_default();
+        let acc = match callee.as_str() {
+            "fold" | "reduce" | "runningFold" | "runningReduce" | "scan" => Some(0),
+            "foldIndexed" | "reduceIndexed" | "runningFoldIndexed" | "runningReduceIndexed" | "scanIndexed" => Some(1),
+            "foldRight" | "reduceRight" => Some(1),
+            "foldRightIndexed" | "reduceRightIndexed" => Some(2),
+            _ => None,
+        };
         let mut names: Vec<String> = Vec::new();
-        for p in &params {
-            let base = suggested_name(super::infer::strip(p));
+        for (i, p) in params.iter().enumerate() {
+            let int = super::infer::strip(p).fq_name() == Some("kotlin.Int");
+            let base = if acc == Some(i) {
+                "acc".to_string()
+            } else if i == 0 && int && callee.ends_with("Indexed") {
+                "index".to_string()
+            } else {
+                suggested_name(super::infer::strip(p))
+            };
             let mut name = base.clone();
             let mut i = 2;
             while names.contains(&name) {
@@ -535,7 +612,18 @@ impl Collector<'_, '_> {
             templates.push(("null", format!("if ({expr} == null) {{\n    $0\n}}"), "if (expr == null) {}"));
         }
         if iterable && statement {
-            let item = if fq == "kotlin.collections.Map" || fq.ends_with("Map") { "(key, value)".to_string() } else { "${1:item}".to_string() };
+            let element = match stripped {
+                TypeRef::Named { args, .. } if args.len() == 1 => match &args[0] {
+                    crate::symbols::TypeArg::Type { ty, .. } => Some(suggested_name(super::infer::strip(ty))),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let item = if fq == "kotlin.collections.Map" || fq.ends_with("Map") {
+                "(key, value)".to_string()
+            } else {
+                format!("${{1:{}}}", element.filter(|e| e != "value").unwrap_or_else(|| "item".into()))
+            };
             templates.push(("for", format!("for ({item} in {expr}) {{\n    $0\n}}"), "for (item in expr) {}"));
         }
         if !unit {

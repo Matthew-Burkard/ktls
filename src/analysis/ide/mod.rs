@@ -7,6 +7,7 @@ pub mod hierarchy;
 pub mod imports;
 pub mod infer;
 pub mod inlay;
+pub mod kdoc;
 pub mod library;
 pub mod rename;
 pub mod semantic;
@@ -102,6 +103,9 @@ pub(super) const DECLARATIONS: &[SyntaxKind] = &[
 
 /// Resolve what the token at `offset` refers to.
 pub(super) fn defs_at(e: &Engine, offset: TextSize) -> Option<(TextRange, Vec<Def>)> {
+    if let Some(found) = kdoc::defs_at(e, offset) {
+        return Some(found);
+    }
     let tok = token_at(&e.root, offset)?;
     defs_of_token(e, &tok)
 }

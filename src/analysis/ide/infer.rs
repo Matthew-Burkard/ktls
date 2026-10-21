@@ -50,7 +50,7 @@ pub enum Def {
 }
 
 impl Def {
-    fn symbol(sym: Symbol) -> Def {
+    pub fn symbol(sym: Symbol) -> Def {
         Def::Symbol { sym, subst: Subst::new() }
     }
 }
@@ -722,6 +722,16 @@ impl<'s> Engine<'s> {
         out
     }
 
+    /// Top-level callables `name` of package `pkg`.
+    pub fn top_level_in(&self, pkg: &str, name: &str) -> Vec<Symbol> {
+        self.res.top_level_callables(pkg, name)
+    }
+
+    /// Resolve `name` as if written as an expression at `at` (KDoc links).
+    pub fn resolve_name_text(&self, at: &SyntaxNode, name: &str) -> Vec<Def> {
+        self.resolve_simple(at, name, None)
+    }
+
     fn top_level_named(&self, name: &str) -> Vec<Symbol> {
         let mut out = self.imported_callables(name);
         if !out.is_empty() {
@@ -1027,18 +1037,37 @@ impl<'s> Engine<'s> {
 
     fn compute_lambda_signature(&self, lambda: &SyntaxNode) -> Option<(Option<TypeRef>, Vec<TypeRef>)> {
         let _g = Guard::enter()?;
-        let mut node = lambda.clone();
-        let mut parent = node.parent()?;
+        let (expected, _) = self.lambda_expected(lambda)?;
+        let (recv, params, _) = function_parts(&expected)?;
+        Some((recv, params))
+    }
+
+    /// How a lambda runs: (`suspend` function type expected, passed to an `inline`
+    /// function). `None` when its expected type is unknown.
+    pub fn lambda_kind(&self, lambda: &SyntaxNode) -> Option<(bool, bool)> {
+        let (expected, called) = self.lambda_expected(lambda)?;
+        let suspend = match strip(&expected) {
+            TypeRef::Function { suspend, .. } => *suspend,
+            TypeRef::Named { fq: Some(fq), .. } if fq.starts_with("kotlin.coroutines.SuspendFunction") => true,
+            TypeRef::Named { fq: Some(fq), .. } if fq.starts_with("kotlin.Function") => false,
+            // SAM conversion: the interface method may be `suspend` (`FlowCollector`).
+            _ => return None,
+        };
+        Some((suspend, called.is_some_and(|c| c.modifiers.has(Modifiers::INLINE))))
+    }
+
+    /// The function type a lambda is expected to have, and the function it is passed to.
+    fn lambda_expected(&self, lambda: &SyntaxNode) -> Option<(TypeRef, Option<Symbol>)> {
+        let mut parent = lambda.parent()?;
         if parent.kind() == SyntaxKind::LABELED_EXPR {
-            node = parent.clone();
             parent = parent.parent()?;
         }
-        let expected: TypeRef = match parent.kind() {
+        match parent.kind() {
             SyntaxKind::LAMBDA_ARGUMENT => {
                 let call = parent.parent()?;
                 let (sym, s) = self.resolve_call_target(&call, false)?;
                 let p = sym.params.last()?;
-                substitute(&self.resolve_declared(&sym, &p.ty), &s)
+                Some((substitute(&self.resolve_declared(&sym, &p.ty), &s), Some(sym)))
             }
             SyntaxKind::VALUE_ARGUMENT => {
                 let list = parent.parent()?;
@@ -1050,14 +1079,11 @@ impl<'s> Engine<'s> {
                     Some(n) => sym.params.iter().find(|p| p.name == n)?,
                     None => sym.params.get(index)?,
                 };
-                substitute(&self.resolve_declared(&sym, &p.ty), &s)
+                Some((substitute(&self.resolve_declared(&sym, &p.ty), &s), Some(sym)))
             }
-            SyntaxKind::PROPERTY => ast::child::<ast::TypeRef>(&parent).map(|t| self.resolve_syntax_type(&t))?,
-            _ => return None,
-        };
-        let _ = node;
-        let (recv, params, _) = function_parts(&expected)?;
-        Some((recv, params))
+            SyntaxKind::PROPERTY => Some((ast::child::<ast::TypeRef>(&parent).map(|t| self.resolve_syntax_type(&t))?, None)),
+            _ => None,
+        }
     }
 
     // ------------------------------------------------------ resolution

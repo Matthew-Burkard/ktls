@@ -1051,4 +1051,48 @@ fun f(a: A, b: B, box: Box<A>) {
         has(&found, expected);
     }
     assert_eq!(found.len(), 5, "{found:#?}");
+    // Fixes: convert the value, or change the parameter's type.
+    assert!(fixed(text, "ARGUMENT_TYPE_MISMATCH").contains("fun one(a: B, n: Int) {}"));
+    let conv = "package a\n\nfun one(n: Int, s: String, d: Double) {}\nfun f(t: String, i: Int) {\n    one(t, i, 1)\n}\n";
+    let (lints, _) = Fixture::new().run("src/main/kotlin/a/A.kt", conv);
+    let titles: Vec<&str> = lints.iter().filter(|l| l.rule.id == "ARGUMENT_TYPE_MISMATCH").flat_map(|l| l.fix.iter().chain(&l.alternatives)).map(|f| f.title.as_str()).collect();
+    assert!(titles.contains(&"Convert to 'Int'") && titles.contains(&"Convert to 'String'") && titles.contains(&"Convert to 'Double'"), "{titles:?}");
+    let edits: Vec<Edit> = lints.iter().filter(|l| l.rule.id == "ARGUMENT_TYPE_MISMATCH").flat_map(|l| l.fix.as_ref().unwrap().edits.clone()).collect();
+    let out = apply(conv, &edits);
+    assert!(out.contains("one(t.toInt(), i.toString(), 1.0)"), "{out}");
+    assert!(fixed_with("val s: String = 42\n", "INITIALIZER_TYPE_MISMATCH", "Convert to 'String'").contains("val s: String = \"42\""));
+}
+
+#[test]
+fn suspend_calls() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let text = r#"package a
+
+suspend fun load(): Int = 1
+fun runAsync(block: suspend () -> Unit) {}
+fun later(block: () -> Unit) {}
+inline fun inl(block: () -> Unit) = block()
+
+fun bad() {
+    load()
+}
+suspend fun good() {
+    load()
+    inl { load() }
+}
+fun lam() {
+    runAsync { load() }
+    runAsync { inl { load() } }
+}
+fun lam2() {
+    later { load() }
+}
+val p: Int get() = load()
+fun seq() = sequence { yield(1) }
+"#;
+    let found: Vec<String> = compiler(text).into_iter().filter(|f| f.starts_with("ILLEGAL_SUSPEND")).collect();
+    assert_eq!(found, vec!["ILLEGAL_SUSPEND_FUNCTION_CALL: load"; 3], "{found:#?}");
+    assert!(fixed(text, "ILLEGAL_SUSPEND_FUNCTION_CALL").contains("suspend fun bad() {"));
 }

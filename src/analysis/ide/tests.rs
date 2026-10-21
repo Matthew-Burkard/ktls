@@ -1056,7 +1056,7 @@ fn postfix_templates() {
     };
     assert!(expand(&mut fx, "    u.name.va$0", "val").contains("    val ${1:s} = u.name$0\n"));
     assert!(expand(&mut fx, "    xs.va$0", "val").contains("val ${1:users} = xs$0"));
-    assert!(expand(&mut fx, "    xs.fo$0", "for").contains("    for (${1:item} in xs) {\n    $0\n}"));
+    assert!(expand(&mut fx, "    xs.fo$0", "for").contains("    for (${1:user} in xs) {\n    $0\n}"));
     assert!(expand(&mut fx, "    ok.i$0", "if").contains("    if (ok) {\n    $0\n}"));
     assert!(expand(&mut fx, "    (u.age > 1).no$0", "not").contains("    !(u.age > 1)$0"));
     assert!(expand(&mut fx, "    n.notn$0", "notnull").contains("    if (n != null) {"));
@@ -1076,10 +1076,33 @@ fn lambda_parameter_completion() {
     let src = |body: &str| format!("{HEADER}fun run(xs: List<User>, m: Map<String, Int>) {{\n{body}\n}}\n");
     let snippets = |fx: &mut Fx, body: &str| fx.complete(&src(body)).items.into_iter().filter(|i| i.detail.as_deref() == Some("lambda parameters")).map(|i| (i.label, i.insert.unwrap_or_default())).collect::<Vec<_>>();
     assert_eq!(snippets(&mut fx, "    xs.forEach { $0 }"), vec![("user ->".to_string(), "${1:user} -> ".to_string())]);
-    assert_eq!(snippets(&mut fx, "    xs.forEachIndexed { $0 }"), vec![("value, user ->".to_string(), "${1:value}, ${2:user} -> ".to_string())]);
+    assert_eq!(snippets(&mut fx, "    xs.forEachIndexed { $0 }"), vec![("index, user ->".to_string(), "${1:index}, ${2:user} -> ".to_string())]);
+    assert_eq!(snippets(&mut fx, "    xs.fold(0) { $0 }")[0].0, "acc, user ->");
     let m = snippets(&mut fx, "    m.forEach { $0 }");
     assert!(m.iter().any(|(l, _)| l == "(key, value) ->"), "{m:?}");
     // Not once the lambda has parameters, nor later in the body.
     assert!(snippets(&mut fx, "    xs.forEach { u -> $0 }").is_empty());
     assert!(snippets(&mut fx, "    xs.forEach {\n        println(it)\n        $0\n    }").is_empty());
+}
+
+#[test]
+fn kdoc_links() {
+    let Some(mut fx) = fixture() else { return };
+    let doc = |link: &str| format!("{HEADER}/**\n * Greets {link}.\n * @param count how many\n */\nfun greet(user: User, count: Int) {{}}\n");
+    let snap_goto = |fx: &mut Fx, text: &str| {
+        let (path, offset) = fx.open(text);
+        let found = crate::analysis::ide::definition(&fx.host.snapshot(), &path, offset, false);
+        fx.names(found)
+    };
+    assert_eq!(snap_goto(&mut fx, &doc("[Us$0er]")), vec!["Model.kt:8:User"]);
+    assert_eq!(snap_goto(&mut fx, &doc("[User.na$0me]")), vec!["Model.kt:8:name"]);
+    assert_eq!(snap_goto(&mut fx, &doc("[us$0er]")), vec!["Main.kt:12:user"]);
+    assert_eq!(snap_goto(&mut fx, &format!("{HEADER}/**\n * @param co$0unt how many\n */\nfun greet(count: Int) {{}}\n")), vec!["Main.kt:11:count"]);
+    assert!(snap_goto(&mut fx, &doc("Us$0er")).is_empty());
+    // Completion in a link: parameters, names in scope, members of a qualifier.
+    let labels = fx.labels(&doc("[$0"));
+    has_all(&labels, &["user", "count", "User", "greet"]);
+    has_all(&fx.labels(&doc("[User.$0")), &["name", "age", "greet"]);
+    let c = fx.complete(&doc("[Us$0"));
+    assert!(c.items.iter().all(|i| i.insert.is_none() && i.additional.is_empty()));
 }

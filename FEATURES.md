@@ -70,7 +70,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 
 ## 2. Navigation
 
-- [~] [P0] `textDocument/definition` — incl. into library sources/decompiled stubs, Java sources, `expect`↔`actual` — *partial: sources (local or downloaded `-sources.jar`) or generated stubs; no `expect`↔`actual` jumps*
+- [~] [P0] `textDocument/definition` — incl. into library sources/decompiled stubs, Java sources, `expect`↔`actual` — *partial: sources (local or downloaded `-sources.jar`) or generated stubs, KDoc `[links]` and `@param`/`@throws`/`@see` subjects; `expect`↔`actual` via declaration/implementation*
 - [x] [P1] `textDocument/declaration` — the member an `override` overrides (also in libraries), the `expect` of an `actual`, otherwise the definition
 - [x] [P1] `textDocument/typeDefinition`
 - [~] [P1] `textDocument/implementation` — overrides, subclasses, `actual` declarations, SAM implementations — *partial: project subclasses (transitive), overriding members and the `actual`s of an `expect`; not anonymous objects or SAM lambdas*
@@ -143,7 +143,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [ ] [P1] Live templates: `main`, `fun0/1/2`, `sout`, `iter`, `ifn`, `inn`, `void`, `closure`, `object`, `interface`, `exfun`, `exval`
 - [x] [P1] Lambda parameter completion (`{ a, b -> }` from expected function type; `(key, value) ->` for map entries and pairs)
 - [x] [P1] Completion in string templates (`$` / `${`)
-- [ ] [P1] Completion in KDoc (`[Symbol]`, tags)
+- [~] [P1] Completion in KDoc (`[Symbol]`, tags) — *partial: `[links]` (parameters, names in scope, members after `Type.`) and `@param`/`@throws`/`@see` subjects; not tag names*
 - [~] [P1] Annotation completion (incl. use-site targets) — *partial: annotation classes, no use-site targets*
 - [x] [P1] Package / import statement completion
 - [~] [P2] Static member completion through companion without qualifier, enum entry completion without class prefix — *partial: companion/nested members of enclosing classes*
@@ -172,7 +172,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P0] `NOTHING_TO_OVERRIDE`, `VIRTUAL_MEMBER_HIDDEN` (missing `override`), `OVERRIDING_FINAL_MEMBER`, `FINAL_SUPERTYPE` — *partial: all four (members of Kotlin and project supertypes; not Java supertypes)*
 - [ ] [P0] Visibility: `INVISIBLE_REFERENCE`, `INVISIBLE_MEMBER`, `EXPOSED_*` (exposed visibility)
 - [x] [P0] `NO_ELSE_IN_WHEN` / `WHEN_ON_SEALED_*` non-exhaustive (enum, Boolean, nullable, source sealed hierarchies; "Add remaining branches" fix)
-- [ ] [P0] `ILLEGAL_SUSPEND_FUNCTION_CALL`, `NON_LOCAL_SUSPENSION_POINT`
+- [~] [P0] `ILLEGAL_SUSPEND_FUNCTION_CALL`, `NON_LOCAL_SUSPENSION_POINT` — *partial: `ILLEGAL_SUSPEND_FUNCTION_CALL` (in non-suspend functions, accessors, initializers and plain lambdas passed to a single known function; inline lambdas inherit the context; SAM lambdas skipped), with a "Make 'f' suspend" fix*
 - [~] [P0] `CONFLICTING_OVERLOADS`, `REDECLARATION`, `PACKAGE_OR_CLASSIFIER_REDECLARATION` — *partial: classifiers, members and locals in one scope*
 - [ ] [P1] Generics: `UPPER_BOUND_VIOLATED`, `WRONG_NUMBER_OF_TYPE_ARGUMENTS`, `TYPE_VARIANCE_CONFLICT`, `CANNOT_INFER_PARAMETER_TYPE`, `NEW_INFERENCE_NO_INFORMATION_FOR_PARAMETER`
 - [~] [P1] Modifiers: `INCOMPATIBLE_MODIFIERS`, `REDUNDANT_MODIFIER`, `WRONG_MODIFIER_TARGET`, `REPEATED_MODIFIER` — *partial: all but `REDUNDANT_MODIFIER`*
@@ -321,7 +321,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 ### 6.1 Quick fixes (bound to diagnostics)
 - [~] [P0] **Import** unresolved symbol (with chooser when ambiguous; class, function, extension, operator, delegate accessor) — *partial: classes, top-level functions/properties and extensions applicable to the receiver, from the project and libraries; not operators or delegate accessors*
 - [~] [P0] **Add `?.`** / **add `!!`** / **surround with null check** / **add elvis** for unsafe calls — *partial: `?.` and `!!`*
-- [~] [P0] **Change type** of variable/parameter/return to match — *partial: for type mismatches and `null` (`T?`)*
+- [~] [P0] **Change type** of variable/parameter/return to match — *partial: for type mismatches and `null` (`T?`); parameter type of the called project function (also in another file); **Convert to 'T'** (`.toInt()`, `.toString()`, `.code`, `"1"`, `1.0`)*
 - [ ] [P0] **Add explicit cast** (`as T`) / **change to safe cast** (`as?`)
 - [~] [P0] **Implement members** / **make class abstract** — *partial: implement members*
 - [~] [P0] **Add `override` modifier**, **remove `override`**, **make super member `open`** — *partial: add/remove `override`, make a project super member `open` (also in another file)*
@@ -329,7 +329,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [~] [P0] **Remove unused** variable/parameter/import/declaration — *partial: variable, import, private/local declaration*
 - [x] [P0] **Change `val` to `var`**
 - [ ] [P0] **Initialize property** / **make `lateinit`** / **make `abstract`** / **move to constructor**
-- [ ] [P0] **Add `suspend` modifier** to containing function / wrap in `runBlocking`/`launch`
+- [~] [P0] **Add `suspend` modifier** to containing function / wrap in `runBlocking`/`launch` — *partial: add `suspend`*
 - [~] [P0] **Create from usage**: function, extension function, property, local variable, parameter, class, interface, enum, object, enum entry, constructor, type parameter, annotation, `component`/operator functions — *partial: function (top-level or member, incl. in other files), extension function/property, property, local variable, parameter, class; types from arguments and the expected type*
 - [ ] [P0] **Add missing return** / **add `return` with expression**
 - [ ] [P1] **Add/remove argument**, **add named argument**, **change function signature** to match call, **add parameter to function**
