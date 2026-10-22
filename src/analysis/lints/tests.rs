@@ -1573,10 +1573,9 @@ fun f(m: Map<String, User>, u: User) {
 "#;
     let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
     let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{} line {}: {}", l.rule.id, text[..usize::from(l.range.start())].lines().count(), &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
-    // Nullable call results (`find(1)`, `m["a"]`, `u.nick()`) and a local initialized with
-    // one; a member missing on a call chain; a call chain of the wrong type. Safe calls,
-    // `!!`, extensions (`let`) and results that are type parameters (`pick`) are not
-    // reported.
+    // Nullable call results (`find(1)`, `m["a"]`, `u.nick()`, `pick(find(6))` with `T` =
+    // `User?`) and a local initialized with one; a member missing on a call chain; a call
+    // chain of the wrong type. Safe calls, `!!` and extensions (`let`) are not reported.
     let expected = [
         "UNSAFE_CALL line 13: .",
         "UNSAFE_CALL line 15: .",
@@ -1584,6 +1583,7 @@ fun f(m: Map<String, User>, u: User) {
         "UNSAFE_CALL line 18: .",
         "UNRESOLVED_REFERENCE line 19: gret",
         "INITIALIZER_TYPE_MISMATCH line 21: find(4)!!.greet()",
+        "UNSAFE_CALL line 25: .",
     ];
     assert_eq!(found, expected, "{found:#?}");
 }
@@ -1619,4 +1619,55 @@ class Derived : Base<String>(), Shape {
     assert_eq!(found, expected, "{found:#?}");
     let msg = lints.iter().find(|l| l.rule.id == "NOTHING_TO_OVERRIDE").map(|l| l.message.clone()).unwrap_or_default();
     assert!(msg.contains("Potential signature for overriding: fun run(times: Int)"), "{msg}");
+}
+
+#[test]
+fn inferred_type_arguments() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let text = r#"package a
+
+class User(val name: String, val age: Int) {
+    fun nick(): String? = null
+}
+
+fun users(): List<User> = emptyList()
+
+fun f(u: User) {
+    listOf(u).first().nick().length
+    u.let { it.nick() }.length
+    users().map { it.name }.first().nmae
+    users().map { it.nick() }.first().length
+    users().firstOrNull().name
+    users().filter { it.age > 3 }.first().nick().length
+    val n: Int = users().map { it.name }.first()
+    listOf(1).first().inc()
+    users().maxByOrNull { it.age }.name
+    u.run { name }.length
+    users().associateBy { it.name }["x"].age
+    users().map { user -> user.nick() }.first().length
+    users().map { it.name }.first().length
+    users().filter { it.nick() != null }.first().nick()?.length
+}
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{} line {}: {}", l.rule.id, text[..usize::from(l.range.start())].lines().count(), &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    // Type parameters bound by arguments (`listOf(u)`), receivers and lambda results
+    // (`let`, `map`, `associateBy`); lambda parameters typed by their call (`it`, `user`).
+    // Integer literals bind nothing (`listOf(1)`); non-null results are fine.
+    let expected = [
+        "UNSAFE_CALL line 10: .",
+        "UNSAFE_CALL line 11: .",
+        "UNRESOLVED_REFERENCE line 12: nmae",
+        "UNSAFE_CALL line 13: .",
+        "UNSAFE_CALL line 14: .",
+        "UNSAFE_CALL line 15: .",
+        "INITIALIZER_TYPE_MISMATCH line 16: users().map { it.name }.first()",
+        "UNSAFE_CALL line 18: .",
+        "UNSAFE_CALL line 20: .",
+        "UNSAFE_CALL line 21: .",
+    ];
+    assert_eq!(found, expected, "{found:#?}");
 }
