@@ -113,6 +113,15 @@ fn in_unknown_lambda(e: &Engine, at: &SyntaxNode) -> bool {
     at.ancestors().any(|a| a.kind() == SyntaxKind::LAMBDA_EXPR && e.lambda_signature(&a).is_none())
 }
 
+/// A bare name resolved to a class member (through an implicit receiver) inside a lambda
+/// whose receiver is unknown: that receiver may declare the name itself.
+pub(super) fn uncertain_implicit_member(e: &Engine, nr: &SyntaxNode, defs: &[Def]) -> bool {
+    let qualified = nr.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(nr))
+        || nr.parent().and_then(|c| c.parent()).is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != nr.parent().as_ref());
+    let member = defs.iter().any(|d| matches!(d, Def::Symbol { sym, .. } if matches!(sym.kind, SymbolKind::Function | SymbolKind::Property | SymbolKind::Field) && sym.fq_name.rsplit_once('.').is_some_and(|(owner, _)| e.classifier(owner).is_some())));
+    !qualified && member && in_unknown_lambda(e, nr)
+}
+
 /// Context receivers/parameters bring names into scope that are not modelled.
 fn in_context_scope(at: &SyntaxNode) -> bool {
     at.ancestors().any(|a| a.children().any(|c| c.kind() == SyntaxKind::CONTEXT_RECEIVER_LIST))
@@ -163,12 +172,10 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
     let member = matches!(outer.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && outer.first_child().as_ref() != Some(&expr);
     let callable_ref = outer.kind() == SyntaxKind::CALLABLE_REFERENCE;
     let defs = e.resolve_name_ref(nr);
-    // Deprecation: every candidate is deprecated.
-    if !defs.is_empty()
-        && defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::DEPRECATED)))
-        && !in_deprecated_declaration(nr)
-    {
-        let error = defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if super::markers::deprecated_error(cx, sym)));
+    // Deprecation: every candidate is deprecated (at this API version).
+    let levels: Vec<Option<super::markers::Level>> = defs.iter().map(|d| if let Def::Symbol { sym, .. } = d { super::markers::deprecation(cx, sym) } else { None }).collect();
+    if !levels.is_empty() && levels.iter().all(Option::is_some) && !in_deprecated_declaration(nr) && !uncertain_implicit_member(e, nr, &defs) {
+        let error = levels.iter().all(|l| *l == Some(super::markers::Level::Error));
         out.report(if error { &DEPRECATION_ERROR } else { &DEPRECATION }, tok.text_range(), format!("'{name}' is deprecated."), None);
     }
     if !defs.is_empty() || !cx.on(&UNRESOLVED_REFERENCE_EXPR) || in_unknown_lambda(e, nr) || in_context_scope(nr) {
@@ -179,8 +186,12 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
         if smart_cast_possible(nr) || st.exists(cx, e, &name) {
             return;
         }
-        // Only receivers whose type is written down (not inferred).
-        let Some(t) = declared_type(e, &recv) else { return };
+        // `x.f()` with a local `f` of function type with receiver (`it` of `T.() -> R`).
+        if e.resolve_name_text(nr, &name).iter().any(|d| matches!(d, Def::Local(_))) {
+            return;
+        }
+        // Only receivers of certain type.
+        let Some(t) = certain_receiver(e, &recv) else { return };
         let Some(fq) = fq_of(&t) else { return };
         if matches!(fq, "kotlin.Any" | "kotlin.Nothing") || e.classifier(fq).is_none() || jvm_members(e, &t).is_none_or(|m| m.contains(&name)) {
             return;
@@ -273,11 +284,11 @@ fn deprecated_type(cx: &Cx, e: &Engine, ut: &SyntaxNode, out: &mut Sink) {
     let scope = scope_at(ut, &e.package(), &mut LocalsCache::default());
     let names: Vec<&str> = segs.iter().map(|(s, _)| s.as_str()).collect();
     if let Ok(Resolved::Classifier(c)) = e.res.resolve_type_name(&names, &scope)
-        && c.symbol().modifiers.has(Modifiers::DEPRECATED)
+        && let Some(level) = super::markers::deprecation(cx, c.symbol())
         && !in_deprecated_declaration(ut)
     {
         let (n, r) = segs.last().unwrap();
-        let rule = if super::markers::deprecated_error(cx, c.symbol()) { &DEPRECATION_ERROR } else { &DEPRECATION };
+        let rule = if level == super::markers::Level::Error { &DEPRECATION_ERROR } else { &DEPRECATION };
         out.report(rule, *r, format!("'{n}' is deprecated."), None);
     }
 }
@@ -359,31 +370,12 @@ fn increment(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
 
 // ------------------------------------------------------------ null safety
 
-/// The written type of a variable or property used as `expr`, or of `this`.
-fn declared_type(e: &Engine, expr: &SyntaxNode) -> Option<TypeRef> {
-    if expr.kind() == SyntaxKind::THIS_EXPR {
-        return (expr.text() == "this").then(|| e.type_of(expr)).flatten();
-    }
-    if expr.kind() != SyntaxKind::NAME_REF {
-        return None;
-    }
-    let defs = e.resolve_name_ref(expr);
-    let [def] = defs.as_slice() else { return None };
-    let (file, range) = match def {
-        Def::Local(l) if matches!(l.kind, LocalKind::Val | LocalKind::Var | LocalKind::Parameter) => (e.path.clone(), l.name_range),
-        Def::Symbol { sym, .. } if sym.kind == SymbolKind::Property => match &sym.origin {
-            Origin::Source { file, name_range, .. } => (file.clone(), *name_range),
-            _ => return None,
-        },
-        _ => return None,
-    };
-    if file != e.path {
-        return None;
-    }
-    let decl = crate::syntax::covering(&e.root, range)?.ancestors().find(|a| matches!(a.kind(), SyntaxKind::PROPERTY | SyntaxKind::VALUE_PARAMETER))?;
-    let ty = ast::child::<ast::TypeRef>(&decl)?;
-    let t = e.resolve_syntax_type(&ty);
-    matches!(t, TypeRef::Named { fq: Some(_), .. }).then_some(t)
+/// The type of a member chain's receiver when it is certain, and the engine (which finds
+/// the members) sees the same class.
+fn certain_receiver(e: &Engine, recv: &SyntaxNode) -> Option<TypeRef> {
+    let t = super::certain::certain_type(e, recv, false)?;
+    let seen = e.type_of(recv)?;
+    (fq_of(&seen) == fq_of(&t) && fq_of(&t).is_some()).then_some(t)
 }
 
 /// The declared (written) non-null type of a variable or property used as `expr`.
@@ -434,7 +426,7 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         return;
     }
     let (Some(recv), Some(sel)) = (n.first_child(), n.last_child()) else { return };
-    if recv.kind() != SyntaxKind::NAME_REF || recv == sel {
+    if recv == sel {
         return;
     }
     let member_ref = match sel.kind() {
@@ -445,6 +437,40 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         },
         _ => return,
     };
+    // A member (not an extension, which may accept a nullable receiver).
+    let member_defs = e.resolve_name_ref(&member_ref);
+    let [Def::Symbol { sym, .. }] = member_defs.as_slice() else { return };
+    if sym.receiver.is_some() || !matches!(sym.kind, SymbolKind::Function | SymbolKind::Property | SymbolKind::Field) || matches!(sym.name.as_str(), "toString" | "hashCode" | "equals") {
+        return;
+    }
+    let report = |shown: &str, out: &mut Sink| {
+        let Some(dot) = n.children_with_tokens().filter_map(|t| t.into_token()).find(|t| t.kind() == SyntaxKind::DOT) else { return };
+        out.report_fixes(
+            &UNSAFE_CALL,
+            dot.text_range(),
+            format!("Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{shown}'."),
+            vec![
+                Fix::replace("Replace with safe (?.) call", dot.text_range(), "?."),
+                Fix::replace("Add non-null asserted (!!.) call", dot.text_range(), "!!."),
+            ],
+        );
+    };
+    let nullable = |t: &TypeRef| matches!(t, TypeRef::Named { nullable: true, .. } | TypeRef::Function { nullable: true, .. });
+    // Call results (never smart cast): `f().g()`, `m[k].g()`, `a?.f().g()`.
+    let call_result = matches!(recv.kind(), SyntaxKind::CALL_EXPR | SyntaxKind::INDEX_EXPR)
+        || matches!(recv.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && recv.last_child().is_some_and(|l| l.kind() == SyntaxKind::CALL_EXPR);
+    if call_result {
+        if let Some(t) = super::certain::certain_type(e, &recv, true)
+            && nullable(&t)
+            && fq_of(&t) != Some("kotlin.Nothing")
+        {
+            report(&super::certain::shown(&t), out);
+        }
+        return;
+    }
+    if recv.kind() != SyntaxKind::NAME_REF {
+        return;
+    }
     let Some(name_tok) = recv.first_token() else { return };
     let name = ast::ident_text(&name_tok);
     let recv_defs = e.resolve_name_ref(&recv);
@@ -452,17 +478,19 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     if !matches!(local.kind, LocalKind::Parameter | LocalKind::Val | LocalKind::Var) {
         return;
     }
-    // Declared with an explicit nullable type.
+    // Declared with a nullable type: written, or that of a certain initializer.
     let Some(decl) = crate::syntax::covering(&cx.root, local.name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::VALUE_PARAMETER | SyntaxKind::PROPERTY)) else { return };
-    let Some(ty) = ast::child::<ast::TypeRef>(&decl) else { return };
-    let ty_text = ty.syntax().text().to_string();
-    if !ty_text.trim_end().ends_with('?') || decl.kind() == SyntaxKind::PROPERTY && !is_local(&decl) {
+    if decl.kind() == SyntaxKind::PROPERTY && !is_local(&decl) {
         return;
     }
-    // A member (not an extension, which may accept a nullable receiver).
-    let member_defs = e.resolve_name_ref(&member_ref);
-    let [Def::Symbol { sym, .. }] = member_defs.as_slice() else { return };
-    if sym.receiver.is_some() || !matches!(sym.kind, SymbolKind::Function | SymbolKind::Property | SymbolKind::Field) || matches!(sym.name.as_str(), "toString" | "hashCode" | "equals") {
+    let ty_text = match ast::child::<ast::TypeRef>(&decl) {
+        Some(ty) => ty.syntax().text().to_string(),
+        None => match initializer(&decl).and_then(|v| super::certain::certain_type(e, &v, true)) {
+            Some(t) if nullable(&t) => super::certain::shown(&t),
+            _ => return,
+        },
+    };
+    if !ty_text.trim_end().ends_with('?') {
         return;
     }
     // The scope the name is visible in.
@@ -480,16 +508,7 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     if !still_nullable {
         return;
     }
-    let Some(dot) = n.children_with_tokens().filter_map(|t| t.into_token()).find(|t| t.kind() == SyntaxKind::DOT) else { return };
-    out.report_fixes(
-        &UNSAFE_CALL,
-        dot.text_range(),
-        format!("Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{}'.", ty_text.trim()),
-        vec![
-            Fix::replace("Replace with safe (?.) call", dot.text_range(), "?."),
-            Fix::replace("Add non-null asserted (!!.) call", dot.text_range(), "!!."),
-        ],
-    );
+    report(ty_text.trim(), out);
 }
 
 /// `x == null`, `x != null` (also `===`/`!==`), or `x is T` / `x !is T`.
@@ -683,14 +702,13 @@ fn call_arguments(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
     if in_unknown_lambda(e, call) || in_context_scope(call) {
         return;
     }
-    // Member calls: only on receivers whose type is written down, or on classes/packages
-    // (inferred types of call chains are not precise enough to judge overloads).
+    // Member calls: only on receivers of certain type, or on classes/packages.
     if let Some(outer) = call.parent().filter(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR))
         && outer.first_child().as_ref() != Some(call)
     {
         let Some(recv) = outer.first_child() else { return };
         let qualified = matches!(e.resolve_qualifier(&recv), Qualifier::Static(_) | Qualifier::Package(_));
-        if !qualified && declared_type(e, &recv).is_none() {
+        if !qualified && certain_receiver(e, &recv).is_none() {
             return;
         }
     }
@@ -906,7 +924,7 @@ pub(super) fn literal_type(n: &SyntaxNode) -> Option<Option<&'static str>> {
     })
 }
 
-/// A literal, or a value of certain type (see `certain_type`), where type `t` (written
+/// A literal, or a value of certain type (see `certain::certain_type`), where type `t` (written
 /// `shown`) is expected: the rule, message and the type the declaration could change to.
 pub(super) fn type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: &str) -> Option<(&'static Rule, String, String, Option<Fix>)> {
     let (fq, nullable) = match t {
@@ -919,14 +937,14 @@ pub(super) fn type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: 
         return None;
     }
     let Some(lit) = literal_type(value) else {
-        if fq == "kotlin.Function" || !certain_type(e, value) {
+        if fq == "kotlin.Function" {
             return None;
         }
-        let actual = e.type_of(value)?;
+        let actual = super::certain::certain_type(e, value, false)?;
         if e.conforms(&actual, &fq)? {
             return None;
         }
-        let actual_shown = actual.display();
+        let actual_shown = super::certain::shown(&actual);
         let to = if nullable && !actual_shown.ends_with('?') { format!("{actual_shown}?") } else { actual_shown.clone() };
         let convert = actual.fq_name().and_then(|a| conversion(value, a, &fq, false));
         return Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual_shown}'."), to, convert));
@@ -987,46 +1005,11 @@ fn mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef, what: &str)
     Some((rule, msg, std::iter::once(change).chain(convert).collect()))
 }
 
-/// Values whose type the engine knows for sure: a local or parameter declared with a
-/// type (and not smart cast with `is`), or a constructor call.
-pub(super) fn certain_type(e: &Engine, value: &SyntaxNode) -> bool {
-    certain_type_with(e, value, false)
-}
-
-/// Like [`certain_type`], trusting the engine's smart casts for names checked with `is`.
-pub(super) fn certain_type_smart(e: &Engine, value: &SyntaxNode) -> bool {
-    certain_type_with(e, value, true)
-}
-
-fn certain_type_with(e: &Engine, value: &SyntaxNode, smart: bool) -> bool {
-    match value.kind() {
-        SyntaxKind::NAME_REF => {
-            let defs = e.resolve_name_ref(value);
-            let [Def::Local(l)] = defs.as_slice() else { return false };
-            if !matches!(l.kind, LocalKind::Val | LocalKind::Var | LocalKind::Parameter) {
-                return false;
-            }
-            let decl = crate::syntax::covering(&e.root, l.name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::VALUE_PARAMETER | SyntaxKind::PROPERTY));
-            let Some(decl) = decl.filter(|d| ast::child::<ast::TypeRef>(d).is_some() && !has_modifier(d, "vararg")) else { return false };
-            let name = ast::ident_text(&value.first_token().unwrap());
-            let scope = decl.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR | SyntaxKind::CLASS_BODY | SyntaxKind::KOTLIN_FILE));
-            // `is` checks smart cast the name.
-            smart || !scope.is_some_and(|s| {
-                s.descendants().filter(|d| matches!(d.kind(), SyntaxKind::IS_EXPR | SyntaxKind::WHEN_CONDITION) && d.text().to_string().contains("is ")).any(|d| {
-                    d.kind() == SyntaxKind::WHEN_CONDITION || d.descendants().any(|r| r.kind() == SyntaxKind::NAME_REF && r.first_token().is_some_and(|t| ast::ident_text(&t) == name))
-                })
-            })
-        }
-        SyntaxKind::CALL_EXPR => {
-            let Some(callee) = value.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return false };
-            let defs = e.resolve_name_ref(&callee);
-            !defs.is_empty() && defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if matches!(sym.kind, SymbolKind::Constructor | SymbolKind::Class)))
-        }
-        _ => false,
-    }
-}
-
 fn literal_initializer(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    // A vararg's default value is an array of the written type.
+    if has_modifier(n, "vararg") {
+        return;
+    }
     let Some(ty) = ast::child::<ast::TypeRef>(n) else { return };
     let Some(value) = initializer(n) else { return };
     if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "type") {

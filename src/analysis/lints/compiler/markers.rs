@@ -1,5 +1,6 @@
-//! Declaration markers of project declarations: `@Deprecated(level = ERROR/HIDDEN)` and
-//! opt-in requirements (annotations that are themselves `@RequiresOptIn`).
+//! Declaration markers: deprecation levels (`@Deprecated(level = …)`, and for libraries
+//! `@DeprecatedSinceKotlin` against the module's API version) and opt-in requirements
+//! (annotations that are themselves `@RequiresOptIn`), of project and library declarations.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -8,7 +9,7 @@ use std::path::{Path, PathBuf};
 use super::super::*;
 use crate::analysis::ide::completion::import_edit;
 use crate::analysis::ide::infer::{Def, Engine, fq_of};
-use crate::symbols::{Origin, Symbol, SymbolKind};
+use crate::symbols::{Modifiers, Origin, Symbol, SymbolKind};
 
 /// The declaration node of a project symbol, in its file's tree.
 pub(super) fn source_decl(cx: &Cx, sym: &Symbol) -> Option<SyntaxNode> {
@@ -32,15 +33,43 @@ fn mentions(a: &ast::Annotation, names: &[&str]) -> bool {
     a.syntax().descendants_with_tokens().filter_map(|t| t.into_token()).any(|t| t.kind() == SyntaxKind::IDENT && names.contains(&t.text()))
 }
 
-/// A project declaration deprecated with level `ERROR` or `HIDDEN`.
-pub(super) fn deprecated_error(cx: &Cx, sym: &Symbol) -> bool {
-    source_decl(cx, sym).is_some_and(|d| annotations_named(&d, &["Deprecated", "kotlin.Deprecated"]).any(|a| mentions(&a, &["ERROR", "HIDDEN"])))
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Level {
+/// How a use of a deprecated declaration is reported.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Level {
     Warning,
     Error,
+}
+
+/// `major.minor` of a version string.
+fn version(v: &str) -> Option<(u32, u32)> {
+    let mut parts = v.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next().and_then(|m| m.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()).unwrap_or(0)))
+}
+
+/// The deprecation level of `sym` at this module's Kotlin API version (`None`: not
+/// deprecated, or not yet).
+pub(super) fn deprecation(cx: &Cx, sym: &Symbol) -> Option<Level> {
+    if !sym.modifiers.has(Modifiers::DEPRECATED) {
+        return None;
+    }
+    if matches!(sym.origin, Origin::Source { .. }) {
+        let error = source_decl(cx, sym).is_some_and(|d| annotations_named(&d, &["Deprecated", "kotlin.Deprecated"]).any(|a| mentions(&a, &["ERROR", "HIDDEN"])));
+        return Some(if error { Level::Error } else { Level::Warning });
+    }
+    let declared = if sym.modifiers.has(Modifiers::DEPRECATED_ERROR) { Level::Error } else { Level::Warning };
+    let Some(since) = sym.annotations.iter().find_map(|a| a.strip_prefix("kotlin.DeprecatedSinceKotlin(")?.strip_suffix(')')) else { return Some(declared) };
+    // The level grows with the API version; unknown versions keep the declared one.
+    let Some(api) = cx.module.and_then(|m| m.kotlin.api_version.as_deref().or(m.kotlin.language_version.as_deref()).or(m.kotlin.version.as_deref())).and_then(version) else {
+        return Some(declared);
+    };
+    let reached = |key: &str| since.split(',').filter_map(|kv| kv.split_once('=')).any(|(k, v)| k == key && version(v).is_some_and(|v| v <= api));
+    if reached("errorSince") || reached("hiddenSince") {
+        Some(Level::Error)
+    } else if reached("warningSince") {
+        Some(Level::Warning)
+    } else {
+        None
+    }
 }
 
 /// An opt-in marker: its FQ name and level.
@@ -74,7 +103,13 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             continue;
         }
         let syms: Vec<Symbol> = match n.kind() {
-            SyntaxKind::NAME_REF => e.resolve_name_ref(&n).into_iter().filter_map(|d| if let Def::Symbol { sym, .. } = d { Some(sym) } else { None }).collect(),
+            SyntaxKind::NAME_REF => {
+                let defs = e.resolve_name_ref(&n);
+                if super::expressions::uncertain_implicit_member(e, &n, &defs) {
+                    continue;
+                }
+                defs.into_iter().filter_map(|d| if let Def::Symbol { sym, .. } = d { Some(sym) } else { None }).collect()
+            }
             _ => {
                 // The outermost user type only (`a.B` is one reference).
                 if n.parent().is_some_and(|p| p.kind() == SyntaxKind::USER_TYPE) {
@@ -114,7 +149,12 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
 /// constructor). Members do not take their class's markers: through an unmarked subclass
 /// (or anonymous object) they need no opt-in.
 fn required_markers<'a>(cx: &Cx<'a>, state: &RefCell<Markers<'a>>, sym: &Symbol) -> Vec<Marker> {
-    let Origin::Source { file, name_range, .. } = &sym.origin else { return Vec::new() };
+    let Origin::Source { file, name_range, .. } = &sym.origin else {
+        // Library declarations carry their annotations' names.
+        let class = (sym.kind == SymbolKind::Constructor).then(|| sym.fq_name.rsplit_once('.').and_then(|(c, _)| cx.engine()?.classifier(c))).flatten();
+        let names = sym.annotations.iter().chain(class.iter().flat_map(|c| c.symbol().annotations.iter()));
+        return names.filter_map(|fq| marker_named(cx, state, fq)).collect();
+    };
     let key = (file.clone(), *name_range);
     if let Some(m) = state.borrow().decls.get(&key) {
         return m.clone();
@@ -148,12 +188,23 @@ fn marker<'a>(cx: &Cx<'a>, state: &RefCell<Markers<'a>>, file: &Path, t: &ast::T
         };
         fq?
     };
+    marker_named(cx, state, &fq)
+}
+
+/// The opt-in marker the annotation class `fq` is, if any.
+fn marker_named<'a>(cx: &Cx<'a>, state: &RefCell<Markers<'a>>, fq: &str) -> Option<Marker> {
+    let fq = fq.to_string();
     let cached = state.borrow().levels.get(&fq).copied();
     let level = match cached {
         Some(l) => l,
         None => {
             let e = cx.engine()?;
-            let level = e.classifier(&fq).and_then(|c| source_decl(cx, c.symbol())).and_then(|d| {
+            let level = e.classifier(&fq).and_then(|c| {
+                let sym = c.symbol();
+                if sym.modifiers.has(Modifiers::OPT_IN_MARKER) {
+                    return Some(if sym.modifiers.has(Modifiers::OPT_IN_WARNING) { Level::Warning } else { Level::Error });
+                }
+                let d = source_decl(cx, sym)?;
                 let a = annotations_named(&d, &["RequiresOptIn", "kotlin.RequiresOptIn"]).next()?;
                 Some(if mentions(&a, &["WARNING"]) { Level::Warning } else { Level::Error })
             });

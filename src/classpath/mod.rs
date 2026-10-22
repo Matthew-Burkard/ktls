@@ -418,7 +418,7 @@ impl ClasspathIndex {
                     let cf = self.read_class(internal)?;
                     let meta = cf.kotlin.as_ref().filter(|m| m.kind == 2 || m.kind == 5)?;
                     let archive = &self.archives[self.classes.get(&***internal)?.0 as usize];
-                    match kmeta::decode(meta, pkg, &archive.path, internal)? {
+                    match kmeta::decode(meta, pkg, &archive.path, internal, Some(&cf))? {
                         kmeta::Decoded::Package(syms) => Some(syms),
                         _ => None,
                     }
@@ -426,7 +426,8 @@ impl ClasspathIndex {
                 .collect();
             members.extend(found.into_iter().flatten());
         }
-        members.retain(|m| m.visibility != Visibility::Private);
+        // Hidden declarations (`@Deprecated(level = HIDDEN)`) cannot be used from source.
+        members.retain(|m| m.visibility != Visibility::Private && !m.modifiers.has(Modifiers::HIDDEN));
         let members = Arc::new(members);
         self.package_cache.write().insert(pkg.into(), members.clone());
         members
@@ -629,14 +630,13 @@ pub fn convert_class(cf: &ClassFile, archive: &Path) -> LibClass {
     let fq = signature::internal_to_fq(&cf.name);
     let package = cf.name.rsplit_once('/').map(|(p, _)| p.replace('/', ".")).unwrap_or_default();
     if let Some(meta) = &cf.kotlin {
-        match kmeta::decode(meta, &package, archive, &cf.name) {
+        match kmeta::decode(meta, &package, archive, &cf.name, Some(cf)) {
             Some(kmeta::Decoded::Class(k)) => {
                 let mut symbol = k.symbol;
                 symbol.origin = origin.clone();
-                if cf.deprecated {
-                    symbol.modifiers.set(Modifiers::DEPRECATED);
-                }
-                return LibClass { internal: cf.name.clone(), symbol, members: k.members, nested: k.nested, companion: k.companion, is_kotlin: true };
+                kmeta::apply_annotations(&mut symbol, &cf.annotations.iter().collect::<Vec<_>>(), cf.deprecated);
+                let members = k.members.into_iter().filter(|m| !m.modifiers.has(Modifiers::HIDDEN)).collect();
+                return LibClass { internal: cf.name.clone(), symbol, members, nested: k.nested, companion: k.companion, is_kotlin: true };
             }
             Some(_) => {
                 // File facade / synthetic: not a class from Kotlin's point of view.

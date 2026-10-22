@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use super::classfile::{Annotation, ClassFile, ElementValue, Member};
 use crate::symbols::{Modifiers, Origin, Param, Symbol, SymbolKind, TypeArg, TypeParam, TypeRef, Variance, Visibility};
 
 // ------------------------------------------------------------- protobuf
@@ -580,7 +581,7 @@ pub struct KClass {
 }
 
 /// Decode a `ProtoBuf.Class` message.
-pub fn decode_class(class: &Msg, nr: &dyn NameResolver, origin: &Origin) -> KClass {
+pub fn decode_class(class: &Msg, nr: &dyn NameResolver, origin: &Origin, cf: Option<&ClassFile>) -> KClass {
     let table = class.msg(30);
     let mut cx = Ctx {
         nr,
@@ -626,13 +627,17 @@ pub fn decode_class(class: &Msg, nr: &dyn NameResolver, origin: &Origin) -> KCla
         s.visibility = visibility(cflags);
         s.params = cx.params(&c.msgs(2));
         s.ty = Some(TypeRef::named(&fq));
+        if let Some(cf) = cf {
+            let arity = s.params.len();
+            annotate_method(&mut s, c.msg(100), nr, cf, "<init>", arity);
+        }
         members.push(s);
     }
     for f in class.msgs(9) {
-        members.push(cx.function(&f, &fq, origin));
+        members.push(annotate_function(cx.function(&f, &fq, origin), &f, nr, cf));
     }
     for p in class.msgs(10) {
-        members.push(cx.property(&p, &fq, origin));
+        members.push(annotate_property(cx.property(&p, &fq, origin), &p, nr, cf));
     }
     for a in class.msgs(11) {
         members.push(cx.type_alias(&a, &fq, origin));
@@ -653,7 +658,7 @@ pub fn decode_class(class: &Msg, nr: &dyn NameResolver, origin: &Origin) -> KCla
 }
 
 /// Decode a `ProtoBuf.Package` message into top-level declarations.
-pub fn decode_package(pkg: &Msg, nr: &dyn NameResolver, package: &str, origin: &Origin) -> Vec<Symbol> {
+pub fn decode_package(pkg: &Msg, nr: &dyn NameResolver, package: &str, origin: &Origin, cf: Option<&ClassFile>) -> Vec<Symbol> {
     let table = pkg.msg(30);
     let cx = Ctx {
         nr,
@@ -663,15 +668,142 @@ pub fn decode_package(pkg: &Msg, nr: &dyn NameResolver, package: &str, origin: &
     };
     let mut out = Vec::new();
     for f in pkg.msgs(3) {
-        out.push(cx.function(&f, package, origin));
+        out.push(annotate_function(cx.function(&f, package, origin), &f, nr, cf));
     }
     for p in pkg.msgs(4) {
-        out.push(cx.property(&p, package, origin));
+        out.push(annotate_property(cx.property(&p, package, origin), &p, nr, cf));
     }
     for a in pkg.msgs(5) {
         out.push(cx.type_alias(&a, package, origin));
     }
     out
+}
+
+// ------------------------------------------------------------ annotations
+
+/// Annotations not worth keeping on symbols.
+const NOISE: &[&str] = &["kotlin.Metadata", "kotlin.SinceKotlin", "kotlin.jvm.", "kotlin.internal.", "kotlin.js.", "kotlin.native.", "org.jetbrains.annotations.", "kotlin.BuilderInference", "kotlin.OverloadResolutionByLambdaReturnType", "kotlin.ParameterName", "kotlin.WasExperimental"];
+
+/// `Lkotlin/Deprecated;` → `kotlin.Deprecated`.
+fn annotation_fq(desc: &str) -> String {
+    desc.trim_start_matches('L').trim_end_matches(';').replace(['/', '$'], ".")
+}
+
+/// Apply a declaration's JVM annotations: deprecation (and its level), opt-in markers, and
+/// the annotation names themselves.
+pub(crate) fn apply_annotations(s: &mut Symbol, anns: &[&Annotation], jvm_deprecated: bool) {
+    if jvm_deprecated {
+        s.modifiers.set(Modifiers::DEPRECATED);
+    }
+    let level = |a: &Annotation| match a.get("level") {
+        Some(ElementValue::Enum { name, .. }) => Some(name.clone()),
+        _ => None,
+    };
+    for a in anns {
+        let fq = annotation_fq(&a.type_desc);
+        match fq.as_str() {
+            "kotlin.Deprecated" | "java.lang.Deprecated" => {
+                s.modifiers.set(Modifiers::DEPRECATED);
+                if matches!(level(a).as_deref(), Some("ERROR" | "HIDDEN")) {
+                    s.modifiers.set(Modifiers::DEPRECATED_ERROR);
+                }
+                if level(a).as_deref() == Some("HIDDEN") {
+                    s.modifiers.set(Modifiers::HIDDEN);
+                }
+            }
+            "kotlin.internal.LowPriorityInOverloadResolution" => s.modifiers.set(Modifiers::LOW_PRIORITY),
+            "kotlin.RequiresOptIn" => {
+                s.modifiers.set(Modifiers::OPT_IN_MARKER);
+                if level(a).as_deref() == Some("WARNING") {
+                    s.modifiers.set(Modifiers::OPT_IN_WARNING);
+                }
+            }
+            "kotlin.DeprecatedSinceKotlin" => {
+                let versions: Vec<String> = ["warningSince", "errorSince", "hiddenSince"].iter().filter_map(|k| a.get(k).and_then(ElementValue::as_string).map(|v| format!("{k}={v}"))).collect();
+                s.annotations.push(format!("kotlin.DeprecatedSinceKotlin({})", versions.join(",")));
+                continue;
+            }
+            _ => {}
+        }
+        if !NOISE.iter().any(|n| if n.ends_with('.') { fq.starts_with(n) } else { fq == *n }) {
+            s.annotations.push(fq);
+        }
+    }
+}
+
+/// The number of parameters in a JVM method descriptor.
+fn desc_arity(desc: &str) -> usize {
+    let params = desc.strip_prefix('(').and_then(|d| d.split_once(')')).map_or("", |(p, _)| p);
+    let mut n = 0;
+    let mut chars = params.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '[' => continue,
+            'L' => {
+                for c in chars.by_ref() {
+                    if c == ';' {
+                        break;
+                    }
+                }
+                n += 1;
+            }
+            _ => n += 1,
+        }
+    }
+    n
+}
+
+/// Annotations of the JVM method for a Kotlin function/constructor: by the signature from
+/// the metadata (`sig`), or else the methods named `name` with `arity` parameters
+/// (annotations all of them share).
+fn annotate_method(s: &mut Symbol, sig: Option<Msg>, nr: &dyn NameResolver, cf: &ClassFile, name: &str, arity: usize) {
+    let jvm_name = sig.as_ref().and_then(|m| m.int(1)).map(|i| nr.string(i)).unwrap_or_else(|| name.to_string());
+    let desc = sig.as_ref().and_then(|m| m.int(2)).map(|i| nr.string(i));
+    let methods: Vec<&Member> = cf.methods.iter().filter(|m| m.name == jvm_name && desc.as_ref().map_or(desc_arity(&m.descriptor) == arity, |d| m.descriptor == *d)).collect();
+    annotate_from(s, &methods);
+}
+
+fn annotate_from(s: &mut Symbol, members: &[&Member]) {
+    let Some((first, rest)) = members.split_first() else { return };
+    let shared: Vec<&Annotation> = first.annotations.iter().filter(|a| rest.iter().all(|m| m.has_annotation(&a.type_desc))).collect();
+    apply_annotations(s, &shared, members.iter().all(|m| m.deprecated));
+}
+
+fn annotate_function(mut s: Symbol, f: &Msg, nr: &dyn NameResolver, cf: Option<&ClassFile>) -> Symbol {
+    if let Some(cf) = cf {
+        let arity = s.params.len() + usize::from(s.receiver.is_some()) + usize::from(s.modifiers.has(Modifiers::SUSPEND));
+        let name = s.name.clone();
+        annotate_method(&mut s, f.msg(100), nr, cf, &name, arity);
+    }
+    s
+}
+
+/// Property annotations live on a synthetic `$annotations` method; deprecation also marks
+/// the getter.
+fn annotate_property(mut s: Symbol, p: &Msg, nr: &dyn NameResolver, cf: Option<&ClassFile>) -> Symbol {
+    let Some(cf) = cf else { return s };
+    let sig = p.msg(100);
+    let receiver = usize::from(s.receiver.is_some());
+    let synthetic = sig.as_ref().and_then(|g| g.msg(2));
+    let mut found: Vec<&Member> = Vec::new();
+    if let Some(m) = synthetic.as_ref() {
+        let name = m.int(1).map(|i| nr.string(i)).unwrap_or_default();
+        let desc = m.int(2).map(|i| nr.string(i));
+        found.extend(cf.methods.iter().filter(|x| x.name == name && desc.as_ref().is_none_or(|d| x.descriptor == *d)));
+    }
+    let getter = sig.as_ref().and_then(|g| g.msg(3));
+    let getter_name = getter.as_ref().and_then(|m| m.int(1)).map(|i| nr.string(i)).unwrap_or_else(|| {
+        if s.name.starts_with("is") && s.name.chars().nth(2).is_some_and(|c| c.is_uppercase()) {
+            s.name.clone()
+        } else {
+            let mut c = s.name.chars();
+            c.next().map(|f| format!("get{}{}", f.to_uppercase(), c.as_str())).unwrap_or_default()
+        }
+    });
+    let getter_deprecated = cf.methods.iter().any(|m| m.name == getter_name && desc_arity(&m.descriptor) == receiver && m.deprecated);
+    let annotations: Vec<&Annotation> = found.first().map(|m| m.annotations.iter().collect()).unwrap_or_default();
+    apply_annotations(&mut s, &annotations, getter_deprecated);
+    s
 }
 
 pub enum Decoded {
@@ -682,7 +814,7 @@ pub enum Decoded {
 }
 
 /// Decode `@kotlin.Metadata` of a class file.
-pub fn decode(meta: &super::classfile::KotlinMetadata, package: &str, archive: &Path, class: &str) -> Option<Decoded> {
+pub fn decode(meta: &super::classfile::KotlinMetadata, package: &str, archive: &Path, class: &str, cf: Option<&ClassFile>) -> Option<Decoded> {
     // Synthetic classes (3) and multi-file facades (4, whose d1 lists part names) carry
     // no declarations.
     if !matches!(meta.kind, 1 | 2 | 5) {
@@ -698,12 +830,12 @@ pub fn decode(meta: &super::classfile::KotlinMetadata, package: &str, archive: &
     match meta.kind {
         1 => {
             let msg = Msg::parse(body)?;
-            Some(Decoded::Class(decode_class(&msg, &nr, &origin)))
+            Some(Decoded::Class(decode_class(&msg, &nr, &origin, cf)))
         }
         2 | 5 => {
             let msg = Msg::parse(body)?;
             let pkg = meta.package_name.as_deref().unwrap_or(package);
-            Some(Decoded::Package(decode_package(&msg, &nr, pkg, &origin)))
+            Some(Decoded::Package(decode_package(&msg, &nr, pkg, &origin, cf)))
         }
         _ => Some(Decoded::Other),
     }
@@ -717,9 +849,9 @@ pub fn decode_builtins(data: &[u8]) -> Option<(String, Vec<KClass>, Vec<Symbol>)
     let fragment = Msg::parse(data.get(start..)?)?;
     let nr = TableNameResolver::new(&fragment.msg(1)?, &fragment.msg(2).unwrap_or_default());
     let origin = Origin::Builtin;
-    let classes: Vec<KClass> = fragment.msgs(4).iter().map(|c| decode_class(c, &nr, &origin)).collect();
+    let classes: Vec<KClass> = fragment.msgs(4).iter().map(|c| decode_class(c, &nr, &origin, None)).collect();
     let package = classes.first().map(|c| c.symbol.fq_name.rsplit_once('.').map(|(p, _)| p.to_string()).unwrap_or_default()).unwrap_or_default();
-    let members = fragment.msg(3).map(|p| decode_package(&p, &nr, &package, &origin)).unwrap_or_default();
+    let members = fragment.msg(3).map(|p| decode_package(&p, &nr, &package, &origin, None)).unwrap_or_default();
     Some((package, classes, members))
 }
 

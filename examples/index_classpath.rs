@@ -67,17 +67,35 @@ fn main() {
                 errors,
                 error_types
             );
+            // Signature plus deprecation and annotations.
+            let describe = |s: &kotlin_lsp::symbols::Symbol| {
+                use kotlin_lsp::symbols::Modifiers;
+                let mut d = s.signature();
+                if s.modifiers.has(Modifiers::DEPRECATED) {
+                    d.push_str(if s.modifiers.has(Modifiers::DEPRECATED_ERROR) { "  [deprecated: error]" } else { "  [deprecated]" });
+                }
+                if s.modifiers.has(Modifiers::LOW_PRIORITY) {
+                    d.push_str("  [low priority]");
+                }
+                if s.modifiers.has(Modifiers::HIDDEN) {
+                    d.push_str("  [hidden]");
+                }
+                if !s.annotations.is_empty() {
+                    d.push_str(&format!("  @{}", s.annotations.join(" @")));
+                }
+                d
+            };
             for fq in &show {
                 if let Some(c) = idx.find_class(fq) {
-                    println!("  {}", c.symbol.signature());
-                    for mem in c.members.iter().take(12) {
-                        println!("    {}", mem.signature());
+                    println!("  {}", describe(&c.symbol));
+                    for mem in c.members.iter().take(40) {
+                        println!("    {}", describe(mem));
                     }
-                } else {
-                    let (pkg, name) = fq.rsplit_once('.').unwrap();
-                    for s in idx.lookup(pkg, name).1.iter().filter(|s| s.kind != SymbolKind::Package).take(8) {
-                        println!("  {}", s.signature());
-                    }
+                }
+                // Top-level declarations with the same name (factory functions...).
+                let (pkg, name) = fq.rsplit_once('.').unwrap();
+                for s in idx.lookup(pkg, name).1.iter().filter(|s| s.kind != SymbolKind::Package).take(8) {
+                    println!("  {}", describe(s));
                 }
             }
         }

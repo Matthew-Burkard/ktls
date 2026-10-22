@@ -24,6 +24,35 @@ pub const KOTLIN_DEFAULT_IMPORTS: &[&str] = &[
     "kotlin.jvm",
 ];
 
+/// Java classes the Kotlin compiler maps to Kotlin types; star imports do not bring them in.
+const MAPPED_JAVA_CLASSES: &[&str] = &[
+    "java.lang.Object",
+    "java.lang.String",
+    "java.lang.CharSequence",
+    "java.lang.Throwable",
+    "java.lang.Cloneable",
+    "java.lang.Number",
+    "java.lang.Comparable",
+    "java.lang.Enum",
+    "java.lang.annotation.Annotation",
+    "java.lang.Iterable",
+    "java.lang.Boolean",
+    "java.lang.Byte",
+    "java.lang.Short",
+    "java.lang.Integer",
+    "java.lang.Long",
+    "java.lang.Float",
+    "java.lang.Double",
+    "java.lang.Character",
+    "java.util.Iterator",
+    "java.util.ListIterator",
+    "java.util.Collection",
+    "java.util.List",
+    "java.util.Set",
+    "java.util.Map",
+    "java.util.Map.Entry",
+];
+
 /// A resolved classifier.
 #[derive(Clone, Debug)]
 pub enum Classifier {
@@ -412,10 +441,12 @@ impl<'s> Resolver<'s> {
         if let Some(c) = in_pkg(package) {
             return Some(Resolved::Classifier(c));
         }
-        // Star imports.
+        // Star imports. In Kotlin, Java classes mapped to Kotlin types (`java.util.List`)
+        // are not imported by them: `List` stays `kotlin.collections.List`.
         if let Some(s) = summary {
+            let kotlin = s.language != Language::Java;
             for imp in s.imports.iter().filter(|i| i.star) {
-                if let Some(c) = in_pkg(&imp.path()) {
+                if let Some(c) = in_pkg(&imp.path()).filter(|c| !kotlin || !MAPPED_JAVA_CLASSES.contains(&c.fq_name())) {
                     return Some(Resolved::Classifier(c));
                 }
             }

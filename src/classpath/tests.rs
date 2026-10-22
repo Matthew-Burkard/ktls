@@ -157,3 +157,18 @@ fn whole_stdlib_decodes() {
     }
     assert!(total > 3000, "{total}");
 }
+
+#[test]
+fn library_annotations() {
+    let Some(idx) = index() else { return };
+    // Deprecation with its levels by Kotlin version.
+    let upper = idx.package_members("kotlin.text").iter().find(|m| m.name == "toUpperCase" && m.params.is_empty()).cloned().expect("toUpperCase");
+    assert!(upper.modifiers.has(Modifiers::DEPRECATED));
+    assert!(upper.annotations.iter().any(|a| a.starts_with("kotlin.DeprecatedSinceKotlin(") && a.contains("errorSince=")), "{:?}", upper.annotations);
+    // Opt-in markers.
+    let time = idx.find_class("kotlin.time.ExperimentalTime").expect("ExperimentalTime");
+    assert!(time.symbol.modifiers.has(Modifiers::OPT_IN_MARKER));
+    assert!(!time.symbol.modifiers.has(Modifiers::OPT_IN_WARNING));
+    // `@LowPriorityInOverloadResolution` (old `contentDeepEquals` overloads).
+    assert!(idx.package_members("kotlin.collections").iter().any(|m| m.name == "contentDeepEquals" && m.modifiers.has(Modifiers::LOW_PRIORITY)));
+}

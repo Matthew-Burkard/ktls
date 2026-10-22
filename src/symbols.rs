@@ -76,6 +76,16 @@ impl Modifiers {
     pub const VARARG: u32 = 1 << 23;
     pub const SYNTHETIC: u32 = 1 << 24;
     pub const HAS_DEFAULT: u32 = 1 << 25;
+    /// `@Deprecated(level = ERROR/HIDDEN)` (library declarations).
+    pub const DEPRECATED_ERROR: u32 = 1 << 26;
+    /// An annotation class annotated `@RequiresOptIn` (library declarations).
+    pub const OPT_IN_MARKER: u32 = 1 << 27;
+    /// ...with `level = WARNING`.
+    pub const OPT_IN_WARNING: u32 = 1 << 28;
+    /// `@Deprecated(level = HIDDEN)`: invisible to source code (library declarations).
+    pub const HIDDEN: u32 = 1 << 29;
+    /// `@kotlin.internal.LowPriorityInOverloadResolution`: loses to other applicable candidates.
+    pub const LOW_PRIORITY: u32 = 1 << 30;
 
     pub fn has(self, flag: u32) -> bool {
         self.0 & flag != 0
@@ -337,6 +347,10 @@ pub struct Symbol {
     pub supertypes: Vec<TypeRef>,
     pub origin: Origin,
     pub doc: Option<String>,
+    /// FQ names of the annotations of a library declaration (noise such as nullability
+    /// and `kotlin.internal` left out). `kotlin.DeprecatedSinceKotlin` is kept with its
+    /// versions: `kotlin.DeprecatedSinceKotlin(warningSince=1.5,errorSince=2.1)`.
+    pub annotations: Vec<String>,
 }
 
 impl Symbol {
@@ -354,6 +368,7 @@ impl Symbol {
             supertypes: Vec::new(),
             origin,
             doc: None,
+            annotations: Vec::new(),
         }
     }
 

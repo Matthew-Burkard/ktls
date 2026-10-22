@@ -1507,3 +1507,83 @@ inline fun <reified T> checked(x: Any): T = x as T
     assert_eq!(count("FINAL_UPPER_BOUND"), 1, "{found:#?}");
     assert_eq!(count("DEPRECATION:"), 1, "{found:#?}");
 }
+
+#[test]
+fn library_deprecation_and_opt_in() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let text = r#"package a
+
+import kotlin.uuid.Uuid
+
+fun f(s: String, c: Char) {
+    s.toUpperCase()
+    c.toInt()
+    Uuid.random()
+}
+
+@OptIn(kotlin.uuid.ExperimentalUuidApi::class)
+fun g() = Uuid.random()
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{}: {}", l.rule.id, &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    // `toUpperCase` is deprecated in the stdlib (`@DeprecatedSinceKotlin`; the module's
+    // version is unknown here, so the declared level applies). `Uuid` was experimental
+    // (`@WasExperimental`): no opt-in needed. `Char.toInt` is a built-in without class
+    // file annotations.
+    has(&found, "DEPRECATION: toUpperCase");
+    assert!(!found.iter().any(|f| f.starts_with("OPT_IN")), "{found:#?}");
+}
+
+#[test]
+fn checks_on_call_results() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let text = r#"package a
+
+class User(val name: String) {
+    fun nick(): String? = null
+    fun greet(): String = "hi"
+}
+
+fun find(id: Int): User? = null
+fun all(): List<User> = emptyList()
+fun <T> pick(t: T): T = t
+
+fun f(m: Map<String, User>, u: User) {
+    find(1).greet()
+    find(1)?.greet()
+    m["a"].greet()
+    u.nick().length
+    val x = find(2)
+    x.greet()
+    all().first().gret()
+    find(3)!!.nick()?.length
+    val n: Int = find(4)!!.greet()
+    if (all().isEmpty()) println()
+    find(5).let { println(it) }
+    pick(u).greet()
+    pick(find(6)).greet()
+    all().first().name.length
+}
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{} line {}: {}", l.rule.id, text[..usize::from(l.range.start())].lines().count(), &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    // Nullable call results (`find(1)`, `m["a"]`, `u.nick()`) and a local initialized with
+    // one; a member missing on a call chain; a call chain of the wrong type. Safe calls,
+    // `!!`, extensions (`let`) and results that are type parameters (`pick`) are not
+    // reported.
+    let expected = [
+        "UNSAFE_CALL line 13: .",
+        "UNSAFE_CALL line 15: .",
+        "UNSAFE_CALL line 16: .",
+        "UNSAFE_CALL line 18: .",
+        "UNRESOLVED_REFERENCE line 19: gret",
+        "INITIALIZER_TYPE_MISMATCH line 21: find(4)!!.greet()",
+    ];
+    assert_eq!(found, expected, "{found:#?}");
+}

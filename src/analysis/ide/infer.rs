@@ -89,6 +89,11 @@ impl Drop for Guard {
 
 // ------------------------------------------------------------ type helpers
 
+/// A library declaration marked `@LowPriorityInOverloadResolution`.
+fn low_priority(d: &Def) -> bool {
+    matches!(d, Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::LOW_PRIORITY))
+}
+
 pub fn strip(t: &TypeRef) -> &TypeRef {
     match t {
         TypeRef::Platform(inner) => strip(inner),
@@ -803,8 +808,15 @@ impl<'s> Engine<'s> {
             let vars: HashSet<String> = sym.type_params.iter().map(|t| t.name.clone()).collect();
             let ok = match strip(&recv) {
                 TypeRef::TypeParam { name, .. } if vars.contains(name) => {
+                    // `fun <T : Appendable> T.f()` needs a receiver within the bound (checked
+                    // when the receiver's hierarchy is fully known).
+                    let bounds: Vec<TypeRef> = sym.type_params.iter().filter(|tp| &tp.name == name).flat_map(|tp| tp.bounds.iter().map(|b| self.resolve_declared(&sym, b))).collect();
+                    let within = |b: &TypeRef| match fq_of(b) {
+                        Some(bfq) => bfq == "kotlin.Any" || closure.iter().any(|c| fq_of(c) == Some(bfq)) || self.known_supertypes(t).is_none(),
+                        None => true,
+                    };
                     s.insert(name.clone(), non_null(strip(t).clone()));
-                    true
+                    bounds.iter().all(within)
                 }
                 TypeRef::Named { fq: Some(fq), .. } => {
                     // Receivers declared through a type alias (`kotlin.text.StringBuilder`).
@@ -1162,10 +1174,16 @@ impl<'s> Engine<'s> {
         }
         let callables: Vec<Def> = self.top_level_named(name).into_iter().filter(|s| s.receiver.is_none()).map(Def::symbol).collect();
         let callables = self.filter_call(callables, call);
+        let scope = scope_at(at, &self.package(), &mut self.locals_cache.borrow_mut());
+        // Low-priority functions lose to a class's constructors.
+        if call.is_some() && !callables.is_empty() && callables.iter().all(low_priority)
+            && let Ok(Resolved::Classifier(c)) = self.res.resolve_type_name(&[name], &scope)
+        {
+            return vec![Def::symbol(c.symbol().clone())];
+        }
         if !callables.is_empty() && (call.is_some() || callables.iter().any(|d| matches!(d, Def::Symbol { sym, .. } if sym.kind != SymbolKind::Function))) {
             return callables;
         }
-        let scope = scope_at(at, &self.package(), &mut self.locals_cache.borrow_mut());
         match self.res.resolve_type_name(&[name], &scope) {
             Ok(Resolved::Classifier(c)) => vec![Def::symbol(c.symbol().clone())],
             Ok(Resolved::Package(p)) => vec![Def::Package(p)],
@@ -1175,8 +1193,10 @@ impl<'s> Engine<'s> {
         }
     }
 
-    /// Prefer overloads whose arity fits the call.
+    /// Prefer overloads whose arity fits the call, and normal ones over low-priority ones;
+    /// hidden declarations are never candidates.
     fn filter_call(&self, defs: Vec<Def>, call: Option<&SyntaxNode>) -> Vec<Def> {
+        let defs: Vec<Def> = defs.into_iter().filter(|d| !matches!(d, Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::HIDDEN))).collect();
         let Some(call) = call else { return defs };
         let n = call_arity(call);
         let fitting: Vec<Def> = defs
@@ -1187,7 +1207,11 @@ impl<'s> Engine<'s> {
             })
             .cloned()
             .collect();
-        if fitting.is_empty() { defs } else { fitting }
+        let mut out = if fitting.is_empty() { defs } else { fitting };
+        if out.iter().any(|d| !low_priority(d)) {
+            out.retain(|d| !low_priority(d));
+        }
+        out
     }
 
     pub fn resolve_qualifier(&self, e: &SyntaxNode) -> Qualifier {

@@ -3,7 +3,8 @@
 //! whose result is known.
 
 use super::super::*;
-use super::expressions::{certain_type_smart, literal_type, type_mismatch};
+use super::expressions::{literal_type, type_mismatch};
+use super::certain::shown;
 use super::when::condition_value;
 use crate::analysis::ide::infer::{Def, Engine, fq_of, strip};
 use crate::symbols::{Origin, SymbolKind, TypeArg, TypeRef};
@@ -54,7 +55,7 @@ fn certain(e: &Engine, value: &SyntaxNode) -> Option<TypeRef> {
             None => TypeRef::named("kotlin.Nothing").nullable(true),
         });
     }
-    certain_type_smart(e, value).then(|| e.type_of(value)).flatten()
+    super::certain::certain_type(e, value, true)
 }
 
 fn nullable(t: &TypeRef) -> bool {
@@ -99,7 +100,7 @@ fn assignment(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     if matches!(expected, TypeRef::Platform(_)) || matches!(strip(&expected), TypeRef::TypeParam { .. }) {
         return;
     }
-    if let Some((rule, msg, _, convert)) = type_mismatch(e, &value, &expected, &expected.display()) {
+    if let Some((rule, msg, _, convert)) = type_mismatch(e, &value, &expected, &shown(&expected)) {
         let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ASSIGNMENT_TYPE_MISMATCH } else { rule };
         out.report_fixes(rule, value.text_range(), msg, convert.into_iter().collect());
     }
@@ -109,10 +110,11 @@ fn assignment(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
 fn condition(e: &Engine, value: &SyntaxNode, out: &mut Sink) {
     let Some(t) = certain(e, value) else { return };
     let fq = fq_of(&t).unwrap_or_default();
-    if fq == "kotlin.Nothing" || fq.is_empty() || fq == "kotlin.Boolean" && !nullable(&t) {
+    // `Boolean!` from Java may be used as a condition.
+    if fq == "kotlin.Nothing" || fq.is_empty() || fq == "kotlin.Boolean" && (!nullable(&t) || matches!(t, TypeRef::Platform(_))) {
         return;
     }
-    out.report(&CONDITION_TYPE_MISMATCH, value.text_range(), format!("Condition type mismatch: inferred type is '{}' but 'Boolean' was expected.", t.display()), None);
+    out.report(&CONDITION_TYPE_MISMATCH, value.text_range(), format!("Condition type mismatch: inferred type is '{}' but 'Boolean' was expected.", shown(&t)), None);
 }
 
 /// Whether `fq` names a class (not an interface, so unrelated classes share no subtype).
@@ -129,13 +131,14 @@ fn cast(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     let target = e.resolve_syntax_type(&ty);
     if unchecked(e, &actual, &target, &ty) {
         let at = n.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE).map_or(n.text_range(), |o| o.text_range());
-        out.report(&UNCHECKED_CAST, at, format!("Unchecked cast of '{}' to '{}'.", actual.display(), target.display()), None);
+        out.report(&UNCHECKED_CAST, at, format!("Unchecked cast of '{}' to '{}'.", shown(&actual), shown(&target)), None);
         return;
     }
     let (Some(afq), Some(tfq)) = (fq_of(&actual), fq_of(&target)) else { return };
     if matches!(strip(&target), TypeRef::TypeParam { .. }) || afq == "kotlin.Nothing" {
         return;
     }
+    // Unknown type arguments (displayed as errors) never make a cast useless.
     if actual.display() == target.display() && !safe {
         let remove = TextRange::new(value.text_range().end(), n.text_range().end());
         out.report(&USELESS_CAST, TextRange::new(value.text_range().end(), n.text_range().end()), "No cast needed.", Some(Fix::delete("Remove cast", remove)));
@@ -194,7 +197,7 @@ fn equality(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     let Some((l, r)) = binary_operands(n) else { return };
     let (Some(a), Some(b)) = (operand_type(e, &l), operand_type(e, &r)) else { return };
     if incompatible(e, &a, &b) {
-        out.report(&EQUALITY_NOT_APPLICABLE, op.text_range(), format!("Operator '{}' cannot be applied to '{}' and '{}'.", op.text(), a.display(), b.display()), None);
+        out.report(&EQUALITY_NOT_APPLICABLE, op.text_range(), format!("Operator '{}' cannot be applied to '{}' and '{}'.", op.text(), shown(&a), shown(&b)), None);
     }
 }
 
@@ -210,7 +213,7 @@ fn when_values(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     for v in conditions.filter_map(|c| condition_value(&c)) {
         let Some(vt) = operand_type(e, &v) else { continue };
         if incompatible(e, &vt, &st) {
-            out.report(&INCOMPATIBLE_TYPES, v.text_range(), format!("Incompatible types '{}' and '{}'.", vt.display(), st.display()), None);
+            out.report(&INCOMPATIBLE_TYPES, v.text_range(), format!("Incompatible types '{}' and '{}'.", shown(&vt), shown(&st)), None);
         }
     }
 }
@@ -263,31 +266,44 @@ fn kotlin_class_type(e: &Engine, v: &SyntaxNode) -> Option<TypeRef> {
     (kotlin && &**fq != "kotlin.Nothing" && c.symbol().kind != SymbolKind::TypeAlias).then_some(t)
 }
 
-/// Whether `t` has a member or applicable extension named `name`.
-fn has_function(e: &Engine, t: &TypeRef, name: &str) -> bool {
-    !e.members_named(t, name).is_empty() || !e.extensions(t, name).is_empty()
+/// Whether `t` has a member or applicable extension named `name` at `at` (member
+/// extensions of implicit receivers included).
+fn has_function(e: &Engine, at: &SyntaxNode, t: &TypeRef, name: &str) -> bool {
+    !e.members_named(t, name).is_empty() || !e.extensions(t, name).is_empty() || !e.member_extensions(at, t, name).is_empty()
+}
+
+/// Inside a local class or object expression: their (inherited) member extensions are not
+/// in scope for the engine.
+fn in_local_class(n: &SyntaxNode) -> bool {
+    n.ancestors().any(|a| a.kind() == SyntaxKind::OBJECT_LITERAL || matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION) && a.ancestors().any(|b| b.kind() == SyntaxKind::BLOCK))
 }
 
 /// `for (x in v)` where `v`'s type has no `iterator()`.
 fn loop_range(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    if in_local_class(n) {
+        return;
+    }
     let Some(v) = n.first_child() else { return };
     let Some(t) = kotlin_class_type(e, &v) else { return };
-    if !has_function(e, &t, "iterator") {
-        out.report(&ITERATOR_MISSING, v.text_range(), format!("For-loop range must have an 'iterator()' method: '{}' has none.", t.display()), None);
+    if !has_function(e, n, &t, "iterator") {
+        out.report(&ITERATOR_MISSING, v.text_range(), format!("For-loop range must have an 'iterator()' method: '{}' has none.", shown(&t)), None);
     }
 }
 
 /// `val x by d` where `d`'s type has no `getValue` (or, for a `var`, no `setValue`).
 fn delegate(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    if in_local_class(n) {
+        return;
+    }
     let Some(v) = n.children().last() else { return };
     let Some(t) = kotlin_class_type(e, &v) else { return };
-    if has_function(e, &t, "provideDelegate") {
+    if has_function(e, n, &t, "provideDelegate") {
         return;
     }
     let var = n.parent().is_some_and(|p| ast::token(&p, SyntaxKind::VAR_KW).is_some());
     for name in ["getValue", "setValue"].into_iter().take(if var { 2 } else { 1 }) {
-        if !has_function(e, &t, name) {
-            out.report(&DELEGATE_SPECIAL_FUNCTION_MISSING, v.text_range(), format!("Property delegate must have a '{name}' method: '{}' has none.", t.display()), None);
+        if !has_function(e, n, &t, name) {
+            out.report(&DELEGATE_SPECIAL_FUNCTION_MISSING, v.text_range(), format!("Property delegate must have a '{name}' method: '{}' has none.", shown(&t)), None);
         }
     }
 }
