@@ -167,6 +167,12 @@ rules! {
     INCOMPATIBLE_TYPES = "INCOMPATIBLE_TYPES", Compiler, Error, false, [], "'when' branch value whose class is unrelated to the subject's";
     INVALID_IF_AS_EXPRESSION = "INVALID_IF_AS_EXPRESSION", Compiler, Error, false, [], "'if' without 'else' used as a value";
     ELSE_MISPLACED_IN_WHEN = "ELSE_MISPLACED_IN_WHEN", Compiler, Error, false, [], "'else' branch that is not the last one in a 'when'";
+    DEPRECATION_ERROR = "DEPRECATION_ERROR", Compiler, Error, false, [], "Use of a project declaration deprecated with level ERROR or HIDDEN";
+    OPT_IN_USAGE_ERROR = "OPT_IN_USAGE_ERROR", Compiler, Error, false, [], "Use of a declaration that requires opt-in (marker with level ERROR) without opting in";
+    CYCLIC_INHERITANCE_HIERARCHY = "CYCLIC_INHERITANCE_HIERARCHY", Compiler, Error, false, [], "Class that inherits from itself through its supertypes";
+    MANY_IMPL_MEMBER_NOT_IMPLEMENTED = "MANY_IMPL_MEMBER_NOT_IMPLEMENTED", Compiler, Error, false, [], "Member inherited with implementations from two interfaces and not overridden";
+    ITERATOR_MISSING = "ITERATOR_MISSING", Compiler, Error, false, [], "'for' over a value without 'iterator()'";
+    DELEGATE_SPECIAL_FUNCTION_MISSING = "DELEGATE_SPECIAL_FUNCTION_MISSING", Compiler, Error, false, [], "Property delegate without 'getValue' (or 'setValue' for a 'var')";
     ILLEGAL_SUSPEND_FUNCTION_CALL = "ILLEGAL_SUSPEND_FUNCTION_CALL", Compiler, Error, false, [], "Call to a 'suspend' function outside a coroutine or 'suspend' function";
     ARGUMENT_TYPE_MISMATCH = "ARGUMENT_TYPE_MISMATCH", Compiler, Error, false, [], "Argument of the wrong type (literal, typed local/parameter, constructor call) for a function without overloads";
     NULL_FOR_NONNULL_TYPE = "NULL_FOR_NONNULL_TYPE", Compiler, Error, false, [], "'null' for a non-null type";
@@ -181,6 +187,10 @@ rules! {
     NOTHING_TO_INLINE = "NOTHING_TO_INLINE", Compiler, Warning, false, [], "'inline' function without parameters of function type";
     REDUNDANT_NULLABLE = "REDUNDANT_NULLABLE", Compiler, Warning, true, [], "Type marked nullable twice ('T??')";
     DUPLICATE_BRANCH_CONDITION_IN_WHEN = "DUPLICATE_BRANCH_CONDITION_IN_WHEN", Compiler, Warning, false, [], "'when' branch condition repeating an earlier one";
+    OPT_IN_USAGE = "OPT_IN_USAGE", Compiler, Warning, false, [], "Use of a declaration that requires opt-in (marker with level WARNING) without opting in";
+    UNCHECKED_CAST = "UNCHECKED_CAST", Compiler, Warning, false, [], "Cast to a generic type or type parameter the runtime cannot check";
+    EXTENSION_SHADOWED_BY_MEMBER = "EXTENSION_SHADOWED_BY_MEMBER", Compiler, Warning, false, [], "Extension with the signature of a member of its receiver";
+    FINAL_UPPER_BOUND = "FINAL_UPPER_BOUND", Compiler, Warning, false, [], "Type parameter bounded by a final class";
     UNNECESSARY_SAFE_CALL = "UNNECESSARY_SAFE_CALL", Compiler, Warning, true, [], "'?.' on a non-null receiver";
     UNNECESSARY_NOT_NULL_ASSERTION = "UNNECESSARY_NOT_NULL_ASSERTION", Compiler, Warning, true, [], "'!!' on a non-null value";
     USELESS_ELVIS = "USELESS_ELVIS", Compiler, Warning, true, [], "'?:' after a non-null value";

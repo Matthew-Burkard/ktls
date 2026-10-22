@@ -477,6 +477,11 @@ impl<'s> Engine<'s> {
         self.anon_members(&fq)?.into_iter().find(|m| matches!(&m.origin, Origin::Source { name_range: r, .. } if *r == name_range))
     }
 
+    /// Members declared in the classifier `fq` itself (not inherited).
+    pub fn declared_members(&self, fq: &str) -> Vec<Symbol> {
+        self.classifier(fq).map(|c| self.members_of(&c)).unwrap_or_default()
+    }
+
     fn members_of(&self, c: &Classifier) -> Vec<Symbol> {
         self.members_ref(c).to_vec()
     }

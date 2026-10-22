@@ -70,7 +70,7 @@ fn reified(tp: &SyntaxNode, out: &mut Sink) {
 }
 
 /// The type parameter named `name` declared by the nearest declaration that has one.
-fn type_parameter(at: &SyntaxNode, name: &str) -> Option<SyntaxNode> {
+pub(super) fn type_parameter(at: &SyntaxNode, name: &str) -> Option<SyntaxNode> {
     for a in at.ancestors() {
         if !matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::CLASS | SyntaxKind::PROPERTY | SyntaxKind::TYPEALIAS) {
             continue;

@@ -36,7 +36,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
 }
 
 /// An all-open compiler plugin (Spring, JPA...) may make annotated classes open.
-fn all_open(cx: &Cx) -> bool {
+pub(super) fn all_open(cx: &Cx) -> bool {
     cx.module.is_some_and(|m| m.kotlin.compiler_plugins.iter().any(|p| matches!(p.as_str(), "allopen" | "all-open" | "spring" | "jpa" | "noarg")))
 }
 

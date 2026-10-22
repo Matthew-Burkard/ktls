@@ -6,7 +6,7 @@ use super::super::*;
 use super::expressions::{certain_type_smart, literal_type, type_mismatch};
 use super::when::condition_value;
 use crate::analysis::ide::infer::{Def, Engine, fq_of, strip};
-use crate::symbols::{Origin, SymbolKind, TypeRef};
+use crate::symbols::{Origin, SymbolKind, TypeArg, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
@@ -36,6 +36,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             }
             SyntaxKind::BINARY_WITH_TYPE => cast(e, &n, out),
             SyntaxKind::IF_EXPR => if_as_expression(e, &n, out),
+            SyntaxKind::LOOP_RANGE => loop_range(e, &n, out),
+            SyntaxKind::PROPERTY_DELEGATE => delegate(e, &n, out),
             SyntaxKind::WHEN_EXPR => when_values(e, &n, out),
             SyntaxKind::IS_EXPR => is_check(e, &n, out),
             _ => {}
@@ -125,6 +127,11 @@ fn cast(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     let safe = n.children().any(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE && c.text() == "as?");
     let Some(actual) = certain(e, &value) else { return };
     let target = e.resolve_syntax_type(&ty);
+    if unchecked(e, &actual, &target, &ty) {
+        let at = n.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE).map_or(n.text_range(), |o| o.text_range());
+        out.report(&UNCHECKED_CAST, at, format!("Unchecked cast of '{}' to '{}'.", actual.display(), target.display()), None);
+        return;
+    }
     let (Some(afq), Some(tfq)) = (fq_of(&actual), fq_of(&target)) else { return };
     if matches!(strip(&target), TypeRef::TypeParam { .. }) || afq == "kotlin.Nothing" {
         return;
@@ -224,5 +231,63 @@ fn if_as_expression(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     };
     if used && let Some(kw) = ast::token(n, SyntaxKind::IF_KW) {
         out.report(&INVALID_IF_AS_EXPRESSION, kw.text_range(), "'if' must have both main and 'else' branches if used as an expression.", None);
+    }
+}
+
+/// A cast the runtime cannot check: from a non-generic type to a type with type arguments
+/// (or a function type), or to a type parameter that is not reified.
+fn unchecked(e: &Engine, actual: &TypeRef, target: &TypeRef, written: &ast::TypeRef) -> bool {
+    let TypeRef::Named { fq: Some(afq), args, .. } = strip(actual) else { return false };
+    if &**afq == "kotlin.Nothing" || !args.is_empty() || e.classifier(afq).is_none_or(|c| !c.symbol().type_params.is_empty()) {
+        return false;
+    }
+    match strip(target) {
+        TypeRef::TypeParam { name, .. } => super::signatures::type_parameter(written.syntax(), name).is_some_and(|tp| !has_modifier(&tp, "reified")),
+        // A subclass fixing the arguments (`class Names : List<String>`) is an upcast.
+        TypeRef::Named { fq: Some(tfq), args, .. } => args.iter().any(|a| matches!(a, TypeArg::Type { .. })) && e.conforms(&TypeRef::named(afq), tfq) == Some(false),
+        TypeRef::Function { .. } => &**afq == "kotlin.Any",
+        _ => false,
+    }
+}
+
+/// The certain type of `v`, when it is a non-null Kotlin or project class type.
+fn kotlin_class_type(e: &Engine, v: &SyntaxNode) -> Option<TypeRef> {
+    let t = certain(e, v)?;
+    let TypeRef::Named { fq: Some(fq), nullable: false, .. } = &t else { return None };
+    let c = e.classifier(fq)?;
+    let kotlin = match &c {
+        crate::analysis::resolve::Classifier::Library(lc) => lc.is_kotlin,
+        crate::analysis::resolve::Classifier::Source(s) => matches!(&s.origin, Origin::Source { file, .. } if file.extension().is_some_and(|x| x == "kt" || x == "kts")),
+        _ => false,
+    };
+    (kotlin && &**fq != "kotlin.Nothing" && c.symbol().kind != SymbolKind::TypeAlias).then_some(t)
+}
+
+/// Whether `t` has a member or applicable extension named `name`.
+fn has_function(e: &Engine, t: &TypeRef, name: &str) -> bool {
+    !e.members_named(t, name).is_empty() || !e.extensions(t, name).is_empty()
+}
+
+/// `for (x in v)` where `v`'s type has no `iterator()`.
+fn loop_range(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    let Some(v) = n.first_child() else { return };
+    let Some(t) = kotlin_class_type(e, &v) else { return };
+    if !has_function(e, &t, "iterator") {
+        out.report(&ITERATOR_MISSING, v.text_range(), format!("For-loop range must have an 'iterator()' method: '{}' has none.", t.display()), None);
+    }
+}
+
+/// `val x by d` where `d`'s type has no `getValue` (or, for a `var`, no `setValue`).
+fn delegate(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    let Some(v) = n.children().last() else { return };
+    let Some(t) = kotlin_class_type(e, &v) else { return };
+    if has_function(e, &t, "provideDelegate") {
+        return;
+    }
+    let var = n.parent().is_some_and(|p| ast::token(&p, SyntaxKind::VAR_KW).is_some());
+    for name in ["getValue", "setValue"].into_iter().take(if var { 2 } else { 1 }) {
+        if !has_function(e, &t, name) {
+            out.report(&DELEGATE_SPECIAL_FUNCTION_MISSING, v.text_range(), format!("Property delegate must have a '{name}' method: '{}' has none.", t.display()), None);
+        }
     }
 }

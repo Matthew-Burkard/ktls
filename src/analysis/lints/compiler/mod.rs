@@ -9,7 +9,9 @@
 mod declarations;
 mod expressions;
 mod flow;
+mod inheritance;
 mod jumps;
+mod markers;
 mod signatures;
 mod types;
 mod typing;
@@ -28,4 +30,6 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     types::check(cx, out);
     typing::check(cx, out);
     signatures::check(cx, out);
+    inheritance::check(cx, out);
+    markers::check(cx, out);
 }

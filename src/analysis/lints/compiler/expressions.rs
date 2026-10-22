@@ -22,7 +22,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         }
         match n.kind() {
             SyntaxKind::NAME_REF => name_ref(cx, e, &n, &mut st, out),
-            SyntaxKind::USER_TYPE => deprecated_type(e, &n, out),
+            SyntaxKind::USER_TYPE => deprecated_type(cx, e, &n, out),
             SyntaxKind::BINARY_EXPR => {
                 assignment(cx, e, &n, out);
                 null_checks(e, &n, out);
@@ -168,7 +168,8 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
         && defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::DEPRECATED)))
         && !in_deprecated_declaration(nr)
     {
-        out.report(&DEPRECATION, tok.text_range(), format!("'{name}' is deprecated."), None);
+        let error = defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if super::markers::deprecated_error(cx, sym)));
+        out.report(if error { &DEPRECATION_ERROR } else { &DEPRECATION }, tok.text_range(), format!("'{name}' is deprecated."), None);
     }
     if !defs.is_empty() || !cx.on(&UNRESOLVED_REFERENCE_EXPR) || in_unknown_lambda(e, nr) || in_context_scope(nr) {
         return;
@@ -260,7 +261,7 @@ fn in_deprecated_declaration(n: &SyntaxNode) -> bool {
     })
 }
 
-fn deprecated_type(e: &Engine, ut: &SyntaxNode, out: &mut Sink) {
+fn deprecated_type(cx: &Cx, e: &Engine, ut: &SyntaxNode, out: &mut Sink) {
     if ut.ancestors().any(|a| matches!(a.kind(), SyntaxKind::IMPORT_DIRECTIVE)) {
         return;
     }
@@ -276,7 +277,8 @@ fn deprecated_type(e: &Engine, ut: &SyntaxNode, out: &mut Sink) {
         && !in_deprecated_declaration(ut)
     {
         let (n, r) = segs.last().unwrap();
-        out.report(&DEPRECATION, *r, format!("'{n}' is deprecated."), None);
+        let rule = if super::markers::deprecated_error(cx, c.symbol()) { &DEPRECATION_ERROR } else { &DEPRECATION };
+        out.report(rule, *r, format!("'{n}' is deprecated."), None);
     }
 }
 

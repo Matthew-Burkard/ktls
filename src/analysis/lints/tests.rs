@@ -1401,3 +1401,109 @@ fun body(): Int = "x"
     assert_eq!(count("RETURN_TYPE_MISMATCH:"), 2, "{found:#?}");
     assert_eq!(count("TYPE_PARAMETER_AS_REIFIED"), 1, "{found:#?}");
 }
+
+#[test]
+fn quick_win_compiler_errors() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    fx.run(
+        "src/main/kotlin/a/Api.kt",
+        r#"package a
+
+@RequiresOptIn
+annotation class Internal
+
+@RequiresOptIn(level = RequiresOptIn.Level.WARNING)
+annotation class Experimental
+
+@Internal
+fun internalCall() = 1
+
+@Experimental
+fun experimentalCall() = 2
+
+@Deprecated("gone", level = DeprecationLevel.ERROR)
+fun removed() = 3
+
+@Deprecated("old")
+fun old() = 4
+"#,
+    );
+    let text = r#"package a
+
+open class Loop1 : Loop2()
+open class Loop2 : Loop1()
+
+interface Left { fun hello() = "left" }
+interface Right { fun hello() = "right" }
+class Both : Left, Right
+class Resolved : Left, Right { override fun hello() = "both" }
+
+class NoIterator
+class Holder
+class Delegate { operator fun getValue(thisRef: Any?, p: kotlin.reflect.KProperty<*>) = 1 }
+
+fun String.length(): Int = 0
+fun String.get(index: Int): Char = 'a'
+fun String.trimmed(): String = this
+
+fun <T : Int> bounded(t: T) = t
+fun <T : Int?> nullableBound(t: T) = t
+
+fun use(any: Any, n: NoIterator) {
+    internalCall()
+    experimentalCall()
+    removed()
+    old()
+    for (x in n) {}
+    for (c in "abc") {}
+    val d by Holder()
+    val ok by Delegate()
+    var settable by Delegate()
+    val list = any as List<String>
+    val star = any as List<*>
+}
+
+@OptIn(Internal::class)
+fun optedIn() = internalCall()
+
+@Internal
+fun propagated() = internalCall()
+
+fun <T> unchecked(x: Any): T = x as T
+inline fun <reified T> checked(x: Any): T = x as T
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{}: {}", l.rule.id, &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    for expected in [
+        "CYCLIC_INHERITANCE_HIERARCHY: Loop2",
+        "CYCLIC_INHERITANCE_HIERARCHY: Loop1",
+        "MANY_IMPL_MEMBER_NOT_IMPLEMENTED: Both",
+        "OPT_IN_USAGE_ERROR: internalCall",
+        "OPT_IN_USAGE: experimentalCall",
+        "DEPRECATION_ERROR: removed",
+        "DEPRECATION: old",
+        "ITERATOR_MISSING: n",
+        "DELEGATE_SPECIAL_FUNCTION_MISSING: Holder()",
+        "DELEGATE_SPECIAL_FUNCTION_MISSING: Delegate()",
+        "UNCHECKED_CAST: as",
+        "EXTENSION_SHADOWED_BY_MEMBER: get",
+        "FINAL_UPPER_BOUND: Int",
+    ] {
+        has(&found, expected);
+    }
+    let count = |rule: &str| found.iter().filter(|f| f.starts_with(rule)).count();
+    // Opted in / propagated uses, `Resolved`, `for` over a String, `val` by a delegate with
+    // `getValue`, `List<*>`, reified casts, `trimmed`, `length` (a property
+    // member) and `Int?` bounds are fine.
+    assert_eq!(count("OPT_IN_USAGE_ERROR"), 1, "{found:#?}");
+    assert_eq!(count("MANY_IMPL_MEMBER_NOT_IMPLEMENTED"), 1, "{found:#?}");
+    assert_eq!(count("ITERATOR_MISSING"), 1, "{found:#?}");
+    assert_eq!(count("DELEGATE_SPECIAL_FUNCTION_MISSING"), 2, "{found:#?}");
+    assert_eq!(count("UNCHECKED_CAST"), 2, "{found:#?}");
+    assert_eq!(count("EXTENSION_SHADOWED_BY_MEMBER"), 1, "{found:#?}");
+    assert_eq!(count("FINAL_UPPER_BOUND"), 1, "{found:#?}");
+    assert_eq!(count("DEPRECATION:"), 1, "{found:#?}");
+}

@@ -159,6 +159,12 @@ supertypes, generated code).
 | `INCOMPATIBLE_TYPES` | error | 'when' branch value whose class is unrelated to the subject's |
 | `INVALID_IF_AS_EXPRESSION` | error | 'if' without 'else' used as a value |
 | `ELSE_MISPLACED_IN_WHEN` | error | 'else' branch that is not the last one in a 'when' |
+| `DEPRECATION_ERROR` | error | Use of a project declaration deprecated with level ERROR or HIDDEN |
+| `OPT_IN_USAGE_ERROR` | error | Use of a declaration that requires opt-in (marker with level ERROR) without opting in |
+| `CYCLIC_INHERITANCE_HIERARCHY` | error | Class that inherits from itself through its supertypes |
+| `MANY_IMPL_MEMBER_NOT_IMPLEMENTED` | error | Member inherited with implementations from two interfaces and not overridden |
+| `ITERATOR_MISSING` | error | 'for' over a value without 'iterator()' |
+| `DELEGATE_SPECIAL_FUNCTION_MISSING` | error | Property delegate without 'getValue' (or 'setValue' for a 'var') |
 | `ARGUMENT_TYPE_MISMATCH` | error | Argument of the wrong type (literal, typed local/parameter, constructor call) for a function without overloads |
 | `NULL_FOR_NONNULL_TYPE` | error | 'null' for a non-null type |
 | `TOO_MANY_ARGUMENTS` | error | More arguments than parameters |
@@ -171,6 +177,10 @@ supertypes, generated code).
 | `NOTHING_TO_INLINE` | warning | 'inline' function without parameters of function type |
 | `REDUNDANT_NULLABLE` | warning | Type marked nullable twice ('T??') |
 | `DUPLICATE_BRANCH_CONDITION_IN_WHEN` | warning | 'when' branch condition repeating an earlier one |
+| `OPT_IN_USAGE` | warning | Use of a declaration that requires opt-in (marker with level WARNING) without opting in |
+| `UNCHECKED_CAST` | warning | Cast to a generic type or type parameter the runtime cannot check |
+| `EXTENSION_SHADOWED_BY_MEMBER` | warning | Extension with the signature of a member of its receiver |
+| `FINAL_UPPER_BOUND` | warning | Type parameter bounded by a final class |
 | `UNNECESSARY_SAFE_CALL` | warning | '?.' on a non-null receiver |
 | `UNNECESSARY_NOT_NULL_ASSERTION` | warning | '!!' on a non-null value |
 | `USELESS_ELVIS` | warning | '?:' after a non-null value |

@@ -799,6 +799,11 @@ impl<'s> ScriptInterpreter<'s> {
         let name = target.path().unwrap_or_default();
         let body: &[Stmt] = closure.as_deref().unwrap_or(&[]);
         let first_str = || args.first().and_then(|a| self.ev.string(&a.value));
+        // Kotlin compile task configuration: `tasks.withType<KotlinCompile>().configureEach { }`,
+        // `tasks.compileTestKotlin { }`, `tasks.named("compileKotlin") { }`.
+        if *ctx == Ctx::Top && closure.is_some() && (name.starts_with("tasks.") || name.is_empty() && chain_root(target).as_deref() == Some("tasks")) {
+            return self.compiler_options(&name, args, body);
+        }
 
         // Resource directories are not source roots.
         if name.split('.').any(|p| p == "resources" || p == "res" || p == "assets") {
@@ -986,7 +991,7 @@ impl<'s> ScriptInterpreter<'s> {
                 self.stmts(body, &Ctx::KotlinSourceSet(ss.to_string()));
             }
             (Ctx::KotlinSourceSet(_), "kotlin") => self.stmts(body, ctx),
-            (Ctx::KotlinSourceSet(_), "languageSettings") => self.compiler_options(&name, args, body),
+            (Ctx::KotlinSourceSet(_), "languageSettings" | "languageSettings.apply") => self.compiler_options(&name, args, body),
             (Ctx::Dependencies { .. }, _) => {}
             (Ctx::Top, "dependencyLocking") | (Ctx::Top, "tasks") => {}
             _ => {}
@@ -1045,11 +1050,14 @@ impl<'s> ScriptInterpreter<'s> {
                     } else if n.ends_with("apiVersion.set") {
                         self.model.api_version = v;
                     } else if n.ends_with("optIn.add") || n.ends_with("optIn") {
-                        self.model.opt_in.extend(v);
+                        if let Some(v) = v.filter(|v| !self.model.opt_in.contains(v)) {
+                            self.model.opt_in.push(v);
+                        }
                     } else if n.ends_with("freeCompilerArgs.add") || n.ends_with("freeCompilerArgs.addAll") {
                         for a in args {
                             if let Some(arg) = self.ev.string(&a.value)
-                                && let Some(o) = arg.strip_prefix("-opt-in=") {
+                                && let Some(o) = arg.strip_prefix("-opt-in=")
+                                && !self.model.opt_in.iter().any(|x| x == o) {
                                     self.model.opt_in.push(o.into());
                                 }
                         }
@@ -1365,6 +1373,16 @@ pub fn canonical_plugin_id(id: &str) -> String {
     .to_string()
 }
 
+/// The leftmost name of a call chain (`tasks.withType<T>().configureEach` → `tasks`).
+fn chain_root(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Ident(s) => Some(s.clone()),
+        Expr::Member(t, _) => chain_root(t),
+        Expr::Call { target, .. } => chain_root(target),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1517,6 +1535,32 @@ kotlin {
         assert_eq!(m.kmp_targets, vec!["jvm", "iosArm64"]);
         let configs: Vec<_> = m.deps.iter().map(|d| d.configuration.as_str()).collect();
         assert_eq!(configs, vec!["commonMainImplementation", "jvmMainImplementation", "commonTestImplementation"]);
+    }
+
+    #[test]
+    fn opt_in_from_tasks_and_language_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let build = write(d, "build.gradle.kts", r#"
+plugins { kotlin("multiplatform") version "2.0.0" }
+kotlin {
+    jvm()
+    sourceSets.all {
+        languageSettings.apply { optIn("a.Experimental") }
+    }
+}
+tasks.withType<KotlinCompile>().configureEach {
+    compilerOptions { optIn.add("a.Internal") }
+}
+tasks.compileTestKotlin {
+    compilerOptions { freeCompilerArgs.add("-opt-in=a.Internal") }
+}
+"#);
+        let settings = read_settings(d);
+        let conventions = HashMap::new();
+        let mut it = ScriptInterpreter::new(&settings, d, HashMap::new(), &conventions);
+        it.run_file(&build);
+        assert_eq!(it.model.opt_in, vec!["a.Experimental", "a.Internal"]);
     }
 
     #[test]
