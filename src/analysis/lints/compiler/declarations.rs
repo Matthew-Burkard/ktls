@@ -425,11 +425,31 @@ fn implementations(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
     for m in members.iter().chain(ctor_overrides.iter()) {
         let Some(name) = name_token(m) else { continue };
         let n = ast::ident_text(&name);
-        if names.contains(&n) || matches!(n.as_str(), "equals" | "hashCode" | "toString") {
+        if matches!(n.as_str(), "equals" | "hashCode" | "toString") {
             continue;
         }
+        // A supertype member of that name: the signature must match one.
+        let mut msg = format!("'{n}' overrides nothing.");
+        if names.contains(&n) {
+            let Some(sym) = decl_symbol(cx, &name, |s| matches!(s.kind, SymbolKind::Function | SymbolKind::Property)) else { continue };
+            if e.overrides_something(&t, &sym) != Some(false) {
+                continue;
+            }
+            let candidates: Vec<String> = e
+                .supertype_closure(&t)
+                .iter()
+                .skip(1)
+                .filter_map(|st| crate::analysis::ide::infer::fq_of(st).map(str::to_string))
+                .flat_map(|fq| e.declared_members(&fq))
+                .filter(|c| c.name == n && c.kind == sym.kind)
+                .map(|c| c.signature())
+                .collect();
+            if let Some(first) = candidates.first() {
+                msg = format!("'{n}' overrides nothing. Potential signature for overriding: {first}");
+            }
+        }
         let fix = modifiers(m).and_then(|l| l.modifiers().find(|t| t.text() == "override")).map(|t| Fix::delete("Remove 'override'", remove_modifier(&t)));
-        out.report(&NOTHING_TO_OVERRIDE, name.text_range(), format!("'{n}' overrides nothing."), fix);
+        out.report(&NOTHING_TO_OVERRIDE, name.text_range(), msg, fix);
     }
 }
 

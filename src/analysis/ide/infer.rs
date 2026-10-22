@@ -2103,6 +2103,83 @@ impl<'s> Engine<'s> {
         None
     }
 
+    /// Whether `m` (declared in the class of type `t`, with `override`) overrides a supertype
+    /// member: a property of that name, or a function with the same parameter types.
+    /// `Some(false)` only when every comparison was certain; Java supertypes (whose members
+    /// Kotlin sees under mapped names and types) and type aliases make it `None`.
+    pub fn overrides_something(&self, t: &TypeRef, m: &Symbol) -> Option<bool> {
+        if !matches!(m.kind, SymbolKind::Function | SymbolKind::Property) {
+            return None;
+        }
+        let mut unknown = false;
+        for st in self.known_supertypes(t)? {
+            let fq = fq_of(&st)?;
+            let (c, alias_args) = self.classifier_for(fq)?;
+            if matches!(&c, Classifier::Library(lc) if !lc.is_kotlin) {
+                unknown |= fq != "java.lang.Object";
+                continue;
+            }
+            let args = if alias_args.is_empty() { args_of(&st).to_vec() } else { alias_args };
+            let s = self.type_subst(&c, &args);
+            for sm in self.members_of(&c) {
+                if sm.name != m.name || sm.visibility == crate::symbols::Visibility::Private || sm.modifiers.has(Modifiers::STATIC) || sm.receiver.is_some() != m.receiver.is_some() {
+                    continue;
+                }
+                if m.kind == SymbolKind::Property {
+                    if matches!(sm.kind, SymbolKind::Property | SymbolKind::Field) {
+                        return Some(true);
+                    }
+                    continue;
+                }
+                if sm.kind != SymbolKind::Function || sm.params.len() != m.params.len() {
+                    continue;
+                }
+                match self.same_signature(m, &Subst::new(), &sm, &s) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => unknown = true,
+                }
+            }
+        }
+        if unknown { None } else { Some(false) }
+    }
+
+    /// Whether functions `a` and `b` (with their substitutions) take the same parameter and
+    /// receiver types (`None`: unknown, e.g. through a type alias).
+    fn same_signature(&self, a: &Symbol, sa: &Subst, b: &Symbol, sb: &Subst) -> Option<bool> {
+        if a.params.len() != b.params.len() || a.receiver.is_some() != b.receiver.is_some() {
+            return Some(false);
+        }
+        // Types of a project file whose module lacks the standard library resolve to Java
+        // classes (`java.lang.String`): not comparable.
+        let complete = |s: &Symbol| match &s.origin {
+            Origin::Source { file, .. } => self.resolver_for(file).find_classifier("kotlin.Any").is_some(),
+            _ => true,
+        };
+        if !complete(a) || !complete(b) {
+            return None;
+        }
+        // A function's own type parameters are not its class's (`fun <T> f(x: T)` in `C<T>`).
+        let own = |s: &Symbol, subst: &Subst| -> Subst { subst.iter().filter(|(k, _)| !s.type_params.iter().any(|tp| &tp.name == *k)).map(|(k, v)| (k.clone(), v.clone())).collect() };
+        let (sa, sb) = (own(a, sa), own(b, sb));
+        let alias = |t: &TypeRef| fq_of(t).and_then(|fq| self.res.find_classifier(fq)).is_some_and(|c| c.symbol().kind == SymbolKind::TypeAlias);
+        let pairs = a.params.iter().map(|p| &p.ty).zip(b.params.iter().map(|p| &p.ty)).chain(a.receiver.iter().zip(b.receiver.iter()));
+        let mut result = Some(true);
+        for (x, y) in pairs {
+            let (x, y) = (substitute(&self.resolve_declared(a, x), &sa), substitute(&self.resolve_declared(b, y), &sb));
+            if alias(&x) || alias(&y) {
+                result = None;
+                continue;
+            }
+            match same_type(&x, &y) {
+                Some(true) => {}
+                Some(false) => return Some(false),
+                None => result = None,
+            }
+        }
+        result
+    }
+
     /// Explicitly imported names: classifiers `(name, FQ)` and callables (aliases applied).
     pub fn imported_symbols(&self) -> (Vec<(String, String)>, Vec<Symbol>) {
         let (mut classes, mut callables) = (Vec::new(), Vec::new());
@@ -2378,8 +2455,9 @@ impl<'s> Engine<'s> {
             Some(m) => m,
             None => self.members_of(&self.classifier_for(&own_fq)?.0),
         };
-        let mut implemented: HashSet<String> = own.iter().map(|m| m.name.clone()).collect();
-        implemented.extend(["equals", "hashCode", "toString"].map(String::from));
+        // Concrete members (with their substitution): an abstract member is implemented by
+        // one with its name and (for functions) its parameter types.
+        let mut implemented: Vec<(Symbol, Subst)> = own.into_iter().map(|m| (m, Subst::new())).collect();
         let mut abstract_members: Vec<AbstractMember> = Vec::new();
         for st in &supers {
             let Some(fq) = fq_of(st) else { continue };
@@ -2397,12 +2475,23 @@ impl<'s> Engine<'s> {
                         abstract_members.push(AbstractMember { symbol: m, subst: subst.clone(), from_interface: interface });
                     }
                 } else {
-                    implemented.insert(m.name.clone());
+                    implemented.push((m, subst.clone()));
                 }
             }
         }
+        let implements = |a: &AbstractMember| {
+            matches!(a.symbol.name.as_str(), "equals" | "hashCode" | "toString")
+                || implemented.iter().any(|(m, s)| {
+                    m.name == a.symbol.name
+                        && match a.symbol.kind {
+                            SymbolKind::Property => matches!(m.kind, SymbolKind::Property | SymbolKind::Field),
+                            // Unknown comparisons count as implemented.
+                            _ => m.kind == SymbolKind::Function && self.same_signature(m, s, &a.symbol, &a.subst) != Some(false),
+                        }
+                })
+        };
         let mut seen = HashSet::new();
-        Some(abstract_members.into_iter().filter(|a| !implemented.contains(&a.symbol.name) && seen.insert(a.symbol.name.clone())).collect())
+        Some(abstract_members.into_iter().filter(|a| !implements(a) && seen.insert(a.symbol.signature())).collect())
     }
 
     /// A source class with a delegated supertype (`: I by d`).

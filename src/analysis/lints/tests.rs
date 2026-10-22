@@ -1587,3 +1587,36 @@ fun f(m: Map<String, User>, u: User) {
     ];
     assert_eq!(found, expected, "{found:#?}");
 }
+
+#[test]
+fn override_signature_mismatch() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let text = r#"package a
+
+open class Base<T> {
+    open fun run(times: Int) {}
+    open fun <T> wrap(value: T): List<T> = listOf(value)
+    open fun take(item: T) {}
+}
+interface Shape { fun area(scale: Double): Double }
+
+class Derived : Base<String>(), Shape {
+    override fun run(times: String) {}
+    override fun run(times: Int, extra: Int) {}
+    override fun area(scale: Int): Double = 0.0
+    override fun <T> wrap(value: T): List<T> = listOf(value)
+    override fun take(item: String) {}
+}
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{} line {}", l.rule.id, text[..usize::from(l.range.start())].lines().count())).collect();
+    // `run(String)`, `run(Int, Int)` and `area(Int)` override nothing, so `area(Double)` is
+    // not implemented; `wrap` (its own `T`) and `take` (the class's `T` = String) match.
+    let expected = ["ABSTRACT_MEMBER_NOT_IMPLEMENTED line 10", "NOTHING_TO_OVERRIDE line 11", "NOTHING_TO_OVERRIDE line 12", "NOTHING_TO_OVERRIDE line 13"];
+    assert_eq!(found, expected, "{found:#?}");
+    let msg = lints.iter().find(|l| l.rule.id == "NOTHING_TO_OVERRIDE").map(|l| l.message.clone()).unwrap_or_default();
+    assert!(msg.contains("Potential signature for overriding: fun run(times: Int)"), "{msg}");
+}
