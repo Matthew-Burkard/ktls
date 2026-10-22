@@ -1671,3 +1671,146 @@ fun f(u: User) {
     ];
     assert_eq!(found, expected, "{found:#?}");
 }
+
+#[test]
+fn flow_analysis() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let text = r#"package a
+
+fun cond(): Boolean = true
+fun stop(): Nothing = throw IllegalStateException()
+fun maybe(): Nothing? = null
+
+fun f(n: Int) {
+    val a: Int
+    if (n > 0) a = 1
+    println(a)
+    val b: Int
+    if (n > 0) b = 1 else b = 2
+    println(b)
+    val c: Int
+    while (cond()) { c = 1 }
+    var d = 0
+    d = 5
+    println(d)
+    var e = 1
+    e = 2
+    var g = 0
+    for (i in 0 until n) g += i
+    println(g)
+    var h: Int
+    try { h = 1 } catch (x: Exception) { h = 2 }
+    println(h)
+    val k: Int
+    when (n) {
+        1 -> k = 1
+        else -> stop()
+    }
+    println(k)
+    var m = 0
+    run { m = 1 }
+    println(m)
+}
+
+fun dead(n: Int): Int {
+    if (n > 0) return 1 else throw IllegalStateException()
+    println(n)
+}
+
+fun alive(): Int? {
+    maybe()
+    return 1
+}
+
+fun loop() {
+    while (true) {
+        if (cond()) break
+    }
+    println(1)
+    while (true) { }
+    println(2)
+}
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{} line {}: {}", l.rule.id, text[..usize::from(l.range.start())].lines().count(), &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    // `a` is unassigned when `n <= 0`; `c` may be assigned twice by the loop; `d`'s first
+    // value and `e`'s are never read; code after `if`/`else` that both leave, and after a
+    // loop without `break`, is unreachable. `b`, `g` (read on the next iteration), `h`
+    // (assigned in both), `k` (`stop()` never returns), `m` (assigned in a lambda),
+    // `maybe()` (returns null) and the loop with `break` are fine.
+    let expected = [
+        "UNINITIALIZED_VARIABLE line 10: a",
+        "VAL_REASSIGNMENT line 15: c",
+        "VARIABLE_WITH_REDUNDANT_INITIALIZER line 16: 0",
+        "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE line 19: e",
+        "UNREACHABLE_CODE line 40: println(n)",
+        "UNREACHABLE_CODE line 54: println(2)",
+    ];
+    for x in expected {
+        has(&found, x);
+    }
+    assert_eq!(found.len(), expected.len(), "{found:#?}");
+}
+
+#[test]
+fn nullable_values_used_as_non_null() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let text = r#"package a
+
+class User(val name: String, val nick: String?)
+
+fun takes(s: String) {}
+fun find(): User? = null
+fun fail(): Nothing = throw IllegalStateException()
+
+fun f(s: String?, u: User, list: List<Int>?, n: Int?) {
+    s.length
+    takes(s)
+    val t: String = s
+    takes(u.nick)
+    u.nick.length
+    for (i in list) println(i)
+    list[0]
+    n + 1
+    val m: Int = list?.size
+    s + "suffix"
+}
+
+fun g(s: String?): String = s
+
+fun narrowed(s: String?, u: User, list: MutableList<Int>?, n: Int?) {
+    if (s == null) fail()
+    s.length
+    var l = list
+    if (l == null) l = mutableListOf()
+    l.add(1)
+    if (u.nick != null) u.nick.length
+    requireNotNull(n)
+    n + 1
+}
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().filter(|l| l.rule.category == Category::Compiler).map(|l| format!("{} line {}", l.rule.id, text[..usize::from(l.range.start())].lines().count())).collect();
+    // Members, arguments, initializers, operators, indexing and loops on nullable values;
+    // `String?.plus` exists. Narrowed by a `Nothing` call, an assignment, a check of the
+    // property chain and `requireNotNull`: fine.
+    let expected = [
+        "UNSAFE_CALL line 10",
+        "ARGUMENT_TYPE_MISMATCH line 11",
+        "INITIALIZER_TYPE_MISMATCH line 12",
+        "ARGUMENT_TYPE_MISMATCH line 13",
+        "UNSAFE_CALL line 14",
+        "ITERATOR_ON_NULLABLE line 15",
+        "UNSAFE_CALL line 16",
+        "UNSAFE_OPERATOR_CALL line 17",
+        "INITIALIZER_TYPE_MISMATCH line 18",
+        "RETURN_TYPE_MISMATCH line 22",
+    ];
+    assert_eq!(found, expected, "{found:#?}");
+}

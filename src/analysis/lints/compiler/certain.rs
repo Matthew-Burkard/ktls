@@ -61,6 +61,9 @@ fn certain(e: &Engine, x: &SyntaxNode, smart: bool, depth: u32) -> Option<TypeRe
                     match sel.kind() {
                         SyntaxKind::NAME_REF => {
                             let cands = select_candidates(e, &sel, &rt, None)?;
+                            if cands.iter().any(|(m, _)| smart_castable(&sel, m)) {
+                                return None;
+                            }
                             same_result(e, cands.iter().map(|(m, s)| return_type(e, m, s, None, projected(&rt), smart, depth)))?
                         }
                         SyntaxKind::CALL_EXPR => certain(e, &sel, smart, depth + 1)?,
@@ -395,17 +398,22 @@ fn name(e: &Engine, nr: &SyntaxNode, smart: bool, depth: u32) -> Option<TypeRef>
         [Def::Symbol { sym, subst }] => {
             // A project `val` may be smart cast where it is read: by a null check when its
             // type is nullable, or by an `is` check.
-            if matches!(sym.origin, Origin::Source { .. })
-                && sym.kind == SymbolKind::Property
-                && !sym.modifiers.has(Modifiers::VAR)
-                && (sym.ty.as_ref().is_some_and(|t| matches!(t, TypeRef::Named { nullable: true, .. })) || checked_with_is(nr, &sym.name))
-            {
+            if smart_castable(nr, sym) {
                 return None;
             }
             return_type(e, sym, subst, None, false, smart, depth)
         }
         _ => None,
     }
+}
+
+/// A project `val` read at `at` may be smart cast there: by a null check when its type is
+/// nullable, or by an `is` check.
+fn smart_castable(at: &SyntaxNode, sym: &Symbol) -> bool {
+    matches!(sym.origin, Origin::Source { .. })
+        && sym.kind == SymbolKind::Property
+        && !sym.modifiers.has(Modifiers::VAR)
+        && (sym.ty.as_ref().is_some_and(|t| matches!(t, TypeRef::Named { nullable: true, .. })) || checked_with_is(at, &sym.name))
 }
 
 /// A local or parameter: its written type, or the certain type of its initializer, with

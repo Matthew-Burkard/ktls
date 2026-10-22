@@ -1,9 +1,9 @@
-//! `return`, `break`/`continue` and definite assignment: returns that do not match the
-//! function, jumps outside loops, and locals read before any assignment.
+//! `return`, `break`/`continue`: returns that do not match the function, and jumps outside
+//! loops (definite assignment is in `dataflow`).
 
 use super::super::*;
 use super::expressions::type_mismatch;
-use crate::analysis::ide::infer::{Def, Engine, LocalKind};
+use crate::analysis::ide::infer::Engine;
 use crate::symbols::TypeRef;
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
@@ -13,7 +13,6 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         }
         match n.kind() {
             SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR => outside_loop(&n, out),
-            SyntaxKind::PROPERTY if is_local(&n) => uninitialized(cx, &n, out),
             _ => {}
         }
     }
@@ -124,28 +123,4 @@ fn outside_loop(jump: &SyntaxNode, out: &mut Sink) {
     let kw = if jump.kind() == SyntaxKind::BREAK_EXPR { "break" } else { "continue" };
     let at = jump.first_token().map_or(jump.text_range(), |t| t.text_range());
     out.report(&BREAK_OR_CONTINUE_OUTSIDE_A_LOOP, at, format!("'{kw}' is only allowed inside a loop."), None);
-}
-
-/// A local declared without a value and read before any assignment to it.
-fn uninitialized(cx: &Cx, decl: &SyntaxNode, out: &mut Sink) {
-    if initializer(decl).is_some() || decl.children().any(|c| c.kind() == SyntaxKind::PROPERTY_DELEGATE) || has_modifier(decl, "lateinit") {
-        return;
-    }
-    let Some(e) = cx.engine() else { return };
-    let Some(name) = ast::token(decl, SyntaxKind::IDENT) else { return };
-    let Some(block) = decl.parent() else { return };
-    let ours = |r: &SyntaxNode| r.text() == name.text() && matches!(e.resolve_name_ref(r).as_slice(), [Def::Local(l)] if l.name_range == name.text_range() && matches!(l.kind, LocalKind::Val | LocalKind::Var));
-    let refs: Vec<SyntaxNode> = block.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d.text_range().start() > decl.text_range().end()).filter(|r| ours(r)).collect();
-    let assigned = |r: &SyntaxNode| r.parent().is_some_and(|p| p.kind() == SyntaxKind::BINARY_EXPR && p.first_child().as_ref() == Some(r) && assignment_op(&p).is_some_and(|o| o.kind() == SyntaxKind::EQ));
-    let Some(first_assignment) = refs.iter().find(|r| assigned(r)).map(|r| r.text_range().start()) else {
-        // Never assigned: every read is uninitialized.
-        if let Some(read) = refs.first() {
-            out.report(&UNINITIALIZED_VARIABLE, read.text_range(), format!("Variable '{}' must be initialized.", name.text()), None);
-        }
-        return;
-    };
-    // Reads before the first assignment in the text (any assignment before means unsure).
-    if let Some(read) = refs.iter().find(|r| !assigned(r) && r.text_range().start() < first_assignment) {
-        out.report(&UNINITIALIZED_VARIABLE, read.text_range(), format!("Variable '{}' must be initialized.", name.text()), None);
-    }
 }

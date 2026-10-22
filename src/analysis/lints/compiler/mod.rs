@@ -7,6 +7,7 @@
 //! supertypes) is missing.
 
 mod certain;
+mod dataflow;
 mod declarations;
 mod expressions;
 mod flow;
@@ -33,4 +34,5 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     signatures::check(cx, out);
     inheritance::check(cx, out);
     markers::check(cx, out);
+    dataflow::check(cx, out);
 }

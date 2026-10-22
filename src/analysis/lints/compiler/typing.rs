@@ -31,7 +31,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 }
             }
             SyntaxKind::PREFIX_EXPR if binary_op(&n).is_some_and(|o| o.kind() == SyntaxKind::EXCL) => {
-                if let Some(c) = n.children().last() {
+                // `!` on a `Boolean?` is UNSAFE_OPERATOR_CALL.
+                if let Some(c) = n.children().last()
+                    && !certain(e, &c).is_some_and(|t| fq_of(&t) == Some("kotlin.Boolean"))
+                {
                     condition(e, &c, out);
                 }
             }

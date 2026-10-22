@@ -159,6 +159,8 @@ supertypes, generated code).
 | `INCOMPATIBLE_TYPES` | error | 'when' branch value whose class is unrelated to the subject's |
 | `INVALID_IF_AS_EXPRESSION` | error | 'if' without 'else' used as a value |
 | `ELSE_MISPLACED_IN_WHEN` | error | 'else' branch that is not the last one in a 'when' |
+| `UNSAFE_OPERATOR_CALL` | error | Operator on a nullable value without an operator for nullable receivers |
+| `ITERATOR_ON_NULLABLE` | error | 'for' over a nullable value |
 | `DEPRECATION_ERROR` | error | Use of a project declaration deprecated with level ERROR or HIDDEN |
 | `OPT_IN_USAGE_ERROR` | error | Use of a declaration that requires opt-in (marker with level ERROR) without opting in |
 | `CYCLIC_INHERITANCE_HIERARCHY` | error | Class that inherits from itself through its supertypes |
@@ -177,6 +179,9 @@ supertypes, generated code).
 | `NOTHING_TO_INLINE` | warning | 'inline' function without parameters of function type |
 | `REDUNDANT_NULLABLE` | warning | Type marked nullable twice ('T??') |
 | `DUPLICATE_BRANCH_CONDITION_IN_WHEN` | warning | 'when' branch condition repeating an earlier one |
+| `UNUSED_VALUE` | warning | Value assigned to a local that no path reads |
+| `VARIABLE_WITH_REDUNDANT_INITIALIZER` | warning | Local initializer that is always overwritten before it is read |
+| `ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE` | warning | Local 'var' that is assigned but never read |
 | `OPT_IN_USAGE` | warning | Use of a declaration that requires opt-in (marker with level WARNING) without opting in |
 | `UNCHECKED_CAST` | warning | Cast to a generic type or type parameter the runtime cannot check |
 | `EXTENSION_SHADOWED_BY_MEMBER` | warning | Extension with the signature of a member of its receiver |

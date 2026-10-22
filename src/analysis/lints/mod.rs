@@ -167,6 +167,8 @@ rules! {
     INCOMPATIBLE_TYPES = "INCOMPATIBLE_TYPES", Compiler, Error, false, [], "'when' branch value whose class is unrelated to the subject's";
     INVALID_IF_AS_EXPRESSION = "INVALID_IF_AS_EXPRESSION", Compiler, Error, false, [], "'if' without 'else' used as a value";
     ELSE_MISPLACED_IN_WHEN = "ELSE_MISPLACED_IN_WHEN", Compiler, Error, false, [], "'else' branch that is not the last one in a 'when'";
+    UNSAFE_OPERATOR_CALL = "UNSAFE_OPERATOR_CALL", Compiler, Error, false, [], "Operator on a nullable value without an operator for nullable receivers";
+    ITERATOR_ON_NULLABLE = "ITERATOR_ON_NULLABLE", Compiler, Error, false, [], "'for' over a nullable value";
     DEPRECATION_ERROR = "DEPRECATION_ERROR", Compiler, Error, false, [], "Use of a project declaration deprecated with level ERROR or HIDDEN";
     OPT_IN_USAGE_ERROR = "OPT_IN_USAGE_ERROR", Compiler, Error, false, [], "Use of a declaration that requires opt-in (marker with level ERROR) without opting in";
     CYCLIC_INHERITANCE_HIERARCHY = "CYCLIC_INHERITANCE_HIERARCHY", Compiler, Error, false, [], "Class that inherits from itself through its supertypes";
@@ -187,6 +189,9 @@ rules! {
     NOTHING_TO_INLINE = "NOTHING_TO_INLINE", Compiler, Warning, false, [], "'inline' function without parameters of function type";
     REDUNDANT_NULLABLE = "REDUNDANT_NULLABLE", Compiler, Warning, true, [], "Type marked nullable twice ('T??')";
     DUPLICATE_BRANCH_CONDITION_IN_WHEN = "DUPLICATE_BRANCH_CONDITION_IN_WHEN", Compiler, Warning, false, [], "'when' branch condition repeating an earlier one";
+    UNUSED_VALUE = "UNUSED_VALUE", Compiler, Warning, true, [], "Value assigned to a local that no path reads";
+    VARIABLE_WITH_REDUNDANT_INITIALIZER = "VARIABLE_WITH_REDUNDANT_INITIALIZER", Compiler, Warning, true, [], "Local initializer that is always overwritten before it is read";
+    ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE = "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", Compiler, Warning, true, [], "Local 'var' that is assigned but never read";
     OPT_IN_USAGE = "OPT_IN_USAGE", Compiler, Warning, false, [], "Use of a declaration that requires opt-in (marker with level WARNING) without opting in";
     UNCHECKED_CAST = "UNCHECKED_CAST", Compiler, Warning, false, [], "Cast to a generic type or type parameter the runtime cannot check";
     EXTENSION_SHADOWED_BY_MEMBER = "EXTENSION_SHADOWED_BY_MEMBER", Compiler, Warning, false, [], "Extension with the signature of a member of its receiver";

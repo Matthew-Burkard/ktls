@@ -2871,13 +2871,32 @@ impl<'s> Engine<'s> {
 
     /// Facts after the statement `stmt` completed normally: `if (c) return` (c was false),
     /// `require(c)` / `check(c)` (c was true), `requireNotNull(x)` / `checkNotNull(x)`.
+    /// `n` never completes normally: a jump, or a call of a function returning `Nothing`
+    /// (`error()`, `x.fail()`, ...).
+    fn jumps(&self, n: &SyntaxNode) -> bool {
+        match n.kind() {
+            SyntaxKind::BLOCK => n.children().last().is_some_and(|c| self.jumps(&c)),
+            SyntaxKind::CALL_EXPR | SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR if !jumps(n) => {
+                let call = if n.kind() == SyntaxKind::CALL_EXPR { Some(n.clone()) } else { n.last_child().filter(|c| c.kind() == SyntaxKind::CALL_EXPR) };
+                let Some(callee) = call.and_then(|c| c.first_child()).filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return false };
+                let defs = self.resolve_name_ref(&callee);
+                !defs.is_empty()
+                    && defs.iter().all(|d| match d {
+                        Def::Symbol { sym, .. } => sym.kind == SymbolKind::Function && sym.ty.as_ref().is_some_and(|t| matches!(self.resolve_declared(sym, t), TypeRef::Named { ref fq, nullable: false, .. } if fq.as_deref() == Some("kotlin.Nothing"))),
+                        _ => false,
+                    })
+            }
+            _ => jumps(n),
+        }
+    }
+
     fn guard_facts(&self, stmt: &SyntaxNode, l: &LocalDef, out: &mut Vec<Fact>) {
         match stmt.kind() {
             SyntaxKind::IF_EXPR => {
                 let branch = |k: SyntaxKind| stmt.children().find(|c| c.kind() == k).and_then(|b| b.first_child());
                 let Some(cond) = stmt.children().find(|c| c.kind() == SyntaxKind::CONDITION).and_then(|c| c.first_child()) else { return };
                 let (then, els) = (branch(SyntaxKind::THEN_BRANCH), branch(SyntaxKind::ELSE_BRANCH));
-                match (then.as_ref().is_some_and(jumps), els.as_ref().is_some_and(jumps)) {
+                match (then.as_ref().is_some_and(|t| self.jumps(t)), els.as_ref().is_some_and(|t| self.jumps(t))) {
                     (true, false) => self.facts(&cond, l, false, out),
                     (false, true) => self.facts(&cond, l, true, out),
                     _ => {}

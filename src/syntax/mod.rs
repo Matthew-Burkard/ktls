@@ -4,6 +4,7 @@ pub mod ast;
 mod grammar;
 pub mod kind;
 pub mod lexer;
+mod literals;
 mod parser;
 
 use std::sync::Arc;
@@ -76,7 +77,8 @@ pub fn parse(text: &str, script: bool) -> Parse {
     let mut p = parser::Parser::new(text, &tokens);
     grammar::kotlin_file(&mut p, script);
     let events = p.finish();
-    let (green, errors) = parser::build_tree(text, &tokens, events);
+    let (green, mut errors) = parser::build_tree(text, &tokens, events);
+    errors.extend(literals::errors(text, &tokens));
     Parse { green, errors: errors.into() }
 }
 

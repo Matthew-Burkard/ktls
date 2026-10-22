@@ -176,6 +176,18 @@ pub fn visibility_of(mods: &Option<ast::ModifierList>) -> Visibility {
     }
 }
 
+/// The type of a `vararg` parameter's value: `IntArray` for `Int`, `Array<out T>` otherwise.
+fn vararg_array(t: TypeRef) -> TypeRef {
+    const PRIMITIVES: &[&str] = &["Int", "Long", "Short", "Byte", "Char", "Boolean", "Float", "Double", "UInt", "ULong", "UShort", "UByte"];
+    match &t {
+        TypeRef::Named { name, args, nullable: false, .. } if args.is_empty() && PRIMITIVES.contains(&name.trim_start_matches("kotlin.")) => {
+            let n = format!("{}Array", name.trim_start_matches("kotlin."));
+            TypeRef::Named { name: n, fq: None, args: Vec::new(), nullable: false }
+        }
+        _ => TypeRef::Named { name: "Array".into(), fq: None, args: vec![TypeArg::Type { variance: Variance::Out, ty: t }], nullable: false },
+    }
+}
+
 fn modifiers_of(mods: &Option<ast::ModifierList>) -> Modifiers {
     let mut out = Modifiers::default();
     if let Some(m) = mods {
@@ -349,6 +361,10 @@ impl Lowerer {
                                 prop.modifiers.set(Modifiers::VAR);
                             }
                             prop.ty = p.type_ref().map(|t| this.ty(&t));
+                            // A `vararg` property holds the array.
+                            if p.is_vararg() {
+                                prop.ty = prop.ty.map(vararg_array);
+                            }
                             children.push(SourceDecl { symbol: prop, children: Vec::new() });
                         }
                     }

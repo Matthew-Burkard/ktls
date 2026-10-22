@@ -26,11 +26,14 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::BINARY_EXPR => {
                 assignment(cx, e, &n, out);
                 null_checks(e, &n, out);
+                nullable_operations(cx, e, &n, out);
             }
             SyntaxKind::PREFIX_EXPR | SyntaxKind::POSTFIX_EXPR => {
                 increment(cx, e, &n, out);
                 not_null_assertion(e, &n, out);
+                nullable_operations(cx, e, &n, out);
             }
+            SyntaxKind::INDEX_EXPR | SyntaxKind::LOOP_RANGE => nullable_operations(cx, e, &n, out),
             SyntaxKind::SAFE_QUALIFIED_EXPR => safe_call(e, &n, out),
             SyntaxKind::DOT_QUALIFIED_EXPR => unsafe_call(cx, e, &n, out),
             SyntaxKind::CALL_EXPR => {
@@ -468,47 +471,177 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         }
         return;
     }
-    if recv.kind() != SyntaxKind::NAME_REF {
-        return;
+    if recv.kind() == SyntaxKind::NAME_REF
+        && let Some(ty) = nullable_local(e, &recv)
+    {
+        report(&ty, out);
+    } else if let Some(ty) = nullable_property_chain(e, &recv) {
+        report(&ty, out);
     }
-    let Some(name_tok) = recv.first_token() else { return };
-    let name = ast::ident_text(&name_tok);
-    let recv_defs = e.resolve_name_ref(&recv);
-    let [Def::Local(local)] = recv_defs.as_slice() else { return };
+}
+
+/// The nullable type of local or parameter `nr` at this use, when no earlier use (or one
+/// in an enclosing loop) narrows it in a way the engine does not model, and the engine's
+/// smart casts leave it nullable.
+pub(super) fn nullable_local(e: &Engine, nr: &SyntaxNode) -> Option<String> {
+    let name = ast::ident_text(&nr.first_token()?);
+    let defs = e.resolve_name_ref(nr);
+    let [Def::Local(local)] = defs.as_slice() else { return None };
     if !matches!(local.kind, LocalKind::Parameter | LocalKind::Val | LocalKind::Var) {
-        return;
+        return None;
     }
     // Declared with a nullable type: written, or that of a certain initializer.
-    let Some(decl) = crate::syntax::covering(&cx.root, local.name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::VALUE_PARAMETER | SyntaxKind::PROPERTY)) else { return };
-    if decl.kind() == SyntaxKind::PROPERTY && !is_local(&decl) {
-        return;
+    let decl = crate::syntax::covering(&e.root, local.name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::VALUE_PARAMETER | SyntaxKind::PROPERTY))?;
+    if decl.kind() == SyntaxKind::PROPERTY && !is_local(&decl) || has_modifier(&decl, "vararg") {
+        return None;
     }
     let ty_text = match ast::child::<ast::TypeRef>(&decl) {
-        Some(ty) => ty.syntax().text().to_string(),
+        Some(ty) => ty.syntax().text().to_string().trim().to_string(),
         None => match initializer(&decl).and_then(|v| super::certain::certain_type(e, &v, true)) {
-            Some(t) if nullable(&t) => super::certain::shown(&t),
-            _ => return,
+            Some(t) if matches!(t, TypeRef::Named { nullable: true, .. }) => super::certain::shown(&t),
+            _ => return None,
         },
     };
-    if !ty_text.trim_end().ends_with('?') {
-        return;
+    if !ty_text.ends_with('?') {
+        return None;
     }
     // The scope the name is visible in.
     let scope = match decl.kind() {
         SyntaxKind::PROPERTY => decl.parent(),
         _ => decl.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::LAMBDA_EXPR | SyntaxKind::CLASS | SyntaxKind::FOR_EXPR | SyntaxKind::CATCH_CLAUSE)),
-    };
-    let Some(scope) = scope else { return };
-    let narrowed = scope.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d.first_token().is_some_and(|t| ast::ident_text(&t) == name)).any(|r| may_narrow(e, &r));
+    }?;
+    // Uses before this one, or in a loop around it (they run before the next iteration).
+    let loops: Vec<SyntaxNode> = nr.ancestors().take_while(|a| *a != scope).filter(|a| matches!(a.kind(), SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR | SyntaxKind::DO_WHILE_EXPR)).collect();
+    let earlier = |r: &SyntaxNode| r.text_range().start() < nr.text_range().start() || loops.iter().any(|l| l.text_range().contains_range(r.text_range()));
+    let narrowed = scope.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d != nr && d.first_token().is_some_and(|t| ast::ident_text(&t) == name)).any(|r| earlier(&r) && may_narrow(e, &r));
     if narrowed {
-        return;
+        return None;
     }
     // Still nullable after the checks the engine understands.
-    let still_nullable = e.type_of(&recv).is_some_and(|t| matches!(crate::analysis::ide::infer::strip(&t), TypeRef::Named { nullable: true, .. } | TypeRef::TypeParam { nullable: true, .. } | TypeRef::Function { nullable: true, .. }));
-    if !still_nullable {
+    let still_nullable = e.type_of(nr).is_some_and(|t| matches!(crate::analysis::ide::infer::strip(&t), TypeRef::Named { nullable: true, .. } | TypeRef::TypeParam { nullable: true, .. } | TypeRef::Function { nullable: true, .. }));
+    still_nullable.then_some(ty_text)
+}
+
+/// An operand certainly `null`able here: a local or parameter (see `nullable_local`), a
+/// property chain (see `nullable_property_chain`), or a call result. Its type as shown and
+/// the type without `?`.
+fn nullable_operand(e: &Engine, x: &SyntaxNode) -> Option<(String, TypeRef)> {
+    let shown = match x.kind() {
+        SyntaxKind::NAME_REF => nullable_local(e, x)?,
+        SyntaxKind::DOT_QUALIFIED_EXPR if x.last_child().is_some_and(|l| l.kind() == SyntaxKind::NAME_REF) => nullable_property_chain(e, x)?,
+        SyntaxKind::CALL_EXPR | SyntaxKind::INDEX_EXPR | SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR => {
+            let t = super::certain::certain_type(e, x, true)?;
+            if !matches!(t, TypeRef::Named { nullable: true, ref fq, .. } if fq.as_deref() != Some("kotlin.Nothing")) {
+                return None;
+            }
+            super::certain::shown(&t)
+        }
+        _ => return None,
+    };
+    let t = e.type_of(x)?;
+    let TypeRef::Named { name, fq, args, .. } = crate::analysis::ide::infer::strip(&t).clone() else { return None };
+    Some((shown, TypeRef::Named { name, fq, args, nullable: false }))
+}
+
+/// Operators, indexing and `for` loops on nullable values: the operator functions they
+/// call need a non-null receiver (unless one is declared on a nullable type, like
+/// `String?.plus`).
+fn nullable_operations(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&UNSAFE_OPERATOR_CALL) && !cx.on(&UNSAFE_CALL) && !cx.on(&ITERATOR_ON_NULLABLE) {
         return;
     }
-    report(ty_text.trim(), out);
+    let accepts_null = |t: &TypeRef, name: &str, at: &SyntaxNode| {
+        e.extensions(t, name).into_iter().chain(e.member_extensions(at, t, name)).any(|(m, _)| {
+            m.receiver.as_ref().is_some_and(|r| matches!(e.resolve_declared(&m, r), TypeRef::Named { nullable: true, .. } | TypeRef::TypeParam { nullable: true, .. } | TypeRef::Platform(_)))
+        })
+    };
+    match n.kind() {
+        SyntaxKind::BINARY_EXPR => {
+            let Some(op) = binary_op(n) else { return };
+            let name = match op.kind() {
+                SyntaxKind::PLUS => "plus",
+                SyntaxKind::MINUS => "minus",
+                SyntaxKind::STAR => "times",
+                SyntaxKind::SLASH => "div",
+                SyntaxKind::PERCENT => "rem",
+                SyntaxKind::RANGE => "rangeTo",
+                SyntaxKind::RANGE_UNTIL => "rangeUntil",
+                SyntaxKind::LT | SyntaxKind::GT | SyntaxKind::LT_EQ | SyntaxKind::GT_EQ => "compareTo",
+                SyntaxKind::IN_KW | SyntaxKind::NOT_IN_KW => "contains",
+                _ => return,
+            };
+            let Some((l, r)) = binary_operands(n) else { return };
+            // `x in c` calls `c.contains(x)`.
+            let recv = if name == "contains" { r } else { l };
+            let Some((shown, t)) = nullable_operand(e, &recv) else { return };
+            if accepts_null(&t, name, n) {
+                return;
+            }
+            out.report(&UNSAFE_OPERATOR_CALL, op.text_range(), format!("Operator '{}' is not allowed on a nullable receiver of type '{shown}'.", op.text()), None);
+        }
+        SyntaxKind::PREFIX_EXPR => {
+            let Some(op) = binary_op(n) else { return };
+            let name = match op.kind() {
+                SyntaxKind::MINUS => "unaryMinus",
+                SyntaxKind::PLUS => "unaryPlus",
+                SyntaxKind::EXCL => "not",
+                _ => return,
+            };
+            let Some(operand) = n.children().find(|c| c.kind() != SyntaxKind::OPERATION_REFERENCE) else { return };
+            let Some((shown, t)) = nullable_operand(e, &operand) else { return };
+            if !accepts_null(&t, name, n) {
+                out.report(&UNSAFE_OPERATOR_CALL, op.text_range(), format!("Operator '{}' is not allowed on a nullable receiver of type '{shown}'.", op.text()), None);
+            }
+        }
+        SyntaxKind::INDEX_EXPR => {
+            let Some(recv) = n.first_child() else { return };
+            let set = n.parent().is_some_and(|p| assignment_op(&p).is_some() && p.first_child().as_ref() == Some(n));
+            let name = if set { "set" } else { "get" };
+            let Some((shown, t)) = nullable_operand(e, &recv) else { return };
+            if accepts_null(&t, name, n) {
+                return;
+            }
+            let Some(open) = n.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).and_then(|l| l.first_token()) else { return };
+            out.report(&UNSAFE_CALL, open.text_range(), format!("Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{shown}'."), None);
+        }
+        SyntaxKind::LOOP_RANGE => {
+            let Some(v) = n.first_child() else { return };
+            let Some((_, t)) = nullable_operand(e, &v) else { return };
+            if !accepts_null(&t, "iterator", n) {
+                out.report(&ITERATOR_ON_NULLABLE, v.text_range(), "Not nullable value required to call an 'iterator()' method on for-loop range.", None);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `a.b` (names only) where property `b` has a nullable type and the same chain is not
+/// used earlier in the function (where a check could smart cast it).
+fn nullable_property_chain(e: &Engine, recv: &SyntaxNode) -> Option<String> {
+    if recv.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || recv.descendants().any(|d| !matches!(d.kind(), SyntaxKind::NAME_REF | SyntaxKind::DOT_QUALIFIED_EXPR)) {
+        return None;
+    }
+    let sel = recv.last_child().filter(|c| c.kind() == SyntaxKind::NAME_REF)?;
+    let defs = e.resolve_name_ref(&sel);
+    let [Def::Symbol { sym, subst }] = defs.as_slice() else { return None };
+    if sym.kind != SymbolKind::Property {
+        return None;
+    }
+    // Declared nullable (`String?`; a type parameter's argument may only look so: `*`).
+    let declared = e.resolve_declared(sym, sym.ty.as_ref()?);
+    if !matches!(declared, TypeRef::Named { nullable: true, .. }) || in_unknown_lambda(e, recv) {
+        return None;
+    }
+    let t = crate::analysis::ide::infer::substitute(&declared, subst);
+    let text: String = recv.text().to_string().chars().filter(|c| !c.is_whitespace()).collect();
+    let scope = recv.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::CLASS_INITIALIZER | SyntaxKind::SECONDARY_CONSTRUCTOR) && !is_local(a))?;
+    // The same chain checked earlier (`a.b != null`, `a.b!!`, `a.b ?: …`).
+    let narrowed = scope.descendants().filter(|d| d.kind() == SyntaxKind::DOT_QUALIFIED_EXPR && d.text_range().start() < recv.text_range().start()).any(|d| {
+        let dt: String = d.text().to_string().chars().filter(|c| !c.is_whitespace()).collect();
+        // The engine does not smart cast property chains: null checks count too.
+        dt == text && (d.parent().is_some_and(|p| null_check_or_is(&p)) || may_narrow(e, &d))
+    });
+    (!narrowed).then(|| super::certain::shown(&t))
 }
 
 /// `x == null`, `x != null` (also `===`/`!==`), or `x is T` / `x !is T`.
@@ -547,6 +680,11 @@ fn in_modeled_condition(n: &SyntaxNode) -> bool {
 /// A use of a name that could smart-cast it to non-null afterwards.
 fn may_narrow(e: &Engine, r: &SyntaxNode) -> bool {
     let Some(p) = r.parent() else { return false };
+    // An assignment (`if (x == null) x = y`), unless of a value that is nullable too.
+    if assignment_op(&p).is_some_and(|o| o.kind() == SyntaxKind::EQ) && p.first_child().as_ref() == Some(r) {
+        let value = p.children().filter(|c| c.kind() != SyntaxKind::OPERATION_REFERENCE).nth(1);
+        return !value.and_then(|v| e.type_of(&v)).is_some_and(|t| matches!(t, TypeRef::Named { nullable: true, .. }));
+    }
     match p.kind() {
         // `x == null` / `x is T` where the engine applies them (an `if`/`while` condition,
         // `when` entry, `&&`/`||` operand, `require`): the smart-cast type decides.
@@ -556,7 +694,18 @@ fn may_narrow(e: &Engine, r: &SyntaxNode) -> bool {
                 || op.kind() == SyntaxKind::EQ && p.first_child().as_ref() == Some(r)
                 || op.kind() == SyntaxKind::IDENT // infix calls
         }),
-        SyntaxKind::IS_EXPR | SyntaxKind::POSTFIX_EXPR | SyntaxKind::VALUE_ARGUMENT | SyntaxKind::WHEN_SUBJECT | SyntaxKind::BINARY_WITH_TYPE | SyntaxKind::PAREN_EXPR => true,
+        // An argument: of a function that may check it (`requireNotNull(x)`, contracts), or
+        // of a call used as a condition.
+        SyntaxKind::VALUE_ARGUMENT => {
+            let call = p.parent().and_then(|l| l.parent()).filter(|c| c.kind() == SyntaxKind::CALL_EXPR);
+            let callee = call.as_ref().and_then(|c| c.first_child()).map(|c| c.text().to_string()).unwrap_or_default();
+            let checking = ["require", "check", "assert", "verify", "ensure", "expect"].iter().any(|p| callee.starts_with(p)) || callee.contains("NotNull");
+            let condition = p.ancestors().take_while(|a| !matches!(a.kind(), SyntaxKind::BLOCK)).any(|a| {
+                matches!(a.kind(), SyntaxKind::CONDITION | SyntaxKind::WHEN_CONDITION | SyntaxKind::WHEN_SUBJECT | SyntaxKind::PREFIX_EXPR) || a.kind() == SyntaxKind::BINARY_EXPR && binary_op(&a).is_some_and(|o| matches!(o.kind(), SyntaxKind::AMP2 | SyntaxKind::PIPE2 | SyntaxKind::ELVIS))
+            });
+            checking || condition || call.is_none()
+        }
+        SyntaxKind::IS_EXPR | SyntaxKind::POSTFIX_EXPR | SyntaxKind::WHEN_SUBJECT | SyntaxKind::BINARY_WITH_TYPE | SyntaxKind::PAREN_EXPR => true,
         // `x?.size == 1 && x.values…` narrows through the comparison.
         SyntaxKind::WHEN_CONDITION | SyntaxKind::SAFE_QUALIFIED_EXPR => true,
         // `x.isNullOrEmpty()`, `x.let { … }`: extensions, possibly with contracts.
@@ -940,11 +1089,29 @@ pub(super) fn type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: 
         if fq == "kotlin.Function" {
             return None;
         }
+        // A nullable property chain (`u.nick`) not checked earlier.
+        if !nullable
+            && value.kind() == SyntaxKind::DOT_QUALIFIED_EXPR
+            && let Some(shown_actual) = nullable_property_chain(e, value)
+            && e.type_of(value).is_some_and(|t| fq_of(&t).is_some_and(|a| e.conforms(&TypeRef::named(a), &fq) == Some(true)))
+        {
+            let fix = Fix::replace("Add non-null asserted (!!) call", TextRange::empty(value.text_range().end()), "!!");
+            return Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: inferred type is '{shown_actual}' but '{shown}' was expected."), shown_actual, Some(fix)));
+        }
         let actual = super::certain::certain_type(e, value, false)?;
-        if e.conforms(&actual, &fq)? {
+        // A nullable value where a non-null one is expected (locals: unless narrowed in a
+        // way the engine does not model).
+        let null_mismatch = !nullable
+            && matches!(&actual, TypeRef::Named { nullable: true, fq: Some(f), .. } if &**f != "kotlin.Nothing")
+            && (value.kind() != SyntaxKind::NAME_REF || !matches!(e.resolve_name_ref(value).as_slice(), [Def::Local(_)]) || nullable_local(e, value).is_some());
+        if e.conforms(&actual, &fq)? && !null_mismatch {
             return None;
         }
         let actual_shown = super::certain::shown(&actual);
+        if null_mismatch && e.conforms(&actual, &fq) == Some(true) {
+            let fix = Fix::replace("Add non-null asserted (!!) call", TextRange::empty(value.text_range().end()), "!!");
+            return Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: inferred type is '{actual_shown}' but '{shown}' was expected."), actual_shown, Some(fix)));
+        }
         let to = if nullable && !actual_shown.ends_with('?') { format!("{actual_shown}?") } else { actual_shown.clone() };
         let convert = actual.fq_name().and_then(|a| conversion(value, a, &fq, false));
         return Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual_shown}'."), to, convert));
