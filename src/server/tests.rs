@@ -181,6 +181,12 @@ fn end_to_end_session() {
     let ws = c.request("workspace/symbol", json!({ "query": "Repo" }));
     let names: Vec<&str> = ws.as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(names.first(), Some(&"Repository"), "{names:?}");
+    // Library classes too, located in sources or a generated stub.
+    let t = std::time::Instant::now();
+    let ws = c.request("workspace/symbol", json!({ "query": "Regex" }));
+    let regex = ws.as_array().unwrap().iter().find(|s| s["name"] == "Regex" && s["containerName"] == "kotlin.text").unwrap_or_else(|| panic!("{ws:?}"));
+    assert!(regex["location"]["uri"].as_str().is_some_and(|u| u.ends_with(".kt")), "{regex:?}");
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
 
     // Fix the error with an incremental edit: `Missing` -> `String`.
     c.notify(

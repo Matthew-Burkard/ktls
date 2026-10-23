@@ -7,6 +7,8 @@
 
 mod bugs;
 mod compiler;
+
+pub(crate) use compiler::missing_branches;
 mod naming;
 mod redundant;
 mod style;

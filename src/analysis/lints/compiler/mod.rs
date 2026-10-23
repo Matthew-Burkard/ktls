@@ -22,6 +22,8 @@ mod when;
 
 use super::{Cx, Sink};
 
+pub(crate) use when::missing_branches;
+
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     declarations::check(cx, out);
     flow::check(cx, out);

@@ -113,6 +113,9 @@ pub fn complete(snap: &Snapshot, path: &Path, offset: TextSize, opts: Options) -
     if let Some(c) = kdoc_completion(snap, file, offset, opts) {
         return Some(c);
     }
+    if let Some(c) = label_completion(file, offset) {
+        return Some(c);
+    }
     // Parse the text with the marker; the rest of the snapshot is unchanged.
     let text = format!("{}{MARKER}{}", &file.text[..o], &file.text[o..]);
     let data = FileData::new(path.to_path_buf(), Arc::from(text.as_str()), file.version)?;
@@ -674,6 +677,7 @@ impl Collector<'_, '_> {
     fn scope(&mut self, at: &SyntaxNode, statement: bool, callable_ref: bool) {
         let call = !callable_ref;
         self.named_arguments(at);
+        self.when_branches(at);
         if statement {
             self.lambda_parameters(at);
         }
@@ -748,8 +752,42 @@ impl Collector<'_, '_> {
             } else {
                 self.keywords(&["if", "when", "try", "object", "this", "super", "null", "true", "false", "throw", "return"]);
             }
+            // Labeled jumps and receivers: `return@forEach`, `break@outer`, `this@Outer`.
+            for (keyword, label) in labels(at) {
+                if !statement && matches!(keyword, "break" | "continue") {
+                    continue;
+                }
+                let mut item = Self::item(&format!("{keyword}@{label}"), ItemKind::Keyword, 5);
+                item.insert = Some(format!("{keyword}@{label}"));
+                self.push(item);
+            }
         }
         self.auto_import(true);
+    }
+
+    /// In a `when` branch condition: the conditions still missing for an exhaustive `when`
+    /// (enum entries, sealed subclasses, `true`/`false`, `null`), one by one or all at once.
+    fn when_branches(&mut self, at: &SyntaxNode) {
+        let Some(entry) = at.parent().filter(|p| p.kind() == SyntaxKind::WHEN_CONDITION).and_then(|c| c.parent()).filter(|e| e.kind() == SyntaxKind::WHEN_ENTRY) else { return };
+        let Some(when) = entry.parent().filter(|w| w.kind() == SyntaxKind::WHEN_EXPR) else { return };
+        let Some(subject) = when.children().find(|c| c.kind() == SyntaxKind::WHEN_SUBJECT) else { return };
+        let Some(missing) = crate::analysis::lints::missing_branches(self.e, &when, &subject, Some(&entry)) else { return };
+        if missing.is_empty() {
+            return;
+        }
+        let indent = crate::analysis::lints::indent_at(&self.file.text, at.text_range().start());
+        if missing.len() > 1 {
+            let mut item = Self::item("Add remaining branches", ItemKind::Snippet, 0);
+            item.filter = Some(self.prefix.clone());
+            item.detail = Some(missing.join(", "));
+            item.insert = Some(missing.iter().map(|m| format!("{m} -> TODO()")).collect::<Vec<_>>().join(&format!("\n{indent}")));
+            self.push(item);
+        }
+        for m in &missing {
+            let mut item = Self::item(m, ItemKind::Keyword, 0);
+            item.insert = Some(format!("{m} -> "));
+            self.push(item);
+        }
     }
 
     /// `name =` items for the parameters of the call around `at`.
@@ -1001,6 +1039,78 @@ impl Collector<'_, '_> {
     }
 }
 
+/// The labels usable at `at`, as (keyword, label): `return@` lambdas (named by their label
+/// or the function they are passed to), `break@`/`continue@` labeled loops, `this@` classes
+/// and labeled lambdas.
+fn labels(at: &SyntaxNode) -> Vec<(&'static str, String)> {
+    let label_of = |n: &SyntaxNode| n.parent().filter(|p| p.kind() == SyntaxKind::LABELED_EXPR).and_then(|p| p.children().find(|c| c.kind() == SyntaxKind::LABEL)).map(|l| l.text().to_string().trim_end_matches('@').to_string());
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let mut push = |k: &'static str, l: String| {
+        if !l.is_empty() && !out.iter().any(|(ok, ol)| *ok == k && *ol == l) {
+            out.push((k, l));
+        }
+    };
+    for a in at.ancestors().skip(1) {
+        match a.kind() {
+            SyntaxKind::LAMBDA_EXPR => {
+                let callee = a
+                    .ancestors()
+                    .skip(1)
+                    .find(|c| c.kind() == SyntaxKind::CALL_EXPR)
+                    .filter(|c| c.children().any(|x| matches!(x.kind(), SyntaxKind::LAMBDA_ARGUMENT | SyntaxKind::VALUE_ARGUMENT_LIST) && x.text_range().contains_range(a.text_range())))
+                    .and_then(|c| c.first_child())
+                    .filter(|n| n.kind() == SyntaxKind::NAME_REF)
+                    .map(|n| n.text().to_string());
+                if let Some(l) = label_of(&a).or(callee) {
+                    push("return", l.clone());
+                    push("this", l);
+                }
+            }
+            SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR | SyntaxKind::DO_WHILE_EXPR => {
+                if let Some(l) = label_of(&a) {
+                    push("break", l.clone());
+                    push("continue", l);
+                }
+            }
+            SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION => {
+                if let Some(n) = ast::token(&a, SyntaxKind::IDENT) {
+                    push("this", ast::ident_text(&n));
+                }
+            }
+            // Labels do not reach out of named functions (a plain `return` leaves them).
+            SyntaxKind::FUN if ast::token(&a, SyntaxKind::IDENT).is_some() => {
+                // Classes around the function still give `this@Class`.
+                for c in a.ancestors().filter(|c| matches!(c.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION)) {
+                    if let Some(n) = ast::token(&c, SyntaxKind::IDENT) {
+                        push("this", ast::ident_text(&n));
+                    }
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// After `return@`, `break@`, `continue@` or `this@`: the labels for that keyword.
+fn label_completion(file: &FileData, offset: TextSize) -> Option<Completion> {
+    let o = usize::from(offset);
+    let before = &file.text[..o];
+    let partial_len = before.chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').map(char::len_utf8).sum::<usize>();
+    let head = before[..o - partial_len].strip_suffix('@')?;
+    let keyword = ["return", "break", "continue", "this"].into_iter().find(|k| head.ends_with(k) && !head[..head.len() - k.len()].ends_with(|c: char| c.is_alphanumeric() || c == '_'))?;
+    let root = file.parse().syntax();
+    let at = root.token_at_offset(TextSize::from((o - partial_len - 1) as u32)).left_biased()?.parent()?;
+    let partial = &before[o - partial_len..];
+    let items: Vec<Item> = labels(&at)
+        .into_iter()
+        .filter(|(k, l)| *k == keyword && matches(partial, l))
+        .map(|(_, l)| Collector::item(&l, ItemKind::Keyword, 1))
+        .collect();
+    (!items.is_empty()).then(|| Completion { range: TextRange::new(TextSize::from((o - partial_len) as u32), offset), items, incomplete: false })
+}
+
 fn package_of(fq: &str) -> String {
     let parts: Vec<&str> = fq.split('.').collect();
     let first_upper = parts.iter().position(|p| p.chars().next().is_some_and(char::is_uppercase)).unwrap_or(parts.len().saturating_sub(1));
@@ -1024,7 +1134,7 @@ fn strip_platform(s: &str) -> String {
 }
 
 /// Not offered for auto-import: JDK and library internals.
-pub(super) fn importable(fq: &str) -> bool {
+pub fn importable(fq: &str) -> bool {
     const HIDDEN: &[&str] = &["sun.", "jdk.", "com.sun.", "kotlin.jvm.internal.", "kotlin.internal.", "kotlin.coroutines.jvm.internal."];
     !HIDDEN.iter().any(|h| fq.starts_with(h)) && !fq.contains(".internal.") && fq.contains('.')
 }

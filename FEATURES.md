@@ -77,7 +77,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [~] [P0] `textDocument/references` — (KDoc `[links]` included) incl. operator conventions (`plus`, `get`, `invoke`, `component1`), property accessors, delegated properties, KDoc links, Java usages — *partial: name references in Kotlin sources (incl. imports, types, constructor calls, the whole override family incl. `super` calls and anonymous objects, and operator-convention call sites: arithmetic/compound assignment, unary, `++`/`--`, ranges, `in`/`!in`, indexing, `==`, comparisons, `invoke`, destructuring `componentN`, `for` iterators, `by` delegates); not KDoc links or Java files*
 - [~] [P1] `textDocument/documentHighlight` — read vs write occurrences, exit points (`return`), loop `break` targets — *partial: read/write occurrences (incl. the override family); no exit points or loop targets*
 - [x] [P0] `textDocument/documentSymbol` — hierarchical outline (classes, objects, functions, properties, typealiases, enum entries)
-- [~] [P0] `workspace/symbol` — fuzzy/camel-hump search across project + libraries — *partial: project sources only*
+- [~] [P0] `workspace/symbol` — fuzzy/camel-hump search across project + libraries — *partial: project declarations, and library classes of every module's classpath (the best 20, located in sources jars or generated stubs); not library members*
 - [ ] [P2] `workspaceSymbol/resolve`
 - [x] [P1] Call hierarchy: `prepareCallHierarchy`, `incomingCalls`, `outgoingCalls` (functions and constructors; callers are functions, constructors, properties or classes)
 - [x] [P1] Type hierarchy: `prepareTypeHierarchy`, `supertypes`, `subtypes` (subtypes among project sources)
@@ -134,12 +134,12 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 
 - [x] [P0] Scope members: locals, parameters, members, top-levels, imported symbols
 - [x] [P0] Member completion after `.` and `?.` (incl. extensions applicable to receiver type; Java getters as properties)
-- [~] [P0] Keyword completion (context-aware: `override`, `return@label`, `when` branches…) — *partial: statement, expression, top-level and class-body keyword sets; no labels*
+- [~] [P0] Keyword completion (context-aware: `override`, `return@label`, `when` branches…) — *partial: statement, expression, top-level and class-body keyword sets; labels: `return@` (lambdas, by label or called function), `break@`/`continue@` (labeled loops), `this@` (classes, lambdas), also after a typed `@`*
 - [~] [P0] Auto-import: unimported classes, top-level functions, extensions (adds `import` via `additionalTextEdits`) — *partial: classes (libraries + project), top-level functions and properties (project + libraries, outside default imports), and extensions applicable to the receiver after `.` (project + libraries)*
 - [~] [P1] Smart/type-aware ranking (expected type first, recently used, same module) — *partial: locals → members → extensions → package/imports → defaults → keywords → imports needed; case-matching first; no expected type*
 - [x] [P1] Named argument completion (`param =`)
 - [x] [P1] Override/implement member completion (generates full signature + body)
-- [ ] [P1] `when` exhaustive branch completion (sealed/enum)
+- [x] [P1] `when` exhaustive branch completion (sealed/enum; also `Boolean` and `null`): each missing condition, or all at once
 - [~] [P1] Snippets / postfix templates: `.if`, `.not`, `.for`, `.val`, `.var`, `.return`, `.let`, `.notnull`, `.null`, `.try`, `.par`, `.sout`, `.when`, `.arg`, `.spread` — *partial: `.val`, `.var`, `.return`, `.if`, `.while`, `.not`, `.notnull`, `.null`, `.for`, `.when`, `.par`, `.arg`, `.println`, `.try` (by type and statement position; names from the type); not `.let`, `.spread`*
 - [ ] [P1] Live templates: `main`, `fun0/1/2`, `sout`, `iter`, `ifn`, `inn`, `void`, `closure`, `object`, `interface`, `exfun`, `exval`
 - [x] [P1] Lambda parameter completion (`{ a, b -> }` from expected function type; `(key, value) ->` for map entries and pairs)

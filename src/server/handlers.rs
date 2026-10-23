@@ -159,6 +159,63 @@ pub fn workspace_symbols(cx: &Ctx, query: &str) -> Result<Vec<WorkspaceSymbol>> 
             data: None,
         });
     }
+    if query.chars().count() >= 2 && out.len() < 128 {
+        out.extend(library_symbols(cx, query, 128 - out.len())?);
+    }
+    Ok(out)
+}
+
+/// Library classes matching `query` (from the classpath of each module), located in their
+/// sources jar or a generated stub. Only the best few are located: that reads archives.
+fn library_symbols(cx: &Ctx, query: &str, room: usize) -> Result<Vec<WorkspaceSymbol>> {
+    use crate::analysis::ide::library;
+    const LOCATED: usize = 20;
+    // One file per module gives that module's classpath.
+    let mut seen_contexts = std::collections::HashSet::new();
+    let mut classpaths: Vec<std::sync::Arc<crate::classpath::ClasspathIndex>> = Vec::new();
+    for (path, f) in cx.snap.files.iter() {
+        if f.language != crate::analysis::source::Language::Kotlin || !seen_contexts.insert(cx.snap.context_of(path)) {
+            continue;
+        }
+        let cp = cx.snap.resolver(path).classpath.clone();
+        if !classpaths.iter().any(|c| std::sync::Arc::ptr_eq(c, &cp)) {
+            classpaths.push(cp);
+        }
+    }
+    let mut hits: Vec<(i64, String, usize)> = Vec::new();
+    let mut found = std::collections::HashSet::new();
+    for (i, cp) in classpaths.iter().enumerate() {
+        cx.check()?;
+        for fq in cp.top_level_classes_where(&|simple| match_score(simple, query).is_some()) {
+            if !crate::analysis::ide::completion::importable(&fq) || !found.insert(fq.clone()) {
+                continue;
+            }
+            let simple = fq.rsplit('.').next().unwrap_or(&fq);
+            if let Some(score) = match_score(simple, query) {
+                hits.push((score, fq, i));
+            }
+        }
+    }
+    // Shorter names and Kotlin packages first among equal scores.
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.len().cmp(&b.1.len())).then_with(|| a.1.cmp(&b.1)));
+    let mut out = Vec::new();
+    for (_, fq, i) in hits.into_iter().take(room.min(LOCATED)) {
+        cx.check()?;
+        let cp = &classpaths[i];
+        let Some(class) = cp.find_class(&fq) else { continue };
+        let sym = class.symbol.clone();
+        let Some(target) = library::locate_in_sources(cx.snap, cp, &sym, false).or_else(|| library::stub(cx.snap, cp, &sym)) else { continue };
+        let Ok(text) = std::fs::read_to_string(&target.path) else { continue };
+        let index = LineIndex::new(&text);
+        out.push(WorkspaceSymbol {
+            name: sym.name.clone(),
+            kind: to_proto::symbol_kind(sym.kind, sym.modifiers, false),
+            tags: None,
+            container_name: fq.rsplit_once('.').map(|(c, _)| c.to_string()),
+            location: lsp_types::OneOf::Left(Location { uri: path_to_uri(&target.path), range: index.range(&text, target.range, cx.enc) }),
+            data: None,
+        });
+    }
     Ok(out)
 }
 

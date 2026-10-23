@@ -108,106 +108,7 @@ fn when_expr(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         }
         return;
     };
-    let expr = match subject.children().find(|c| c.kind() == SyntaxKind::PROPERTY) {
-        Some(p) => initializer(&p),
-        None => subject.first_child(),
-    };
-    let Some(expr) = expr else { return };
-    let Some(t) = e.type_of(&expr) else { return };
-    let nullable = matches!(&t, TypeRef::Named { nullable: true, .. });
-    let Some(fq) = fq_of(&t).map(str::to_string) else { return };
-    let kind = if fq == "kotlin.Boolean" {
-        Subject::Boolean
-    } else {
-        let Some(c) = e.classifier(&fq) else { return };
-        let sym = c.symbol().clone();
-        if sym.modifiers.has(Modifiers::EXPECT) {
-            return;
-        }
-        match (&c, sym.kind) {
-            (_, SymbolKind::Enum) => {
-                let entries: Vec<String> = e.all_static_members(&c).1.into_iter().filter(|(m, _)| m.kind == SymbolKind::EnumEntry).map(|(m, _)| m.name).collect();
-                if entries.is_empty() {
-                    return;
-                }
-                Subject::Enum(entries)
-            }
-            (Classifier::Source(_), SymbolKind::Class | SymbolKind::Interface) if sym.modifiers.has(Modifiers::SEALED) => Subject::Sealed(sym),
-            _ => return,
-        }
-    };
-    // What the branches cover; unknown conditions (`in`, `!is`, arbitrary values) stop the check.
-    let mut covered = Covered::default();
-    let scope = scope_at(n, &e.package(), &mut LocalsCache::default());
-    for en in entries.iter().filter(|en| ast::token(en, SyntaxKind::ELSE_KW).is_none()) {
-        if en.children().any(|c| c.kind() == SyntaxKind::WHEN_GUARD) {
-            continue;
-        }
-        for cond in en.children().filter(|c| c.kind() == SyntaxKind::WHEN_CONDITION) {
-            if tokens(&cond).any(|t| matches!(t.kind(), SyntaxKind::NOT_IS_KW | SyntaxKind::IN_KW | SyntaxKind::NOT_IN_KW)) {
-                return;
-            }
-            if tokens(&cond).any(|t| t.kind() == SyntaxKind::IS_KW) {
-                let Some(ut) = cond.descendants().find_map(ast::UserType::cast) else { return };
-                let names: Vec<String> = ut.segments().iter().filter_map(|s| s.name_token()).map(|t| ast::ident_text(&t)).collect();
-                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-                let Ok(Resolved::Classifier(c)) = e.res.resolve_type_name(&refs, &scope) else { return };
-                covered.types.push(c.fq_name().to_string());
-                continue;
-            }
-            let Some(v) = cond.first_child() else { return };
-            match v.kind() {
-                SyntaxKind::LITERAL => match v.first_token().map(|t| t.kind()) {
-                    Some(SyntaxKind::NULL_KW) => covered.null = true,
-                    Some(SyntaxKind::TRUE_KW) => {
-                        covered.bools.insert(true);
-                    }
-                    Some(SyntaxKind::FALSE_KW) => {
-                        covered.bools.insert(false);
-                    }
-                    _ => return,
-                },
-                SyntaxKind::NAME_REF | SyntaxKind::DOT_QUALIFIED_EXPR => match &kind {
-                    Subject::Enum(_) => {
-                        let last = v.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF).last().and_then(|l| l.first_token());
-                        let Some(last) = last else { return };
-                        covered.names.insert(ast::ident_text(&last));
-                    }
-                    _ => {
-                        // An object.
-                        let Some(vt) = e.type_of(&v) else { return };
-                        let Some(vfq) = fq_of(&vt) else { return };
-                        if e.classifier(vfq).is_none_or(|c| c.symbol().kind != SymbolKind::Object) {
-                            return;
-                        }
-                        covered.types.push(vfq.to_string());
-                    }
-                },
-                _ => return,
-            }
-        }
-    }
-    let mut missing: Vec<String> = Vec::new();
-    match &kind {
-        Subject::Boolean => {
-            for b in [true, false] {
-                if !covered.bools.contains(&b) {
-                    missing.push(b.to_string());
-                }
-            }
-        }
-        Subject::Enum(entries) => {
-            let short = short_class_name(&fq);
-            missing.extend(entries.iter().filter(|en| !covered.names.contains(*en)).map(|en| format!("{short}.{en}")));
-        }
-        Subject::Sealed(sym) => {
-            let Some(m) = missing_subclasses(e, sym, &covered, 0) else { return };
-            missing.extend(m);
-        }
-    }
-    if nullable && !covered.null {
-        missing.push("null".into());
-    }
+    let Some(missing) = missing_branches(e, n, &subject, None) else { return };
     let missing_fixes = |missing: &[String]| -> Vec<Fix> { add_branches(cx, n, missing).into_iter().chain(add_branches(cx, n, &["else".into()])).collect() };
     match (missing.is_empty(), else_entry) {
         (true, Some(el)) => {
@@ -227,6 +128,114 @@ fn when_expr(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         }
         _ => {}
     }
+}
+
+/// The branch conditions a `when` with a subject (an enum, sealed class, `Boolean` or
+/// nullable one) lacks to be exhaustive, ignoring entry `skip` (being edited). `None` when
+/// that cannot be determined.
+pub(crate) fn missing_branches(e: &Engine, n: &SyntaxNode, subject: &SyntaxNode, skip: Option<&SyntaxNode>) -> Option<Vec<String>> {
+    let expr = match subject.children().find(|c| c.kind() == SyntaxKind::PROPERTY) {
+        Some(p) => initializer(&p),
+        None => subject.first_child(),
+    };
+    let expr = expr?;
+    let t = e.type_of(&expr)?;
+    let nullable = matches!(&t, TypeRef::Named { nullable: true, .. });
+    let fq = fq_of(&t).map(str::to_string)?;
+    let kind = if fq == "kotlin.Boolean" {
+        Subject::Boolean
+    } else {
+        let c = e.classifier(&fq)?;
+        let sym = c.symbol().clone();
+        if sym.modifiers.has(Modifiers::EXPECT) {
+            return None;
+        }
+        match (&c, sym.kind) {
+            (_, SymbolKind::Enum) => {
+                let entries: Vec<String> = e.all_static_members(&c).1.into_iter().filter(|(m, _)| m.kind == SymbolKind::EnumEntry).map(|(m, _)| m.name).collect();
+                if entries.is_empty() {
+                    return None;
+                }
+                Subject::Enum(entries)
+            }
+            (Classifier::Source(_), SymbolKind::Class | SymbolKind::Interface) if sym.modifiers.has(Modifiers::SEALED) => Subject::Sealed(sym),
+            _ => return None,
+        }
+    };
+    // What the branches cover; unknown conditions (`in`, `!is`, arbitrary values) stop the check.
+    let mut covered = Covered::default();
+    let scope = scope_at(n, &e.package(), &mut LocalsCache::default());
+    let entries: Vec<SyntaxNode> = n.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY).collect();
+    for en in entries.iter().filter(|en| ast::token(en, SyntaxKind::ELSE_KW).is_none() && Some(*en) != skip) {
+        if en.children().any(|c| c.kind() == SyntaxKind::WHEN_GUARD) {
+            continue;
+        }
+        for cond in en.children().filter(|c| c.kind() == SyntaxKind::WHEN_CONDITION) {
+            if tokens(&cond).any(|t| matches!(t.kind(), SyntaxKind::NOT_IS_KW | SyntaxKind::IN_KW | SyntaxKind::NOT_IN_KW)) {
+                return None;
+            }
+            if tokens(&cond).any(|t| t.kind() == SyntaxKind::IS_KW) {
+                let ut = cond.descendants().find_map(ast::UserType::cast)?;
+                let names: Vec<String> = ut.segments().iter().filter_map(|s| s.name_token()).map(|t| ast::ident_text(&t)).collect();
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                let Ok(Resolved::Classifier(c)) = e.res.resolve_type_name(&refs, &scope) else { return None };
+                covered.types.push(c.fq_name().to_string());
+                continue;
+            }
+            let v = cond.first_child()?;
+            match v.kind() {
+                SyntaxKind::LITERAL => match v.first_token().map(|t| t.kind()) {
+                    Some(SyntaxKind::NULL_KW) => covered.null = true,
+                    Some(SyntaxKind::TRUE_KW) => {
+                        covered.bools.insert(true);
+                    }
+                    Some(SyntaxKind::FALSE_KW) => {
+                        covered.bools.insert(false);
+                    }
+                    _ => return None,
+                },
+                SyntaxKind::NAME_REF | SyntaxKind::DOT_QUALIFIED_EXPR => match &kind {
+                    Subject::Enum(_) => {
+                        let last = v.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF).last().and_then(|l| l.first_token());
+                        let last = last?;
+                        covered.names.insert(ast::ident_text(&last));
+                    }
+                    _ => {
+                        // An object.
+                        let vt = e.type_of(&v)?;
+                        let vfq = fq_of(&vt)?;
+                        if e.classifier(vfq).is_none_or(|c| c.symbol().kind != SymbolKind::Object) {
+                            return None;
+                        }
+                        covered.types.push(vfq.to_string());
+                    }
+                },
+                _ => return None,
+            }
+        }
+    }
+    let mut missing: Vec<String> = Vec::new();
+    match &kind {
+        Subject::Boolean => {
+            for b in [true, false] {
+                if !covered.bools.contains(&b) {
+                    missing.push(b.to_string());
+                }
+            }
+        }
+        Subject::Enum(entries) => {
+            let short = short_class_name(&fq);
+            missing.extend(entries.iter().filter(|en| !covered.names.contains(*en)).map(|en| format!("{short}.{en}")));
+        }
+        Subject::Sealed(sym) => {
+            let m = missing_subclasses(e, sym, &covered, 0)?;
+            missing.extend(m);
+        }
+    }
+    if nullable && !covered.null {
+        missing.push("null".into());
+    }
+    Some(missing)
 }
 
 /// Direct subclasses of a sealed source class not covered by the branches, as branch

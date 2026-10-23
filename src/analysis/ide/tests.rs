@@ -1438,3 +1438,38 @@ fn completes_unimported_library_functions_and_extensions() {
     // Not for receivers it does not apply to.
     assert!(!fx.labels(&format!("{HEADER}fun run(u: User) {{\n    u.absol$0\n}}\n")).iter().any(|l| l == "absoluteValue"));
 }
+
+#[test]
+fn completes_labels() {
+    let Some(mut fx) = fixture() else { return };
+    let src = |body: &str| format!("{HEADER}class Outer {{\n    fun run(xs: List<Int>) {{\n        outer@ for (x in xs) {{\n            xs.forEach {{\n{body}\n            }}\n        }}\n    }}\n}}\n");
+    let labels = fx.labels(&src("                ret$0"));
+    has_all(&labels, &["return@forEach"]);
+    let labels = fx.labels(&src("                br$0"));
+    has_all(&labels, &["break@outer"]);
+    let labels = fx.labels(&src("                th$0"));
+    has_all(&labels, &["this@Outer"]);
+    // After `@`: the label alone.
+    let c = fx.complete(&src("                return@for$0"));
+    assert_eq!(c.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), vec!["forEach"]);
+    let c = fx.complete(&src("                continue@$0"));
+    assert_eq!(c.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), vec!["outer"]);
+}
+
+#[test]
+fn completes_when_branches() {
+    let Some(mut fx) = fixture() else { return };
+    let decls = "enum class Color { RED, GREEN, BLUE }\nsealed interface Shape\nclass Circle(val r: Double) : Shape\nobject Empty : Shape\n";
+    let c = fx.complete(&format!("{HEADER}{decls}fun f(c: Color) = when (c) {{\n    Color.RED -> 1\n    $0\n}}\n"));
+    assert_eq!(c.items[0].label, "Add remaining branches");
+    assert_eq!(c.items[0].insert.as_deref(), Some("Color.GREEN -> TODO()\n    Color.BLUE -> TODO()"));
+    let blue = c.items.iter().find(|i| i.label == "Color.BLUE").expect("Color.BLUE");
+    assert_eq!(blue.insert.as_deref(), Some("Color.BLUE -> "));
+    assert!(!c.items.iter().any(|i| i.label == "Color.RED"), "covered entry offered");
+    // Typing part of a name.
+    let labels = fx.labels(&format!("{HEADER}{decls}fun f(c: Color) = when (c) {{\n    Color.RED -> 1\n    Color.GR$0\n}}\n"));
+    has_all(&labels, &["GREEN"]);
+    // Sealed hierarchies.
+    let labels = fx.labels(&format!("{HEADER}{decls}fun f(s: Shape) = when (s) {{\n    $0\n}}\n"));
+    has_all(&labels, &["Add remaining branches", "is Circle", "Empty"]);
+}
