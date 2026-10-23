@@ -30,6 +30,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                     SyntaxKind::NAME_REF if n.text() == "Unit" => unit_expression(cx, &n, out),
                     SyntaxKind::BLOCK => unnecessary_variable(&n, out),
                     SyntaxKind::STRING_TEMPLATE => string_template(cx, &n, out),
+                    SyntaxKind::LAMBDA_EXPR => lambda_arrow(cx, &n, out),
+                    SyntaxKind::TYPE_ARGUMENT_LIST => explicit_type_arguments(cx, &n, out),
+                    SyntaxKind::DOT_QUALIFIED_EXPR => useless_call_on_not_null(cx, &n, out),
                     _ => {}
                 }
             }
@@ -394,4 +397,140 @@ fn string_template(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         return;
     }
     out.report(&REDUNDANT_STRING_TEMPLATE, n.text_range(), "Redundant string template", Some(Fix::replace("Remove string template", n.text_range(), expr.text().to_string())));
+}
+
+/// The call a lambda is an argument of.
+fn call_of_lambda(lambda: &SyntaxNode) -> Option<SyntaxNode> {
+    let arg = lambda.parent().filter(|p| matches!(p.kind(), SyntaxKind::LAMBDA_ARGUMENT | SyntaxKind::VALUE_ARGUMENT))?;
+    match arg.kind() {
+        SyntaxKind::LAMBDA_ARGUMENT => arg.parent(),
+        _ => arg.parent()?.parent(),
+    }
+    .filter(|c| c.kind() == SyntaxKind::CALL_EXPR)
+}
+
+/// `{ -> … }` and `{ it -> … }`: the arrow (and `it`) say nothing the lambda would not.
+fn lambda_arrow(cx: &Cx, lambda: &SyntaxNode, out: &mut Sink) {
+    let (Some(list), Some(arrow)) = (lambda.children().find(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST), ast::token(lambda, SyntaxKind::ARROW)) else { return };
+    if !cx.on(&REDUNDANT_LAMBDA_ARROW) || has_comments(&list) {
+        return;
+    }
+    let params: Vec<SyntaxNode> = list.children().collect();
+    let implicit_it = match params.as_slice() {
+        [] => false,
+        [p] if p.kind() == SyntaxKind::VALUE_PARAMETER && p.text() == "it" => true,
+        _ => return,
+    };
+    // As a call argument the parameter list may choose the overload: only with one candidate.
+    if let Some(call) = call_of_lambda(lambda) {
+        let Some(e) = cx.engine() else { return };
+        let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+        if e.call_candidates(&callee).is_none_or(|c| c.len() != 1) {
+            return;
+        }
+    }
+    let end = next_significant(&arrow, true).map_or(arrow.text_range().end(), |t| t.text_range().start());
+    let start = if implicit_it { list.text_range().start() } else { arrow.text_range().start() };
+    let (message, title) = if implicit_it { ("Redundant lambda parameter 'it'", "Remove 'it ->'") } else { ("Redundant lambda arrow", "Remove arrow") };
+    out.report(&REDUNDANT_LAMBDA_ARROW, TextRange::new(start, arrow.text_range().end()), message, Some(Fix::delete(title, TextRange::new(start, end))));
+}
+
+/// `listOf<Int>(1, 2)`: every type parameter is the declared type of parameters whose
+/// arguments all have exactly that type.
+fn explicit_type_arguments(cx: &Cx, list: &SyntaxNode, out: &mut Sink) {
+    let Some(call) = list.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR) else { return };
+    if !cx.on(&REDUNDANT_TYPE_ARGUMENTS) || call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) || has_comments(list) {
+        return;
+    }
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let Some(args) = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).map(|l| l.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect::<Vec<_>>()) else { return };
+    if args.is_empty() || args.iter().any(|a| a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME) || ast::token(a, SyntaxKind::STAR).is_some()) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let defs = e.resolve_name_ref(&callee);
+    let [crate::analysis::ide::infer::Def::Symbol { sym, .. }] = defs.as_slice() else { return };
+    let projections: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::TYPE_PROJECTION).collect();
+    if sym.kind != crate::symbols::SymbolKind::Function || projections.len() != sym.type_params.len() {
+        return;
+    }
+    let params: Vec<crate::symbols::TypeRef> = sym.params.iter().map(|p| e.resolve_declared(sym, &p.ty)).collect();
+    let vararg = sym.params.iter().position(|p| p.vararg);
+    for (tp, proj) in sym.type_params.iter().zip(&projections) {
+        // A plain class type, written without arguments.
+        let Some(tr) = proj.children().find_map(ast::TypeRef::cast) else { return };
+        let want = e.resolve_syntax_type(&tr);
+        let crate::symbols::TypeRef::Named { fq: Some(want_fq), args: want_args, nullable: false, .. } = &want else { return };
+        if !want_args.is_empty() {
+            return;
+        }
+        let direct = |t: &crate::symbols::TypeRef| matches!(t, crate::symbols::TypeRef::TypeParam { name, nullable: false } if *name == tp.name);
+        // Used elsewhere than as a whole parameter type (`List<T>`, return-only): the
+        // arguments may not determine it.
+        let mentions = |t: &crate::symbols::TypeRef| t.display().split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == tp.name);
+        if params.iter().any(|p| !direct(p) && mentions(p)) || sym.receiver.as_ref().is_some_and(|r| mentions(&e.resolve_declared(sym, r))) {
+            return;
+        }
+        let mut bound = 0;
+        for (i, a) in args.iter().enumerate() {
+            let Some(p) = (match vararg {
+                Some(v) if i >= v => params.get(v),
+                _ => params.get(i),
+            }) else {
+                return;
+            };
+            if !direct(p) {
+                continue;
+            }
+            let Some(value) = a.first_child() else { return };
+            match certain_type(e, &value, false) {
+                Some(crate::symbols::TypeRef::Named { fq: Some(fq), args, nullable: false, .. }) if fq == *want_fq && args.is_empty() => bound += 1,
+                _ => return,
+            }
+        }
+        if bound == 0 {
+            return;
+        }
+    }
+    out.report(&REDUNDANT_TYPE_ARGUMENTS, list.text_range(), "Remove explicit type arguments", Some(Fix::delete("Remove explicit type arguments", list.text_range())));
+}
+
+/// `(stdlib function, replacement)`: `None` drops the call.
+const NULLABLE_RECEIVER_CALLS: &[(&str, Option<&str>)] = &[
+    ("kotlin.collections.orEmpty", None),
+    ("kotlin.text.orEmpty", None),
+    ("kotlin.collections.isNullOrEmpty", Some("isEmpty")),
+    ("kotlin.text.isNullOrEmpty", Some("isEmpty")),
+    ("kotlin.text.isNullOrBlank", Some("isBlank")),
+];
+
+/// `s.orEmpty()`, `s.isNullOrEmpty()` on a value that is never null.
+fn useless_call_on_not_null(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let mut parts = n.children();
+    let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    if call.kind() != SyntaxKind::CALL_EXPR || !cx.on(&USELESS_CALL_ON_NOT_NULL) || has_comments(n) {
+        return;
+    }
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let name = callee.text().to_string();
+    if !matches!(name.as_str(), "orEmpty" | "isNullOrEmpty" | "isNullOrBlank") || call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let defs = e.resolve_name_ref(&callee);
+    let [crate::analysis::ide::infer::Def::Symbol { sym, .. }] = defs.as_slice() else { return };
+    let Some(&(_, replacement)) = NULLABLE_RECEIVER_CALLS.iter().find(|(fq, _)| *fq == sym.fq_name) else { return };
+    if !matches!(certain_type(e, &recv, true), Some(crate::symbols::TypeRef::Named { nullable: false, .. })) {
+        return;
+    }
+    match replacement {
+        None => {
+            let fix = Fix::replace("Remove useless call", n.text_range(), recv.text().to_string());
+            out.report(&USELESS_CALL_ON_NOT_NULL, TextRange::new(recv.text_range().end(), n.text_range().end()), format!("Useless call '{name}()' on a value that is never null"), Some(fix));
+        }
+        Some(r) => {
+            let fix = Fix::replace(format!("Replace with '{r}()'"), callee.text_range(), r);
+            out.report(&USELESS_CALL_ON_NOT_NULL, callee.text_range(), format!("Call on a value that is never null can be replaced with '{r}()'"), Some(fix));
+        }
+    }
 }

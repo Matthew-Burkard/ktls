@@ -212,7 +212,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `RedundantModalityModifier` (`final` default, `open` in interface)
 - [x] [P1] `RedundantUnitExpression`
 - [x] [P1] `RedundantIf` (`if (x) true else false`)
-- [ ] [P1] `RedundantLambdaArrow`, `RedundantLambdaOrAnonymousFunction`
+- [~] [P1] `RedundantLambdaArrow`, `RedundantLambdaOrAnonymousFunction` — *partial: `RedundantLambdaArrow` (`{ -> … }`, `{ it -> … }`; as a call argument only when the call has one candidate)*
 - [ ] [P1] `RedundantSuspendModifier`
 - [x] [P1] `RemoveRedundantBackticks`
 - [~] [P1] `RemoveEmptyParenthesesFromLambdaCall`, `RemoveEmptyClassBody`, `RemoveEmptyPrimaryConstructor`, `RemoveEmptySecondaryConstructorBody` — *partial: all but `RemoveEmptySecondaryConstructorBody`*
@@ -225,7 +225,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `RedundantElvisReturnNull`, `RedundantRunCatching`
 - [ ] [P1] `RedundantConstructorKeyword`, `RedundantEnumConstructorInvocation`
 - [ ] [P1] `RedundantLabelMigration`, `RedundantValueArgument` (arg equals default)
-- [ ] [P1] `RedundantExplicitTypeArguments` (`listOf<Int>(1)`)
+- [~] [P1] `RedundantExplicitTypeArguments` (`listOf<Int>(1)`) — *partial: as `RemoveExplicitTypeArguments`, for calls with one candidate whose type parameters are whole parameter types bound by arguments of exactly that certain type*
 - [~] [P1] `UnusedImport`, `UnusedSymbol` (unused private/internal declarations), `UnusedReceiverParameter`, `UnusedLambdaExpressionBody`, `UnusedUnaryOperator` — *partial: `UnusedImport`, `UnusedSymbol` for private and local declarations*
 - [ ] [P2] `RedundantOverride` (only calls super), `RedundantInterpolationPrefix`
 
@@ -246,14 +246,14 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `ReplaceJavaStaticMethodWithKotlinAnalog` (`Math.max`, `System.out.println`, `Arrays.asList`…)
 - [ ] [P1] `ReplaceToStringWithStringTemplate`, `ReplaceSubstringWithTake/Drop/SubstringBefore/After`
 - [x] [P1] `ReplaceManualRangeWithIndicesCalls` (`0 until list.size` → `list.indices`)
-- [ ] [P1] `ReplaceWithOperatorAssignment` (`x = x + 1` → `x += 1`)
+- [x] [P1] `ReplaceWithOperatorAssignment` (`x = x + 1` → `x += 1`) — *numbers, chars and strings (other types may have `plusAssign`); names and `this.x`/`a.b` chains only*
 - [ ] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `ReplaceArrayOfWithLiteral` (annotations)
-- [ ] [P1] `ReplacePutWithAssignment` (`map.put(k, v)` → `map[k] = v`)
+- [x] [P1] `ReplacePutWithAssignment` (`map.put(k, v)` → `map[k] = v`) — *on `MutableMap`s, when the result is not used*
 - [ ] [P1] `ReplaceAssociateFunction`, `ReplaceMapIndexedWithListGenerator`
 - [ ] [P1] `JoinDeclarationAndAssignment`, `MoveVariableDeclarationIntoWhen`
 - [x] [P1] `MayBeConstant` (`val` → `const val`)
 - [ ] [P1] `ObjectLiteralToLambda`, `ConvertLambdaToReference`, `ConvertReferenceToLambda`
-- [ ] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate`
+- [~] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate` — *partial: `RemoveExplicitTypeArguments`*
 - [~] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda` — *partial: `SelfAssignment` of local variables*
 - [ ] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`)
 - [ ] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals`
@@ -267,10 +267,10 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P2] `ReplaceCollectionCountWithSize`, `PlatformExtensionReceiverOfInline`
 
 **Collections & sequences**
-- [ ] [P1] `SimplifiableCallChain` (`filter{}.first()` → `first{}`, `map{}.filterNotNull()` → `mapNotNull{}`, `sortedBy{}.first()` → `minBy{}`…)
+- [~] [P1] `SimplifiableCallChain` (`filter{}.first()` → `first{}`, `map{}.filterNotNull()` → `mapNotNull{}`, `sortedBy{}.first()` → `minBy{}`…) — *partial: `filter{}` + `first`/`firstOrNull`/`last`/`lastOrNull`/`single`/`singleOrNull`/`count`/`size`/`any`/`none`/`isEmpty`/`isNotEmpty`, `map{}` + `filterNotNull`/`joinToString`, `sortedBy{}`/`sortedByDescending{}` + `first`/`firstOrNull` on iterables, arrays and sequences*
 - [ ] [P1] `SimplifiableCall` (`filter { it is T }` → `filterIsInstance<T>()`)
 - [ ] [P1] `ConvertCallChainIntoSequence` (long chains on large collections)
-- [ ] [P1] `UselessCallOnCollection` / `UselessCallOnNotNull` (`orEmpty()` on non-null, `filterNotNull()` on non-null elements)
+- [~] [P1] `UselessCallOnCollection` / `UselessCallOnNotNull` (`orEmpty()` on non-null, `filterNotNull()` on non-null elements) — *partial: `UselessCallOnNotNull` (`orEmpty()`, `isNullOrEmpty()`, `isNullOrBlank()` on values of certain non-null type)*
 - [ ] [P1] `ReplaceManualForEachWithMap` / loop-to-stdlib suggestions (`for` loop → `map/filter/sum/any/all/count`)
 - [ ] [P1] `ReplaceWithCount`, `RedundantAsSequence`
 - [ ] [P2] `JavaCollectionsStaticMethod`, `JavaMapForEach`
@@ -284,14 +284,14 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 
 **Probable bugs**
 - [x] [P1] `EqualsOrHashCode` (one without the other)
-- [ ] [P1] `RecursivePropertyAccessor` / `RecursiveEqualsCall`
+- [~] [P1] `RecursivePropertyAccessor` / `RecursiveEqualsCall` — *partial: `RecursivePropertyAccessor` (getters reading, setters assigning their own property; "Replace with 'field'" when there is a backing field)*
 - [x] [P1] `ArrayInDataClass` (needs custom `equals`/`hashCode`)
 - [ ] [P1] `LeakingThis` (calling open member / passing `this` in constructor)
 - [ ] [P1] `SuspiciousVarProperty`, `SuspiciousCollectionReassignment` (`+=` on `var` read-only list)
 - [ ] [P1] `ImplicitNullableNothingType`, `ImplicitThis` (configurable)
 - [ ] [P1] `DelegationToVarProperty`
 - [ ] [P1] `WrapUnaryOperator` (`-1.inc()` precedence)
-- [ ] [P1] `NestedLambdaShadowedImplicitParameter` (nested `it`)
+- [x] [P1] `NestedLambdaShadowedImplicitParameter` (nested `it`) — *when the enclosing lambda's `it` is used too; not for `it.let`/`also`/`takeIf`/`takeUnless`*
 - [ ] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `CopyWithoutNamedArguments`
 - [ ] [P1] `UnusedResultOfAsync` / `DeferredResultUnused`, `SuspendFunctionOnCoroutineScope`, `RedundantRunBlocking`
 - [ ] [P1] `RunBlockingInSuspendFunction`, `BlockingMethodInNonBlockingContext` (`Thread.sleep` in coroutine)
@@ -391,10 +391,10 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 **Expressions & control flow**
 - [~] [P1] `if` ↔ `when`; `when` with subject ↔ without subject; flatten / merge `when` branches — *partial: `if`/`else if` chain → `when`; `when` (subject a plain name) → `if` chain*
 - [ ] [P1] `if` → elvis / safe access, elvis → `if`, `!!` → `if` check / elvis
-- [ ] [P1] Invert `if` condition; split `if` (`&&`/`||`) ↔ merge nested `if`s
+- [~] [P1] Invert `if` condition; split `if` (`&&`/`||`) ↔ merge nested `if`s — *partial: invert `if`/`else` (conditions negated in place: `==`↔`!=`, `<`↔`>=`, `is`↔`!is`, `in`↔`!in`, `!x`↔`x`), split `if (a && b)` without `else`, merge nested `if`s without `else`*
 - [x] [P1] Add/remove braces (`if`/`for`/`while`/`do`; not around a nested `if`)
-- [ ] [P1] Introduce / remove `when` subject; add `else` / remaining branches
-- [ ] [P1] `for` loop ↔ `forEach`; loop → collection operations (`map/filter/sumOf…`); `forEach` → `for`
+- [~] [P1] Introduce / remove `when` subject; add `else` / remaining branches — *partial: introduce (`x == c`, `x is T`, `x in r` with one side-effect-free subject) and remove a subject; remaining branches via the `NO_ELSE_IN_WHEN` fix*
+- [~] [P1] `for` loop ↔ `forEach`; loop → collection operations (`map/filter/sumOf…`); `forEach` → `for` — *partial: `for` → `forEach` (no jumps in the body), standard-library `forEach` → `for` (`return@forEach` → `continue`, implicit `it` named)*
 - [ ] [P1] `for (i in 0 until n)` ↔ `repeat(n)`, `indices`, `withIndex()`
 - [ ] [P1] `try/finally` → `use {}`
 - [ ] [P1] Lambda ↔ anonymous function ↔ callable reference
@@ -403,7 +403,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [ ] [P1] Scope functions: convert between `let`/`run`/`also`/`apply`/`with`
 - [~] [P1] Add/remove named arguments (single / all) — *partial: add names to all positional arguments (Kotlin functions)*
 - [ ] [P1] Add/remove trailing comma, put arguments/parameters on separate lines ↔ one line
-- [ ] [P1] Swap binary expression operands, flip `equals`, De Morgan's law
+- [~] [P1] Swap binary expression operands, flip `equals`, De Morgan's law — *partial: flip comparisons and equalities, De Morgan on `&&`/`||` chains (dropping an existing `!(…)`)*
 - [ ] [P1] Replace `a.compareTo(b) < 0` ↔ `a < b`, `contains` ↔ `in`, `invoke()` ↔ `()`
 - [ ] [P1] Infix call ↔ dot call
 - [ ] [P1] Range: `..` ↔ `until`/`..<` ↔ `downTo`, `rangeTo` ↔ operator

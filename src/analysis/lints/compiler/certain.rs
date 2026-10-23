@@ -21,7 +21,7 @@ use crate::symbols::{Modifiers, Origin, Symbol, SymbolKind, TypeArg, TypeRef, Va
 
 /// The certain type of `x`. `smart`: smart casts the engine applies (`is` checks) are
 /// trusted; otherwise names checked with `is` are not certain.
-pub(super) fn certain_type(e: &Engine, x: &SyntaxNode, smart: bool) -> Option<TypeRef> {
+pub(crate) fn certain_type(e: &Engine, x: &SyntaxNode, smart: bool) -> Option<TypeRef> {
     certain(e, x, smart, 0)
 }
 

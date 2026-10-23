@@ -37,6 +37,7 @@ pub fn assists(snap: &Snapshot, path: &Path, range: TextRange) -> Vec<(&'static 
     out.extend(super::signature_change::parameter_assists(snap, path, &tok).into_iter().map(|f| (REWRITE, f)));
     out.extend(super::signature_change::inline_function(snap, path, &tok).map(|f| (INLINE, f)));
     out.extend(super::rewrites::rewrites(&e, file, &tok).into_iter().map(|f| (if f.title.starts_with("Inline") { INLINE } else { REWRITE }, f)));
+    out.extend(super::intentions::intentions(&e, file, &tok).into_iter().map(|f| (REWRITE, f)));
     out
 }
 

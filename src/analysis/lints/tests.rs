@@ -1849,3 +1849,102 @@ fn quick_fixes_for_compiler_errors() {
         "package a\n\nfun f(s: String?) {\n    if (s != null) {\n        println(s.length)\n    }\n}\n"
     );
 }
+
+#[test]
+fn idiom_inspections() {
+    let fx = Fixture::new();
+    if !fx.typed() {
+        return;
+    }
+    let found = lint(
+        r#"package a
+
+class C {
+    var count = 0
+    val name: String = ""
+        get() = name
+    var label: String = ""
+        set(v) { label = v }
+    var ok: String = ""
+        get() = field.trim()
+        set(v) { field = v }
+
+    fun f(xs: List<Int>, m: MutableMap<String, Int>, s: String, words: List<String>) {
+        var total = 0
+        total = total + xs.size
+        this.count = this.count * 2
+        m.put("a", 1)
+        println(xs.filter { it > 1 }.first())
+        println(xs.map { it * 2 }.filterNotNull())
+        println(xs.filter { it > 0 }.size)
+        println(xs.sortedBy { -it }.firstOrNull())
+        xs.forEach { -> println() }
+        xs.forEach { it -> println(it) }
+        println(listOf<Int>(1, 2))
+        println(s.orEmpty())
+        println(s.isNullOrEmpty())
+        xs.forEach { println(it); words.forEach { println(it) } }
+    }
+}
+"#,
+    );
+    has(&found, "ReplaceWithOperatorAssignment: total = total + xs.size");
+    has(&found, "ReplaceWithOperatorAssignment: this.count = this.count * 2");
+    has(&found, "ReplacePutWithAssignment: put");
+    has(&found, "SimplifiableCallChain: filter { it > 1 }.first()");
+    has(&found, "SimplifiableCallChain: map { it * 2 }.filterNotNull()");
+    has(&found, "SimplifiableCallChain: filter { it > 0 }.size");
+    has(&found, "SimplifiableCallChain: sortedBy { -it }.firstOrNull()");
+    has(&found, "RedundantLambdaArrow: ->");
+    has(&found, "RedundantLambdaArrow: it ->");
+    has(&found, "RemoveExplicitTypeArguments: <Int>");
+    has(&found, "UselessCallOnNotNull: .orEmpty()");
+    has(&found, "UselessCallOnNotNull: isNullOrEmpty");
+    has(&found, "RecursivePropertyAccessor: name");
+    has(&found, "RecursivePropertyAccessor: label");
+    has(&found, "NestedLambdaShadowedImplicitParameter: it");
+    assert_eq!(found.iter().filter(|f| f.starts_with("RecursivePropertyAccessor")).count(), 2, "{found:#?}");
+    assert_eq!(found.iter().filter(|f| f.starts_with("NestedLambda")).count(), 1, "{found:#?}");
+
+    let body = |s: &str| format!("package a\n\nfun f(xs: List<Int>, m: MutableMap<String, Int>, s: String) {{\n    var t = 0\n    {s}\n    println(t)\n}}\n");
+    let check = |src: &str, rule: &str, want: &str| assert_eq!(fixed(&body(src), rule), body(want));
+    check("t = t - xs[0]", "ReplaceWithOperatorAssignment", "t -= xs[0]");
+    check("m.put(\"k\", 2)", "ReplacePutWithAssignment", "m[\"k\"] = 2");
+    check("println(xs\n        .filter { it > 1 }\n        .isEmpty())", "SimplifiableCallChain", "println(xs\n        .none { it > 1 })");
+    check("println(xs.map { \"$it\" }.joinToString())", "SimplifiableCallChain", "println(xs.joinToString { \"$it\" })");
+    check("xs.forEach { it -> println(it) }", "RedundantLambdaArrow", "xs.forEach { println(it) }");
+    check("println(listOf<String>(\"a\", s))", "RemoveExplicitTypeArguments", "println(listOf(\"a\", s))");
+    check("println(s.orEmpty())", "UselessCallOnNotNull", "println(s)");
+    assert_eq!(fixed("class C {\n    val v: Int = 1\n        get() = v + 1\n}\n", "RecursivePropertyAccessor"), "class C {\n    val v: Int = 1\n        get() = field + 1\n}\n");
+
+    // Not flagged: types with `plusAssign`, a used `put` result, other receivers' properties,
+    // type arguments the arguments do not fix, nullable receivers, unused outer `it`.
+    let quiet = lint(
+        r#"package a
+
+class D(val other: D?) {
+    val name: String get() = other?.name ?: ""
+    var list = mutableListOf<Int>()
+
+    fun g(m: MutableMap<String, Int>, s: String?, xs: List<Int>) {
+        list = list + 1
+        val old = m.put("a", 1)
+        println(old)
+        println(listOf<Number>(1, 2))
+        println(emptyList<Int>())
+        println(listOf<Long>(1))
+        println(s.orEmpty())
+        xs.forEach { _ -> xs.forEach { println(it) } }
+        xs.forEach { xs.forEach { x -> println(x) }; println(it) }
+        xs.map { it.takeIf { it > 0 } }
+        println(xs.map { if (it > 9) return; "$it" }.joinToString())
+        val f: (Int) -> Int = { it -> it }
+        println(f)
+    }
+}
+"#,
+    );
+    for rule in ["ReplaceWithOperatorAssignment", "ReplacePutWithAssignment", "RecursivePropertyAccessor", "RemoveExplicitTypeArguments", "UselessCallOnNotNull", "NestedLambda", "SimplifiableCallChain"] {
+        assert!(!quiet.iter().any(|f| f.starts_with(rule)), "{rule}: {quiet:#?}");
+    }
+}

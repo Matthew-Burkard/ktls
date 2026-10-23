@@ -15,8 +15,13 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::BINARY_EXPR => {
                 ranges(cx, &n, out);
                 size_check(cx, &n, out);
+                operator_assignment(cx, &n, out);
             }
-            SyntaxKind::DOT_QUALIFIED_EXPR => operator_calls(cx, &n, out),
+            SyntaxKind::DOT_QUALIFIED_EXPR => {
+                operator_calls(cx, &n, out);
+                put_assignment(cx, &n, out);
+                call_chain(cx, &n, out);
+            }
             SyntaxKind::IF_EXPR | SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR => empty_bodies(&n, out),
             _ => {}
         }
@@ -307,4 +312,176 @@ fn empty_bodies(n: &SyntaxNode, out: &mut Sink) {
             }
         }
     }
+}
+
+const OPERATOR_ASSIGNMENTS: &[(SyntaxKind, &str)] = &[(SyntaxKind::PLUS, "+="), (SyntaxKind::MINUS, "-="), (SyntaxKind::STAR, "*="), (SyntaxKind::SLASH, "/="), (SyntaxKind::PERCENT, "%=")];
+
+/// Types whose `+=` is `x = x + y` (others may have a `plusAssign`, or both).
+const PLAIN_ARITHMETIC: &[&str] = &["kotlin.Int", "kotlin.Long", "kotlin.Short", "kotlin.Byte", "kotlin.Double", "kotlin.Float", "kotlin.Char", "kotlin.String", "kotlin.UInt", "kotlin.ULong"];
+
+/// A name or a chain of names (`x`, `this.x`, `a.b.c`): evaluating it twice has no effect.
+fn plain_target(n: &SyntaxNode) -> bool {
+    match n.kind() {
+        SyntaxKind::NAME_REF => true,
+        SyntaxKind::THIS_EXPR => n.text() == "this",
+        SyntaxKind::DOT_QUALIFIED_EXPR => n.children().count() == 2 && n.children().all(|c| plain_target(&c)),
+        _ => false,
+    }
+}
+
+/// `x = x + y` → `x += y`.
+fn operator_assignment(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if assignment_op(n).is_none_or(|t| t.kind() != SyntaxKind::EQ) || !cx.on(&OPERATOR_ASSIGNMENT) || has_comments(n) {
+        return;
+    }
+    let (Some(target), Some(value)) = (n.first_child(), n.last_child()) else { return };
+    if !plain_target(&target) || value.kind() != SyntaxKind::BINARY_EXPR {
+        return;
+    }
+    let Some(op) = binary_op(&value).and_then(|o| OPERATOR_ASSIGNMENTS.iter().find(|(k, _)| *k == o.kind())).map(|(_, a)| *a) else { return };
+    let Some((l, r)) = binary_operands(&value) else { return };
+    let squash = |n: &SyntaxNode| n.text().to_string().chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    if squash(&l) != squash(&target) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let plain = e.type_of(&target).is_some_and(|t| matches!(&t, TypeRef::Named { nullable: false, fq: Some(fq), .. } if PLAIN_ARITHMETIC.contains(&&**fq)));
+    if plain {
+        let fix = Fix::replace("Replace with operator-assignment", n.text_range(), format!("{} {op} {}", target.text(), r.text()));
+        out.report(&OPERATOR_ASSIGNMENT, n.text_range(), format!("Replaceable with '{op}'"), Some(fix));
+    }
+}
+
+/// The value of statement `n` is not used: it is not the last statement of a block whose
+/// value counts (lambdas, `if`/`when` branches, `try`).
+fn value_unused(n: &SyntaxNode) -> bool {
+    let Some(block) = n.parent().filter(|p| p.kind() == SyntaxKind::BLOCK) else { return false };
+    block.last_child().as_ref() != Some(n)
+        || block.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::FUN | SyntaxKind::CLASS_INITIALIZER | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::BODY))
+}
+
+/// Plain positional value arguments of a call (no lambdas, names, spreads or type arguments).
+fn plain_arguments(call: &SyntaxNode) -> Option<Vec<SyntaxNode>> {
+    if call.children().any(|c| matches!(c.kind(), SyntaxKind::LAMBDA_ARGUMENT | SyntaxKind::TYPE_ARGUMENT_LIST)) {
+        return None;
+    }
+    let list = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST)?;
+    list.children()
+        .filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT)
+        .map(|a| (!a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME) && ast::token(&a, SyntaxKind::STAR).is_none()).then(|| a.first_child()).flatten())
+        .collect()
+}
+
+/// `map.put(k, v)` as a statement → `map[k] = v`.
+fn put_assignment(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let mut parts = n.children();
+    let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    if call.kind() != SyntaxKind::CALL_EXPR || recv.kind() == SyntaxKind::SUPER_EXPR || !cx.on(&PUT_ASSIGNMENT) || has_comments(n) || !value_unused(n) {
+        return;
+    }
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && c.text() == "put") else { return };
+    let Some(args) = plain_arguments(&call).filter(|a| a.len() == 2) else { return };
+    let Some(e) = cx.engine() else { return };
+    let mutable_map = e.type_of(&recv).is_some_and(|t| e.supertype_closure(&t).iter().any(|s| fq_of(s) == Some("kotlin.collections.MutableMap")));
+    let member = e.resolve_name_ref(&callee).iter().all(|d| matches!(d, Def::Symbol { sym, .. } if sym.kind == SymbolKind::Function && sym.receiver.is_none() && sym.params.len() == 2));
+    if mutable_map && member {
+        let fix = Fix::replace("Convert put to assignment", n.text_range(), format!("{}[{}] = {}", recv.text(), args[0].text(), args[1].text()));
+        out.report(&PUT_ASSIGNMENT, callee.text_range(), "'put' call can be converted to indexing assignment", Some(fix));
+    }
+}
+
+/// `(first call, second call or property, replacement)`; `size` is the property.
+const CALL_CHAINS: &[(&str, &str, &str)] = &[
+    ("filter", "first", "first"),
+    ("filter", "firstOrNull", "firstOrNull"),
+    ("filter", "last", "last"),
+    ("filter", "lastOrNull", "lastOrNull"),
+    ("filter", "single", "single"),
+    ("filter", "singleOrNull", "singleOrNull"),
+    ("filter", "count", "count"),
+    ("filter", "size", "count"),
+    ("filter", "any", "any"),
+    ("filter", "none", "none"),
+    ("filter", "isEmpty", "none"),
+    ("filter", "isNotEmpty", "any"),
+    ("map", "filterNotNull", "mapNotNull"),
+    ("map", "joinToString", "joinToString"),
+    ("sortedBy", "first", "minBy"),
+    ("sortedBy", "firstOrNull", "minByOrNull"),
+    ("sortedByDescending", "first", "maxBy"),
+    ("sortedByDescending", "firstOrNull", "maxByOrNull"),
+];
+
+/// Receivers of the standard library's collection operations.
+const CHAIN_RECEIVERS: &[&str] = &["kotlin.collections.Iterable", "kotlin.Array", "kotlin.sequences.Sequence"];
+
+/// `xs.filter { … }.first()` → `xs.first { … }`, and the like.
+fn call_chain(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let mut parts = n.children();
+    let (Some(inner), Some(second), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    if inner.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || !cx.on(&SIMPLIFIABLE_CALL_CHAIN) || has_comments(n) {
+        return;
+    }
+    let mut inner_parts = inner.children();
+    let (Some(recv), Some(first), None) = (inner_parts.next(), inner_parts.next(), inner_parts.next()) else { return };
+    if first.kind() != SyntaxKind::CALL_EXPR || recv.kind() == SyntaxKind::SUPER_EXPR {
+        return;
+    }
+    // The second link: a call without arguments, or `size`.
+    let (second_name, second_callee) = match second.kind() {
+        SyntaxKind::NAME_REF => (second.text().to_string(), second.clone()),
+        SyntaxKind::CALL_EXPR if plain_arguments(&second).is_some_and(|a| a.is_empty()) => match second.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) {
+            Some(c) => (c.text().to_string(), c),
+            None => return,
+        },
+        _ => return,
+    };
+    if second.kind() == SyntaxKind::NAME_REF && second_name != "size" || second.kind() == SyntaxKind::CALL_EXPR && second_name == "size" {
+        return;
+    }
+    // The first link: a call with only a trailing lambda (no labels naming the call).
+    let Some(first_callee) = first.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let first_name = first_callee.text().to_string();
+    let Some(&(_, _, merged)) = CALL_CHAINS.iter().find(|(a, b, _)| *a == first_name && *b == second_name) else { return };
+    if matches!(merged, "minBy" | "maxBy") && cx.language_version().is_some_and(|v| v < 107) {
+        return;
+    }
+    let lambdas: Vec<SyntaxNode> = first.children().filter(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT).collect();
+    let empty_parens = first.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_none_or(|l| !l.children().any(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT));
+    let [la] = lambdas.as_slice() else { return };
+    let Some(lambda) = la.first_child().filter(|l| l.kind() == SyntaxKind::LAMBDA_EXPR) else { return };
+    if !empty_parens || first.children().any(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) || lambda.text().to_string().contains(&format!("@{first_name}")) {
+        return;
+    }
+    // Both links are the standard library's, on an iterable, array or sequence.
+    let Some(e) = cx.engine() else { return };
+    let defs = e.resolve_name_ref(&first_callee);
+    let stdlib_op = !defs.is_empty()
+        && defs.iter().all(|d| match d {
+            Def::Symbol { sym, .. } => {
+                (sym.fq_name.starts_with("kotlin.collections.") || sym.fq_name.starts_with("kotlin.sequences."))
+                    && sym.receiver.as_ref().is_some_and(|r| fq_of(&e.resolve_declared(sym, r)).is_some_and(|f| CHAIN_RECEIVERS.contains(&f)))
+            }
+            _ => false,
+        });
+    let second_defs = e.resolve_name_ref(&second_callee);
+    let stdlib_second = !second_defs.is_empty() && second_defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if sym.fq_name.starts_with("kotlin.")));
+    if !stdlib_op || !stdlib_second {
+        return;
+    }
+    // `joinToString`'s transform is not inline: no suspend calls or non-local returns.
+    if merged == "joinToString" {
+        let returns = lambda.descendants().any(|d| d.kind() == SyntaxKind::RETURN_EXPR && !d.children().any(|c| c.kind() == SyntaxKind::LABEL_QUALIFIER));
+        let suspends = lambda.descendants().filter(|d| d.kind() == SyntaxKind::CALL_EXPR).filter_map(|c| c.first_child().filter(|n| n.kind() == SyntaxKind::NAME_REF)).any(|callee| {
+            let defs = e.resolve_name_ref(&callee);
+            defs.is_empty() || defs.iter().any(|d| matches!(d, Def::Symbol { sym, .. } if sym.modifiers.has(Modifiers::SUSPEND)))
+        });
+        if returns || suspends {
+            return;
+        }
+    }
+    let text = cx.text;
+    let head = &text[usize::from(inner.text_range().start())..usize::from(first.text_range().start())];
+    let fix = Fix::replace(format!("Merge call chain to '{merged}'"), n.text_range(), format!("{head}{merged} {}", lambda.text()));
+    out.report(&SIMPLIFIABLE_CALL_CHAIN, TextRange::new(first.text_range().start(), n.text_range().end()), format!("Call chain on collection type can be simplified to '{merged}'"), Some(fix));
 }

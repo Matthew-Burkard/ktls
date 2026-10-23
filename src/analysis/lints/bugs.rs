@@ -24,6 +24,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 array_in_data_class(&n, out);
             }
             SyntaxKind::CALL_EXPR => throwable_not_thrown(cx, &n, out),
+            SyntaxKind::PROPERTY_ACCESSOR => recursive_accessor(cx, &n, out),
+            SyntaxKind::NAME_REF if n.text() == "it" => nested_it(cx, &n, out),
             _ => {}
         }
     }
@@ -164,5 +166,104 @@ fn throwable_not_thrown(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
             format!("'{name}' is created but not thrown"),
             Some(Fix::replace("Add 'throw'", TextRange::empty(stmt.text_range().start()), "throw ")),
         );
+    }
+}
+
+/// Code in `inner` that runs as part of `outer` (not in a nested function, class or lambda).
+fn runs_directly(inner: &SyntaxNode, outer: &SyntaxNode) -> bool {
+    inner.ancestors().take_while(|a| a != outer).all(|a| {
+        !matches!(a.kind(), SyntaxKind::LAMBDA_EXPR | SyntaxKind::FUN | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::CLASS | SyntaxKind::OBJECT_LITERAL | SyntaxKind::OBJECT_DECLARATION)
+    })
+}
+
+/// `val x get() = x`, `var x set(v) { x = v }`: the accessor calls itself.
+fn recursive_accessor(cx: &Cx, acc: &SyntaxNode, out: &mut Sink) {
+    let Some(prop) = acc.parent().filter(|p| p.kind() == SyntaxKind::PROPERTY) else { return };
+    let (Some(name), Some(kw)) = (name_token(&prop), acc.first_token()) else { return };
+    if !cx.on(&RECURSIVE_ACCESSOR) {
+        return;
+    }
+    let name = ast::ident_text(&name);
+    let getter = match kw.text() {
+        "get" => true,
+        "set" => false,
+        _ => return,
+    };
+    let decl = ast::PropertyDecl::cast(prop.clone()).unwrap();
+    // `field` needs a backing field: an initializer, and no receiver or interface.
+    let field_ok = decl.receiver().is_none() && initializer(&prop).is_some() && !owner(&prop).is_some_and(|o| is_interface(&o));
+    for nr in acc.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == name.as_str()) {
+        if !runs_directly(&nr, acc) {
+            continue;
+        }
+        // The property itself: `x` or `this.x` (not a call, a reference or another receiver's).
+        let parent = nr.parent();
+        let expr = match &parent {
+            Some(p) if matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(&nr) => {
+                if p.kind() == SyntaxKind::SAFE_QUALIFIED_EXPR || !p.first_child().is_some_and(|r| r.kind() == SyntaxKind::THIS_EXPR && r.text() == "this") {
+                    continue;
+                }
+                p.clone()
+            }
+            Some(p) if matches!(p.kind(), SyntaxKind::CALL_EXPR | SyntaxKind::CALLABLE_REFERENCE | SyntaxKind::VALUE_ARGUMENT_NAME) => continue,
+            _ => nr.clone(),
+        };
+        let assigned = expr.parent().is_some_and(|p| assignment_op(&p).is_some() && p.first_child().as_ref() == Some(&expr));
+        if getter == assigned {
+            continue;
+        }
+        if let Some(e) = cx.engine() {
+            if !e.resolve_name_ref(&nr).iter().any(|d| matches!(d, Def::Symbol { sym, .. } if sym.kind == SymbolKind::Property)) {
+                continue;
+            }
+        } else if acc.descendants().any(|d| d.kind() == SyntaxKind::VALUE_PARAMETER && name_token(&d).is_some_and(|t| ast::ident_text(&t) == name)) {
+            continue;
+        }
+        let fix = field_ok.then(|| Fix::replace("Replace with 'field'", expr.text_range(), "field"));
+        let message = if getter { "Recursive property accessor: the getter reads its own property" } else { "Recursive property accessor: the setter assigns its own property" };
+        out.report(&RECURSIVE_ACCESSOR, expr.text_range(), message, fix);
+    }
+}
+
+/// The lambda whose implicit `it` a reference `it` means, and whether that lambda takes
+/// exactly one parameter.
+fn it_lambda(e: &crate::analysis::ide::infer::Engine, it: &SyntaxNode) -> Option<SyntaxNode> {
+    let defs = e.resolve_name_ref(it);
+    let [Def::Local(l)] = defs.as_slice() else { return None };
+    if l.kind != LocalKind::It {
+        return None;
+    }
+    let lambda = it.ancestors().find(|a| a.kind() == SyntaxKind::LAMBDA_EXPR && a.first_token().is_some_and(|t| t.text_range() == l.name_range))?;
+    e.lambda_signature(&lambda).is_some_and(|(_, ps)| ps.len() == 1).then_some(lambda)
+}
+
+/// `it` of a lambda nested in another lambda whose `it` is used too.
+fn nested_it(cx: &Cx, it: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&NESTED_IT) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let Some(inner) = it_lambda(e, it) else { return };
+    // `it.let { … it … }`: the scope function on the outer `it` takes its place on purpose.
+    let call = inner.parent().filter(|p| p.kind() == SyntaxKind::LAMBDA_ARGUMENT).and_then(|a| a.parent()).filter(|c| c.kind() == SyntaxKind::CALL_EXPR);
+    if let Some(call) = call
+        && let Some(q) = call.parent().filter(|q| matches!(q.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && q.last_child().as_ref() == Some(&call))
+        && q.first_child().is_some_and(|r| r.text() == "it")
+        && let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF)
+        && e.resolve_name_ref(&callee).iter().any(|d| matches!(d, Def::Symbol { sym, .. } if matches!(sym.fq_name.as_str(), "kotlin.let" | "kotlin.also" | "kotlin.takeIf" | "kotlin.takeUnless")))
+    {
+        return;
+    }
+    // The enclosing lambda, in the same function.
+    let Some(outer) = inner.ancestors().skip(1).take_while(|a| !matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::CLASS | SyntaxKind::OBJECT_LITERAL)).find(|a| a.kind() == SyntaxKind::LAMBDA_EXPR) else { return };
+    if outer.children().any(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) || e.lambda_signature(&outer).is_none_or(|(_, ps)| ps.len() != 1) {
+        return;
+    }
+    let outer_used = outer
+        .descendants()
+        .filter(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == "it" && !inner.text_range().contains_range(d.text_range()))
+        .any(|d| it_lambda(e, &d).as_ref() == Some(&outer));
+    if outer_used {
+        out.report(&NESTED_IT, it.text_range(), "Implicit parameter 'it' of the enclosing lambda is shadowed", None);
     }
 }

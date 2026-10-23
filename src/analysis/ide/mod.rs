@@ -13,6 +13,7 @@ pub mod hierarchy;
 pub mod imports;
 pub mod infer;
 pub mod inlay;
+pub mod intentions;
 pub mod kdoc;
 pub mod library;
 pub mod rename;

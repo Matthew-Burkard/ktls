@@ -8,7 +8,7 @@
 mod bugs;
 mod compiler;
 
-pub(crate) use compiler::missing_branches;
+pub(crate) use compiler::{certain_type, missing_branches};
 mod naming;
 mod redundant;
 mod style;
@@ -232,6 +232,9 @@ rules! {
     REDUNDANT_UNIT = "RedundantUnitExpression", Redundancy, Warning, true, [], "'Unit' expression that has no effect";
     UNNECESSARY_VARIABLE = "UnnecessaryVariable", Redundancy, Info, false, [], "Variable that is only returned on the next line";
     REDUNDANT_STRING_TEMPLATE = "RemoveSingleExpressionStringTemplate", Redundancy, Info, false, [], "'\"$s\"' where 's' is already a String";
+    REDUNDANT_LAMBDA_ARROW = "RedundantLambdaArrow", Redundancy, Warning, true, [], "'->' in a lambda without parameters, or 'it ->'";
+    REDUNDANT_TYPE_ARGUMENTS = "RemoveExplicitTypeArguments", Redundancy, Warning, true, [], "Explicit type arguments that the arguments already determine";
+    USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
     MAY_BE_CONSTANT = "MayBeConstant", Style, Info, false, [], "'val' with a constant initializer that could be 'const'";
@@ -242,12 +245,17 @@ rules! {
     REPLACE_GET_OR_SET = "ReplaceGetOrSet", Style, Info, false, [], "Explicit 'get'/'set' operator call instead of indexing";
     REPLACE_CALL_WITH_OPERATOR = "ReplaceCallWithBinaryOperator", Style, Info, false, [], "Explicit 'plus'/'minus'/... operator call instead of the operator";
     EMPTY_CONTROL_FLOW = "ControlFlowWithEmptyBody", Style, Info, false, [], "'if', 'else', 'for' or 'while' with an empty body";
+    OPERATOR_ASSIGNMENT = "ReplaceWithOperatorAssignment", Style, Info, false, [], "'x = x + y' instead of 'x += y'";
+    PUT_ASSIGNMENT = "ReplacePutWithAssignment", Style, Info, false, [], "'map.put(k, v)' instead of 'map[k] = v'";
+    SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
     SELF_ASSIGNMENT = "SelfAssignment", Bugs, Warning, false, [], "Variable assigned to itself";
     EQUALS_OR_HASH_CODE = "EqualsOrHashCode", Bugs, Warning, false, [], "Class overrides only one of 'equals()' and 'hashCode()'";
     ARRAY_IN_DATA_CLASS = "ArrayInDataClass", Bugs, Warning, false, [], "Array property in a data class without custom 'equals()'/'hashCode()'";
     THROWABLE_NOT_THROWN = "ThrowableNotThrown", Bugs, Warning, false, [], "Exception created but neither thrown nor used";
+    RECURSIVE_ACCESSOR = "RecursivePropertyAccessor", Bugs, Warning, false, [], "Property accessor that reads (getter) or assigns (setter) its own property";
+    NESTED_IT = "NestedLambdaShadowedImplicitParameter", Bugs, Warning, false, [], "Implicit 'it' of a nested lambda shadowing the enclosing lambda's 'it'";
 
     CLASS_NAME = "ClassName", Naming, Info, false, [], "Class, object and type alias names are UpperCamelCase";
     FUNCTION_NAME = "FunctionName", Naming, Info, false, ["TestFunctionName"], "Function names are lowerCamelCase";

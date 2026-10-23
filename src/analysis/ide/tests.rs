@@ -1562,3 +1562,42 @@ fn overloads_resolved_by_argument_types() {
     assert!(h(&mut fx, "wrap(1)").contains("val r: Long"), "{}", h(&mut fx, "wrap(1)"));
     assert!(h(&mut fx, "wrap(u)").contains("val r: List<User>"), "{}", h(&mut fx, "wrap(u)"));
 }
+
+#[test]
+fn intention_assists() {
+    let Some(mut fx) = fixture() else { return };
+    let f = |body: &str| format!("{HEADER}fun run(u: User, xs: List<User>, ok: Boolean, n: Int) {{\n{body}\n}}\n");
+    let body = |out: String| out.trim_start_matches("fun run(u: User, xs: List<User>, ok: Boolean, n: Int) {\n").trim_end_matches("\n}\n").to_string();
+    // Invert `if`.
+    assert_eq!(body(fx.assist(&f("    i$0f (n > 1) println(1) else println(2)"), "Invert 'if'").unwrap()), "    if (n <= 1) println(2) else println(1)");
+    assert_eq!(body(fx.assist(&f("    i$0f (!ok) {\n        println(1)\n    } else println(2)"), "Invert 'if'").unwrap()), "    if (ok) println(2) else {\n        println(1)\n    }");
+    assert_eq!(body(fx.assist(&f("    i$0f (u is Any) println(1) else println(2)"), "Invert 'if'").unwrap()), "    if (u !is Any) println(2) else println(1)");
+    assert!(fx.assist(&f("    i$0f (ok) println(1)"), "Invert 'if'").is_none());
+    // Flip a comparison.
+    assert_eq!(body(fx.assist(&f("    println(n $0< u.age)"), "Flip '<'").unwrap()), "    println(u.age > n)");
+    // De Morgan.
+    assert_eq!(body(fx.assist(&f("    println(ok $0&& n > 1 && u.age == 2)"), "Replace '&&' with '||'").unwrap()), "    println(!(!ok || n <= 1 || u.age != 2))");
+    assert_eq!(body(fx.assist(&f("    if (!(ok $0|| n > 1)) println()"), "Replace '||' with '&&'").unwrap()), "    if (!ok && n <= 1) println()");
+    // Split / merge `if`.
+    assert_eq!(body(fx.assist(&f("    if (ok $0&& n > 1) println(n)"), "Split into 2").unwrap()), "    if (ok) {\n        if (n > 1) println(n)\n    }");
+    assert_eq!(body(fx.assist(&f("    i$0f (ok) {\n        if (n > 1 || n < 0) {\n            println(n)\n        }\n    }"), "Merge with nested").unwrap()), "    if (ok && (n > 1 || n < 0)) {\n        println(n)\n    }");
+    // `when` subject.
+    assert_eq!(
+        body(fx.assist(&f("    wh$0en {\n        n == 1 -> println(1)\n        n in 2..3 -> println(2)\n        else -> println(3)\n    }"), "Introduce 'n' as subject").unwrap()),
+        "    when (n) {\n        1 -> println(1)\n        in 2..3 -> println(2)\n        else -> println(3)\n    }"
+    );
+    assert!(fx.assist(&f("    wh$0en {\n        n == 1 -> println(1)\n        ok -> println(2)\n    }"), "Introduce").is_none());
+    assert_eq!(
+        body(fx.assist(&f("    wh$0en (n) {\n        1, 2 -> println(1)\n        !in 3..4 -> println(2)\n        else -> println(3)\n    }"), "Remove subject").unwrap()),
+        "    when {\n        n == 1 || n == 2 -> println(1)\n        n !in 3..4 -> println(2)\n        else -> println(3)\n    }"
+    );
+    // for ↔ forEach.
+    assert_eq!(body(fx.assist(&f("    f$0or (x in xs) {\n        println(x.name)\n    }"), "Replace with a 'forEach'").unwrap()), "    xs.forEach { x ->\n        println(x.name)\n    }");
+    assert_eq!(body(fx.assist(&f("    f$0or (i in 0 until n) println(i)"), "Replace with a 'forEach'").unwrap()), "    (0 until n).forEach { i ->\n        println(i)\n    }");
+    assert!(fx.assist(&f("    f$0or (x in xs) {\n        if (ok) break\n    }"), "Replace with a 'forEach'").is_none());
+    assert_eq!(
+        body(fx.assist(&f("    xs.for$0Each {\n        if (it.age > 1) return@forEach\n        println(it.name)\n    }"), "Replace with a 'for'").unwrap()),
+        "    for (item in xs) {\n        if (item.age > 1) continue\n        println(item.name)\n    }"
+    );
+    assert_eq!(body(fx.assist(&f("    xs.for$0Each { x -> println(x) }"), "Replace with a 'for'").unwrap()), "    for (x in xs) {\n        println(x)\n    }");
+}

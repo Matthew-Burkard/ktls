@@ -22,6 +22,7 @@ mod when;
 
 use super::{Cx, Sink};
 
+pub(crate) use certain::certain_type;
 pub(crate) use when::missing_branches;
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {

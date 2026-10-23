@@ -20,7 +20,7 @@ pub fn rewrites(e: &Engine, file: &FileData, tok: &SyntaxToken) -> Vec<Fix> {
 }
 
 /// Shift the lines after the first from `from` to `to` indentation.
-fn reindent(text: &str, from: &str, to: &str) -> String {
+pub(super) fn reindent(text: &str, from: &str, to: &str) -> String {
     let mut lines = text.split('\n');
     let mut out = lines.next().unwrap_or_default().to_string();
     for l in lines {
