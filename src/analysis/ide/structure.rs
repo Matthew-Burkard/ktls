@@ -156,3 +156,36 @@ fn inner_trimmed(text: &str, start: TextSize, end: TextSize) -> TextRange {
     }
     TextRange::new(start + TextSize::from(lead as u32), end - TextSize::from(trail as u32))
 }
+
+/// URLs in comments, KDoc and string literals: (range, URL).
+pub fn links(root: &SyntaxNode) -> Vec<(TextRange, String)> {
+    let mut out = Vec::new();
+    for t in root.descendants_with_tokens().filter_map(|e| e.into_token()) {
+        if !matches!(t.kind(), SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::KDOC | SyntaxKind::STRING_TEXT) {
+            continue;
+        }
+        let text = t.text();
+        let mut from = 0;
+        while let Some(i) = ["https://", "http://"].iter().filter_map(|p| text[from..].find(p)).min() {
+            let start = from + i;
+            let len = text[start..].find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '|' | '{' | '}')).unwrap_or(text.len() - start);
+            // Punctuation that ends a sentence, and brackets that are not part of the URL.
+            let mut url = &text[start..start + len];
+            loop {
+                let trimmed = url.trim_end_matches(['.', ',', ';', ':', '!', '?', '*']);
+                let trimmed = if trimmed.ends_with(')') && trimmed.matches('(').count() < trimmed.matches(')').count() { &trimmed[..trimmed.len() - 1] } else { trimmed };
+                let trimmed = if trimmed.ends_with(']') && trimmed.matches('[').count() < trimmed.matches(']').count() { &trimmed[..trimmed.len() - 1] } else { trimmed };
+                if trimmed.len() == url.len() {
+                    break;
+                }
+                url = trimmed;
+            }
+            if url.len() > "https://".len() {
+                let at = t.text_range().start() + TextSize::from(start as u32);
+                out.push((TextRange::at(at, TextSize::from(url.len() as u32)), url.to_string()));
+            }
+            from = start + len.max(1);
+        }
+    }
+    out
+}

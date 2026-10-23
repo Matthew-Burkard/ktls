@@ -1510,3 +1510,41 @@ fn hover_constant_values_and_smart_casts() {
     let cast = fx.hover(&format!("{HEADER}fun f(x: Any) {{\n    if (x is String) println(x$0.length)\n}}\n"));
     assert!(cast.contains("Smart cast to `String`"), "{cast}");
 }
+
+#[test]
+fn completes_live_templates() {
+    let Some(mut fx) = fixture() else { return };
+    let c = fx.complete(&format!("{HEADER}fun run(xs: List<Int>) {{\n    ite$0\n}}\n"));
+    let iter = c.items.iter().find(|i| i.label == "iter").expect("iter");
+    assert!(iter.snippet);
+    assert_eq!(iter.insert.as_deref(), Some("for (${1:item} in ${2:items}) {\n    $0\n}"));
+    has_all(&fx.labels(&format!("{HEADER}fun run() {{\n    sou$0\n}}\n")), &["sout", "soutv"]);
+    has_all(&fx.labels(&format!("{HEADER}mai$0\n")), &["main"]);
+    has_all(&fx.labels(&format!("{HEADER}class A {{\n    fun$0\n}}\n")), &["fun0", "fun1", "fun2"]);
+    // Statement templates only in statements; `main` only at the top level.
+    assert!(!fx.labels(&format!("{HEADER}fun run() = ite$0\n")).iter().any(|l| l == "iter"));
+    assert!(!fx.labels(&format!("{HEADER}class A {{\n    mai$0\n}}\n")).iter().any(|l| l == "main"));
+}
+
+
+#[test]
+fn signature_help_binds_type_parameters() {
+    let Some(mut fx) = fixture() else { return };
+    let first = |fx: &mut Fx, body: &str| fx.signatures(&format!("{HEADER}{body}\n")).0.into_iter().find(|l| l.starts_with('*')).unwrap_or_default();
+    assert_eq!(first(&mut fx, "fun f(u: User) = listOf(u, $0)"), "*listOf(vararg elements: User): List<User>");
+    assert_eq!(first(&mut fx, "fun f() = mutableMapOf(\"a\" to 1, $0)"), "*mutableMapOf(vararg pairs: Pair<String, Int>): MutableMap<String, Int>");
+    // The non-generic overload is the one Kotlin picks.
+    assert_eq!(first(&mut fx, "fun f(u: User) = maxOf(u.age, $0)"), "*maxOf(a: Int, b: Int): Int");
+    // Receivers still bind theirs.
+    assert_eq!(first(&mut fx, "fun f(us: List<User>) = us.map($0)"), "*map(transform: (User) -> R): List<R>");
+}
+
+#[test]
+fn document_links() {
+    let text = "// See https://kotlinlang.org/docs/home.html.\n/** Docs: (https://example.com/a_(b)) and <https://x.dev/y> */\nval u = \"https://api.example.com/v1?q=1\"\nval notUrl = \"http://\"\n";
+    let links: Vec<String> = super::structure::links(&crate::syntax::parse(text, false).syntax()).into_iter().map(|(r, url)| {
+        assert_eq!(&text[usize::from(r.start())..usize::from(r.end())], url);
+        url
+    }).collect();
+    assert_eq!(links, ["https://kotlinlang.org/docs/home.html", "https://example.com/a_(b)", "https://x.dev/y", "https://api.example.com/v1?q=1"]);
+}

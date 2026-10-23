@@ -658,6 +658,25 @@ impl Collector<'_, '_> {
         }
     }
 
+    /// IntelliJ's Kotlin live templates (`main`, `fun0`, `sout`, `iter`, …) as snippets,
+    /// once something is typed.
+    fn live_templates(&mut self, templates: &[(&str, &str, &str)]) {
+        if self.prefix.is_empty() || !self.opts.snippets {
+            return;
+        }
+        for (abbrev, body, description) in templates {
+            if !matches(&self.prefix, abbrev) {
+                continue;
+            }
+            let mut item = Self::item(abbrev, ItemKind::Snippet, 6);
+            item.description = Some(description.to_string());
+            item.detail = Some(format!("template: {description}"));
+            item.insert = Some(body.to_string());
+            item.snippet = true;
+            self.items.push(item);
+        }
+    }
+
     /// Subpackages, classes and top-level callables of `pkg`.
     fn package_contents(&mut self, pkg: &str, rank: u8, call: bool, extensions: bool) {
         for sub in self.e.res.subpackages(pkg) {
@@ -751,6 +770,9 @@ impl Collector<'_, '_> {
                 self.keywords(&["val", "var", "fun", "if", "when", "for", "while", "do", "return", "try", "throw", "break", "continue", "object", "class", "this", "super", "null", "true", "false"]);
             } else {
                 self.keywords(&["if", "when", "try", "object", "this", "super", "null", "true", "false", "throw", "return"]);
+            }
+            if statement {
+                self.live_templates(STATEMENT_TEMPLATES);
             }
             // Labeled jumps and receivers: `return@forEach`, `break@outer`, `this@Outer`.
             for (keyword, label) in labels(at) {
@@ -919,6 +941,7 @@ impl Collector<'_, '_> {
             self.overrides(at, after_override);
             return;
         }
+        self.live_templates(if in_class { MEMBER_TEMPLATES } else { TOP_LEVEL_TEMPLATES });
         if in_class {
             self.overrides(at, None);
             self.keywords(&[
@@ -1110,6 +1133,39 @@ fn label_completion(file: &FileData, offset: TextSize) -> Option<Completion> {
         .collect();
     (!items.is_empty()).then(|| Completion { range: TextRange::new(TextSize::from((o - partial_len) as u32), offset), items, incomplete: false })
 }
+
+/// Live templates: (abbreviation, snippet, description).
+const STATEMENT_TEMPLATES: &[(&str, &str, &str)] = &[
+    ("sout", "println($0)", "println()"),
+    ("soutv", "println(\"${1:value} = \\$${1:value}\")$0", "println(\"value = $value\")"),
+    ("serr", "System.err.println($0)", "System.err.println()"),
+    ("iter", "for (${1:item} in ${2:items}) {\n    $0\n}", "for (item in items)"),
+    ("ifn", "if (${1:value} == null) {\n    $0\n}", "if (value == null)"),
+    ("inn", "if (${1:value} != null) {\n    $0\n}", "if (value != null)"),
+    ("closure", "{ ${1:x} -> $0 }", "{ x -> }"),
+];
+
+const FUNCTION_TEMPLATES: [(&str, &str, &str); 5] = [
+    ("fun0", "fun ${1:name}() {\n    $0\n}", "fun name()"),
+    ("fun1", "fun ${1:name}(${2:p}: ${3:Any}) {\n    $0\n}", "fun name(p)"),
+    ("fun2", "fun ${1:name}(${2:p1}: ${3:Any}, ${4:p2}: ${5:Any}) {\n    $0\n}", "fun name(p1, p2)"),
+    ("exfun", "fun ${1:Type}.${2:name}(${3}): ${4:Unit} {\n    $0\n}", "fun Type.name()"),
+    ("exval", "val ${1:Type}.${2:name}: ${3:Any}\n    get() = $0", "val Type.name"),
+];
+
+const TOP_LEVEL_TEMPLATES: &[(&str, &str, &str)] = &[
+    ("main", "fun main() {\n    $0\n}", "fun main()"),
+    ("maina", "fun main(args: Array<String>) {\n    $0\n}", "fun main(args)"),
+    FUNCTION_TEMPLATES[0],
+    FUNCTION_TEMPLATES[1],
+    FUNCTION_TEMPLATES[2],
+    FUNCTION_TEMPLATES[3],
+    FUNCTION_TEMPLATES[4],
+    ("interface", "interface ${1:Name} {\n    $0\n}", "interface Name"),
+    ("object", "object ${1:Name} {\n    $0\n}", "object Name"),
+];
+
+const MEMBER_TEMPLATES: &[(&str, &str, &str)] = &FUNCTION_TEMPLATES;
 
 fn package_of(fq: &str) -> String {
     let parts: Vec<&str> = fq.split('.').collect();

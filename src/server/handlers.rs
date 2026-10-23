@@ -745,6 +745,21 @@ pub fn semantic_tokens(cx: &Ctx, path: &Path, range: Option<lsp_types::Range>) -
     Ok(out)
 }
 
+/// URLs in comments and strings.
+pub fn document_links(cx: &Ctx, path: &Path) -> Result<Vec<lsp_types::DocumentLink>> {
+    let Some(file) = cx.snap.file(path) else { return Ok(Vec::new()) };
+    let text = &file.text;
+    let index = LineIndex::new(text);
+    let links = crate::analysis::ide::structure::links(&file.parse().syntax());
+    cx.check()?;
+    Ok(links
+        .into_iter()
+        .filter_map(|(r, url)| {
+            Some(lsp_types::DocumentLink { range: index.range(text, r, cx.enc), target: Some(url.parse().ok()?), tooltip: None, data: None })
+        })
+        .collect())
+}
+
 pub fn folding_ranges(cx: &Ctx, path: &Path, line_only: bool) -> Result<Vec<lsp_types::FoldingRange>> {
     use crate::analysis::ide::structure::{self, FoldKind};
     use lsp_types::FoldingRangeKind;

@@ -100,6 +100,7 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
         implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(true)),
         call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
         folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
+        document_link_provider: Some(lsp_types::DocumentLinkOptions { resolve_provider: Some(false), work_done_progress_options: Default::default() }),
         selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(true)),
         references_provider: Some(lsp_types::OneOf::Left(true)),
         document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
@@ -353,6 +354,14 @@ impl Server {
                         _ => handlers::type_definition(cx, &path, tdp.position)?,
                     };
                     Ok(serde_json::to_value(lsp_types::GotoDefinitionResponse::Array(locs)).unwrap())
+                });
+            }
+            DocumentLinkRequest::METHOD => {
+                let Ok((id, params)) = req.extract::<lsp_types::DocumentLinkParams>(DocumentLinkRequest::METHOD) else { return };
+                let path = self.path_of(&params.text_document.uri);
+                self.spawn(id, move |cx| {
+                    let path = path.ok_or(Cancelled)?;
+                    Ok(serde_json::to_value(handlers::document_links(cx, &path)?).unwrap())
                 });
             }
             FoldingRangeRequest::METHOD => {

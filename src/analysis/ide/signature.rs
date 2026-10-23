@@ -244,11 +244,27 @@ pub fn signature_help(snap: &Snapshot, path: &Path, offset: TextSize) -> Option<
     if cands.is_empty() {
         return None;
     }
-    // Overloads that fit the arguments first, then by parameter count.
-    cands.sort_by_cached_key(|(s, subst)| (!fits(&e, s, subst, &list, offset), s.params.len()));
+    // Type parameters bound by the arguments typed so far (`listOf(user, ` → `T` = `User`).
+    for (sym, subst) in cands.iter_mut() {
+        let mut vars: std::collections::HashSet<String> = sym.type_params.iter().map(|t| t.name.clone()).collect();
+        if sym.kind == SymbolKind::Constructor
+            && let Some(c) = e.classifier(sym.fq_name.trim_end_matches(".<init>"))
+        {
+            vars.extend(c.symbol().type_params.iter().map(|t| t.name.clone()));
+        }
+        if sym.receiver.is_none() && sym.kind == SymbolKind::Function {
+            subst.retain(|k, _| !vars.contains(k));
+        }
+        vars.retain(|v| !subst.contains_key(v));
+        e.bind_from_arguments(sym, &vars, &list, subst);
+    }
+    // Overloads that fit the arguments first, the least generic of them first (Kotlin picks
+    // `maxOf(Int, Int)` over `maxOf(T, T)`), then by parameter count.
+    cands.sort_by_cached_key(|(s, subst)| (!fits(&e, s, subst, &list, offset), s.type_params.len(), s.params.len()));
     let active = picked
         .as_ref()
         .and_then(|p| cands.iter().position(|(s, subst)| s.fq_name == p.fq_name && s.signature() == p.signature() && fits(&e, s, subst, &list, offset)))
+        .filter(|&i| cands[i].0.type_params.len() <= cands[0].0.type_params.len())
         .unwrap_or(0);
     let mut signatures: Vec<Signature> = Vec::new();
     let mut active_out = 0;

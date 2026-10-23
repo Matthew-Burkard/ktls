@@ -1387,6 +1387,29 @@ impl<'s> Engine<'s> {
     }
 
     /// Resolve the function invoked by a CALL_EXPR, binding type parameters from arguments.
+    /// Bind the type parameters `vars` of `sym` from the types of the (non-lambda) arguments
+    /// in `list`.
+    pub fn bind_from_arguments(&self, sym: &Symbol, vars: &HashSet<String>, list: &SyntaxNode, s: &mut Subst) {
+        let args: Vec<SyntaxNode> = list.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect();
+        for (i, a) in args.iter().enumerate() {
+            let named = a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| token_at(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t));
+            let Some(p) = (match named {
+                Some(n) => sym.params.iter().find(|p| p.name == n),
+                None => sym.params.get(i).or_else(|| sym.params.last().filter(|p| p.vararg)),
+            }) else {
+                continue;
+            };
+            let Some(expr) = a.children().last() else { continue };
+            if expr.kind() == SyntaxKind::LAMBDA_EXPR {
+                continue;
+            }
+            if let Some(at) = self.type_of(&expr) {
+                let pt = self.resolve_declared(sym, &p.ty);
+                unify(&pt, &at, vars, s, self);
+            }
+        }
+    }
+
     pub fn resolve_call_target(&self, call: &SyntaxNode, infer_lambdas: bool) -> Option<(Symbol, Subst)> {
         let key = (call.text_range(), infer_lambdas);
         if let Some(hit) = self.call_targets.borrow().get(&key) {
@@ -1435,23 +1458,8 @@ impl<'s> Engine<'s> {
             }
         }
         // Value arguments (positional / named), then trailing lambdas.
-        let args: Vec<SyntaxNode> = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).map(|l| l.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect()).unwrap_or_default();
-        for (i, a) in args.iter().enumerate() {
-            let named = a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| token_at(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t));
-            let Some(p) = (match named {
-                Some(n) => sym.params.iter().find(|p| p.name == n),
-                None => sym.params.get(i).or_else(|| sym.params.last().filter(|p| p.vararg)),
-            }) else {
-                continue;
-            };
-            let Some(expr) = a.children().last() else { continue };
-            if expr.kind() == SyntaxKind::LAMBDA_EXPR {
-                continue;
-            }
-            if let Some(at) = self.type_of(&expr) {
-                let pt = self.resolve_declared(&sym, &p.ty);
-                unify(&pt, &at, &vars, &mut s, self);
-            }
+        if let Some(list) = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) {
+            self.bind_from_arguments(&sym, &vars, &list, &mut s);
         }
         if infer_lambdas {
             for la in call.children().filter(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) {

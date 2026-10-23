@@ -81,7 +81,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [ ] [P2] `workspaceSymbol/resolve`
 - [x] [P1] Call hierarchy: `prepareCallHierarchy`, `incomingCalls`, `outgoingCalls` (functions and constructors; callers are functions, constructors, properties or classes)
 - [x] [P1] Type hierarchy: `prepareTypeHierarchy`, `supertypes`, `subtypes` (subtypes among project sources)
-- [ ] [P1] `textDocument/documentLink` — URLs in comments, `@see`, file paths in strings
+- [~] [P1] `textDocument/documentLink` — URLs in comments, `@see`, file paths in strings — *partial: URLs in comments, KDoc and strings*
 - [ ] [P2] Go to test / go to tested subject (custom command)
 - [ ] [P2] Go to super method (custom command or via `declaration`)
 - [ ] [P2] Decompile/show Kotlin bytecode & Java equivalent (custom command)
@@ -101,7 +101,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 
 ### 3.2 Signature help
 - [~] [P0] `textDocument/signatureHelp` — active parameter, overloads, named arguments, trailing lambda awareness, vararg — *partial: calls, constructors, supertype/annotation/`this(…)` calls and function-typed values; overloads ranked by the arguments typed so far; KDoc summary and `@param` docs; not inside trailing lambdas*
-- [ ] [P1] Generic type parameters shown in instantiated form
+- [x] [P1] Generic type parameters shown in instantiated form (bound by the receiver and the arguments typed so far; the least generic fitting overload is active)
 
 ### 3.3 Inlay hints (`textDocument/inlayHint`, `inlayHint/resolve`)
 - [x] [P1] Local variable / property inferred types (also loop variables and destructuring; hidden for literals, constructor calls and casts)
@@ -141,7 +141,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P1] Override/implement member completion (generates full signature + body)
 - [x] [P1] `when` exhaustive branch completion (sealed/enum; also `Boolean` and `null`): each missing condition, or all at once
 - [~] [P1] Snippets / postfix templates: `.if`, `.not`, `.for`, `.val`, `.var`, `.return`, `.let`, `.notnull`, `.null`, `.try`, `.par`, `.sout`, `.when`, `.arg`, `.spread` — *partial: `.val`, `.var`, `.return`, `.if`, `.while`, `.not`, `.notnull`, `.null`, `.for`, `.when`, `.par`, `.arg`, `.println`, `.try` (by type and statement position; names from the type); not `.let`, `.spread`*
-- [ ] [P1] Live templates: `main`, `fun0/1/2`, `sout`, `iter`, `ifn`, `inn`, `void`, `closure`, `object`, `interface`, `exfun`, `exval`
+- [~] [P1] Live templates: `main`, `fun0/1/2`, `sout`, `iter`, `ifn`, `inn`, `void`, `closure`, `object`, `interface`, `exfun`, `exval` — *partial: all but `void`, plus `maina`, `soutv`, `serr` (as snippet completions in statements, at top level or in classes)*
 - [x] [P1] Lambda parameter completion (`{ a, b -> }` from expected function type; `(key, value) ->` for map entries and pairs)
 - [x] [P1] Completion in string templates (`$` / `${`)
 - [~] [P1] Completion in KDoc (`[Symbol]`, tags) — *partial: `[links]` (parameters, names in scope, members after `Type.`) and `@param`/`@throws`/`@see` subjects; not tag names*
