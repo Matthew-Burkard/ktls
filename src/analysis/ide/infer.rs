@@ -1129,6 +1129,33 @@ impl<'s> Engine<'s> {
         }
     }
 
+    /// The function a lambda (or anonymous function) is an argument of, and the index of
+    /// the parameter it is passed to.
+    pub fn lambda_parameter(&self, lambda: &SyntaxNode) -> Option<(Symbol, usize)> {
+        let mut parent = lambda.parent()?;
+        if parent.kind() == SyntaxKind::LABELED_EXPR {
+            parent = parent.parent()?;
+        }
+        match parent.kind() {
+            SyntaxKind::LAMBDA_ARGUMENT => {
+                let (sym, _) = self.resolve_call_target(&parent.parent()?, false)?;
+                let last = sym.params.len().checked_sub(1)?;
+                Some((sym, last))
+            }
+            SyntaxKind::VALUE_ARGUMENT => {
+                let list = parent.parent()?;
+                let (sym, _) = self.resolve_call_target(&list.parent()?, false)?;
+                let named = parent.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| token_at(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t));
+                let index = match named {
+                    Some(n) => sym.params.iter().position(|p| p.name == n)?,
+                    None => list.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT).position(|a| a == parent).filter(|i| *i < sym.params.len())?,
+                };
+                Some((sym, index))
+            }
+            _ => None,
+        }
+    }
+
     // ------------------------------------------------------ resolution
 
     /// Implicit receivers at `at`: lambda receivers and enclosing classes, innermost first.

@@ -214,6 +214,14 @@ rules! {
     SUPERTYPE_APPEARS_TWICE = "SUPERTYPE_APPEARS_TWICE", Compiler, Error, false, [], "The same supertype listed twice";
     ABSTRACT_MEMBER_NOT_IMPLEMENTED_BY_ENUM_ENTRY = "ABSTRACT_MEMBER_NOT_IMPLEMENTED_BY_ENUM_ENTRY", Compiler, Error, false, [], "Enum entry that does not implement the enum's abstract members";
     UNSAFE_IMPLICIT_INVOKE_CALL = "UNSAFE_IMPLICIT_INVOKE_CALL", Compiler, Error, false, [], "Call of a nullable function-typed local or parameter";
+    CONFLICTING_JVM_DECLARATIONS = "CONFLICTING_JVM_DECLARATIONS", Compiler, Error, false, [], "Declarations of one class or file that compile to the same JVM method";
+    NON_LOCAL_RETURN_NOT_ALLOWED = "NON_LOCAL_RETURN_NOT_ALLOWED", Compiler, Error, false, [], "'return' in a 'crossinline' lambda, or an inline parameter called where it is not inlined";
+    USAGE_IS_NOT_INLINABLE = "USAGE_IS_NOT_INLINABLE", Compiler, Error, false, [], "Inline parameter used as a value";
+    NON_PUBLIC_CALL_FROM_PUBLIC_INLINE = "NON_PUBLIC_CALL_FROM_PUBLIC_INLINE", Compiler, Error, false, [], "Public inline function using a private or internal declaration";
+    NON_LOCAL_SUSPENSION_POINT = "NON_LOCAL_SUSPENSION_POINT", Compiler, Error, false, [], "Suspend call in a lambda passed to a 'crossinline' parameter";
+    UNRESOLVED_LABEL = "UNRESOLVED_LABEL", Compiler, Error, false, [], "Label that names nothing around it";
+    NOT_A_LOOP_LABEL = "NOT_A_LOOP_LABEL", Compiler, Error, false, [], "'break' or 'continue' with a label that is not on a loop";
+    TYPE_VARIANCE_CONFLICT = "TYPE_VARIANCE_CONFLICT", Compiler, Error, false, [], "'out' type parameter in an 'in' position (or the reverse) of a member";
     ARGUMENT_TYPE_MISMATCH = "ARGUMENT_TYPE_MISMATCH", Compiler, Error, false, [], "Argument of the wrong type (literal, typed local/parameter, constructor call) for a function without overloads";
     NULL_FOR_NONNULL_TYPE = "NULL_FOR_NONNULL_TYPE", Compiler, Error, false, [], "'null' for a non-null type";
     TOO_MANY_ARGUMENTS = "TOO_MANY_ARGUMENTS", Compiler, Error, false, [], "More arguments than parameters";

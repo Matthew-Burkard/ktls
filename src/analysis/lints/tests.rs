@@ -2062,3 +2062,95 @@ fun f(cb: (() -> Unit)?) {
     let quiet = lint("package a\n\nfun g(xs: List<Int>, ok: Boolean): Int {\n    val r = xs.map { x -> x }\n    val v = if (ok) {\n        println()\n        1\n    } else 2\n    println(r)\n    return when (v) {\n        1 -> v\n        else -> 0\n    }\n}\n");
     assert!(!quiet.iter().any(|f| f.starts_with("UNUSED_EXPRESSION") || f.starts_with("UNUSED_LAMBDA")), "{quiet:#?}");
 }
+
+#[test]
+fn inline_jvm_label_and_variance_errors() {
+    let fx = Fixture::new();
+    if !fx.typed() {
+        return;
+    }
+    let found = lint(
+        r#"package a
+
+class Clash {
+    val size: Int = 0
+    fun getSize(): Int = 1
+    fun sum(xs: List<String>): Int = 0
+    fun sum(xs: List<Int>): Int = 0
+}
+
+private fun secret() = 1
+internal fun inner() = 2
+@PublishedApi internal fun published() = 3
+
+inline fun twice(block: () -> Unit, crossinline later: () -> Unit) {
+    val saved = block
+    Thread { block() }.start()
+    Thread { later() }.start()
+    println(saved)
+    println(secret() + inner() + published())
+}
+
+inline fun runLater(crossinline f: () -> Unit) = Thread { f() }
+
+fun use(xs: List<Int>): Int {
+    Thread { return }.start()
+    runLater { return }
+    xs.forEach { if (it > 1) return it }
+    outer@ for (x in xs) {
+        xs.forEach lit@{ if (it == x) return@lit }
+        break@outer
+    }
+    run lbl@{ for (x in xs) { break@lbl } }
+    for (x in xs) { continue@nowhere }
+    return@nope 1
+}
+
+class Producer<out T>(val item: T) {
+    fun put(t: T) {}
+    fun all(): List<T> = listOf(item)
+    fun sink(xs: MutableList<T>) {}
+    fun cmp(c: Comparable<T>) {}
+    fun ok(t: @UnsafeVariance T) {}
+    private fun hidden(t: T) {}
+}
+
+class Consumer<in T> {
+    fun get(): T = TODO()
+    fun take(t: T) {}
+    fun callback(f: (T) -> Unit) {}
+}
+"#,
+    );
+    for expected in [
+        "CONFLICTING_JVM_DECLARATIONS: size",
+        "CONFLICTING_JVM_DECLARATIONS: getSize",
+        "USAGE_IS_NOT_INLINABLE: block",
+        "NON_LOCAL_RETURN_NOT_ALLOWED: block",
+        "NON_PUBLIC_CALL_FROM_PUBLIC_INLINE: secret",
+        "NON_PUBLIC_CALL_FROM_PUBLIC_INLINE: inner",
+        "RETURN_NOT_ALLOWED: return",
+        "NON_LOCAL_RETURN_NOT_ALLOWED: return",
+        "NOT_A_LOOP_LABEL: @lbl",
+        "UNRESOLVED_LABEL: @nowhere",
+        "UNRESOLVED_LABEL: @nope",
+        "TYPE_VARIANCE_CONFLICT: T",
+    ] {
+        has(&found, expected);
+    }
+    let count = |rule: &str| found.iter().filter(|f| f.starts_with(rule)).count();
+    // `sum` twice; `put`, `sink` (out class); `get`, `callback` (in class).
+    assert_eq!(count("CONFLICTING_JVM_DECLARATIONS"), 4, "{found:#?}");
+    assert_eq!(count("TYPE_VARIANCE_CONFLICT"), 4, "{found:#?}");
+    assert_eq!(count("NON_PUBLIC_CALL_FROM_PUBLIC_INLINE"), 2, "{found:#?}");
+    // `later` is crossinline; the forEach `return` is inlined; `return@lit` and `break@outer` resolve.
+    assert_eq!(count("NON_LOCAL_RETURN_NOT_ALLOWED"), 2, "{found:#?}");
+    assert_eq!(count("RETURN_NOT_ALLOWED"), 1, "{found:#?}");
+    assert_eq!(count("UNRESOLVED_LABEL"), 2, "{found:#?}");
+
+    // Fixes add the modifiers.
+    let src = "inline fun f(block: () -> Unit) {\n    Thread { block() }.start()\n}\n";
+    assert_eq!(fixed(src, "NON_LOCAL_RETURN_NOT_ALLOWED"), "inline fun f(crossinline block: () -> Unit) {\n    Thread { block() }.start()\n}\n");
+    let src = "inline fun f(block: () -> Unit) {\n    val b = block\n    println(b)\n}\n";
+    assert_eq!(fixed(src, "USAGE_IS_NOT_INLINABLE"), "inline fun f(noinline block: () -> Unit) {\n    val b = block\n    println(b)\n}\n");
+}

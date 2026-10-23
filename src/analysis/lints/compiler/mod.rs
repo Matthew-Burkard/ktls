@@ -11,6 +11,9 @@ mod dataflow;
 mod declarations;
 mod expressions;
 mod flow;
+mod inlining;
+mod jvm;
+mod labels;
 mod inheritance;
 mod jumps;
 mod markers;
@@ -19,6 +22,7 @@ mod signatures;
 mod types;
 mod typing;
 mod usage;
+mod variance;
 mod when;
 
 use super::{Cx, Sink};
@@ -40,4 +44,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     markers::check(cx, out);
     dataflow::check(cx, out);
     shapes::check(cx, out);
+    inlining::check(cx, out);
+    jvm::check(cx, out);
+    labels::check(cx, out);
+    variance::check(cx, out);
 }
