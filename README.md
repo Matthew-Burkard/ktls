@@ -54,6 +54,8 @@ Passed as `initializationOptions` or via `workspace/configuration` (section `kot
 | `inlayHints.types` | `true` | Inferred types of properties, locals, loop variables and destructuring entries |
 | `inlayHints.lambdaParameters` | `true` | Types of `it` and untyped lambda parameters |
 | `inlayHints.returnTypes` | `true` | Return types of expression-bodied functions |
+| `inlayHints.chainedCalls` | `true` | Types at the line ends of call chains over three or more lines |
+| `inlayHints.lambdas` | `true` | Implicit `this` of lambdas with a receiver, and `^label` before what a multi-line lambda returns |
 | `inlayHints.parameterNames` | `literals` | `literals` (literal arguments of multi-parameter calls), `all` or `none` |
 
 Commands (`workspace/executeCommand`): `kotlin.reloadProject`, `kotlin.projectModel`

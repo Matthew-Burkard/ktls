@@ -94,8 +94,8 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P0] Declaration signature with resolved types and modifiers
 - [x] [P0] Rendered KDoc (Markdown, `@param`, `@return`, `@throws`, `@sample`, `[links]`)
 - [x] [P1] Javadoc rendering for Java symbols
-- [~] [P1] Inferred type of expressions / smart-cast type — *partial: locals, `it`, generic substitution; no smart casts*
-- [ ] [P1] Constant values (`const val`, literal folding)
+- [x] [P1] Inferred type of expressions / smart-cast type (locals, `it`, generic substitution; "Smart cast to `T`" where a check narrows a local)
+- [x] [P1] Constant values (`const val`, and `val`s with constant initializers: literals, operators with Int/Long overflow, string templates, other such `val`s)
 - [ ] [P2] Deprecation info with replacement
 - [x] [P2] Source library / module of the symbol
 
@@ -106,8 +106,8 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 ### 3.3 Inlay hints (`textDocument/inlayHint`, `inlayHint/resolve`)
 - [x] [P1] Local variable / property inferred types (also loop variables and destructuring; hidden for literals, constructor calls and casts)
 - [x] [P1] Parameter names at call sites (configurable: literals only, all, off)
-- [~] [P1] Lambda implicit `it` / `this` receiver type and return value hints — *partial: `it` and untyped lambda parameters*
-- [ ] [P1] Chained call (fluent) intermediate types
+- [x] [P1] Lambda implicit `it` / `this` receiver type and return value hints (`^label` before the result of multi-line lambdas not returning `Unit`)
+- [x] [P1] Chained call (fluent) intermediate types (chains over three or more lines with at least two types)
 - [x] [P2] Function return type hints for expression bodies
 - [ ] [P2] Ranges (`0 ≤ i < 10` for `0 until 10`)
 - [ ] [P2] Suspend call markers, implicit receiver hints, value-parameter hints for `Function` types

@@ -896,7 +896,7 @@ fn inlay_hints() {
         fx.hints(&src("fun twice(u: User) = u.greet(\"hi\")\nfun f(user: User, count: Int) {}\nfun g(u: User, user: User) = f(user, 2)"), &config),
         "fun twice(u: User)⟨: String⟩ = u.greet(\"hi\")\nfun f(user: User, count: Int) {}\nfun g(u: User, user: User)⟨: Unit⟩ = f(user, ⟨count:⟩2)\n"
     );
-    let all = inlay::InlayConfig { parameter_names: inlay::ParameterNames::All, types: false, lambda_parameters: false, return_types: false };
+    let all = inlay::InlayConfig { parameter_names: inlay::ParameterNames::All, types: false, lambda_parameters: false, return_types: false, chained_calls: false, lambdas: false };
     assert_eq!(
         fx.hints(&src("fun f(user: User, count: Int) {}\nfun g(u: User, user: User, n: Int) { f(user, n); f(u, count = n) }"), &all),
         "fun f(user: User, count: Int) {}\nfun g(u: User, user: User, n: Int) { f(user, ⟨count:⟩n); f(⟨user:⟩u, count = n) }\n"
@@ -1472,4 +1472,41 @@ fn completes_when_branches() {
     // Sealed hierarchies.
     let labels = fx.labels(&format!("{HEADER}{decls}fun f(s: Shape) = when (s) {{\n    $0\n}}\n"));
     has_all(&labels, &["Add remaining branches", "is Circle", "Empty"]);
+}
+
+#[test]
+fn inlay_hints_for_chains_and_lambdas() {
+    let Some(mut fx) = fixture() else { return };
+    let config = inlay::InlayConfig { types: false, lambda_parameters: false, return_types: false, parameter_names: inlay::ParameterNames::None, ..Default::default() };
+    let src = |body: &str| format!("{HEADER}{body}\n");
+    // Types along a chain over several lines.
+    assert_eq!(
+        fx.hints(&src("fun run(us: List<User>) =\n    us\n        .map { it.name }\n        .first()\n        .length"), &config),
+        "fun run(us: List<User>) =\n    us⟨List<User>⟩\n        .map { it.name }⟨List<String>⟩\n        .first()⟨String⟩\n        .length\n"
+    );
+    // Not for chains on one line, or of a single type.
+    assert_eq!(fx.hints(&src("fun run(us: List<User>) = us.map { it.name }.first()"), &config), "fun run(us: List<User>) = us.map { it.name }.first()\n");
+    // Receivers of lambdas, and what multi-line lambdas return.
+    assert_eq!(
+        fx.hints(&src("fun run(us: List<User>) {\n    val s = buildString { append(1) }\n    val ns = us.map {\n        val n = it.name\n        n.length\n    }\n    us.forEach {\n        println(it)\n        println(it)\n    }\n}"), &config),
+        "fun run(us: List<User>) {\n    val s = buildString {⟨ this: StringBuilder⟩ append(1) }\n    val ns = us.map {\n        val n = it.name\n        ⟨^map⟩n.length\n    }\n    us.forEach {\n        println(it)\n        println(it)\n    }\n}\n"
+    );
+}
+
+#[test]
+fn hover_constant_values_and_smart_casts() {
+    let Some(mut fx) = fixture() else { return };
+    let decls = "const val SECOND = 1000\nconst val MINUTE = 60 * SECOND\nconst val NAME = \"app\"\nval GREETING = \"Hello, $NAME!\"\nval BIG = Int.MAX_VALUE.toLong() + 1\nconst val HEX = 0xFF\nval plain = 42\n";
+    let h = |fx: &mut Fx, name: &str| fx.hover(&format!("{HEADER}{decls}fun f() = {name}$0\n"));
+    assert!(h(&mut fx, "MINUTE").contains("const val MINUTE: Int = 60000"), "{}", h(&mut fx, "MINUTE"));
+    assert!(h(&mut fx, "GREETING").contains("= \"Hello, app!\""), "{}", h(&mut fx, "GREETING"));
+    assert!(h(&mut fx, "HEX").contains("= 255"), "{}", h(&mut fx, "HEX"));
+    // A literal initializer is shown as written; calls are not folded.
+    assert!(!h(&mut fx, "plain").contains("= 42"), "{}", h(&mut fx, "plain"));
+    assert!(!h(&mut fx, "BIG").contains(" = "), "{}", h(&mut fx, "BIG"));
+    // Locals, and the smart-cast type where a check narrowed it.
+    let local = fx.hover(&format!("{HEADER}fun f() {{\n    val total = 2 * 21L\n    println(tot$0al)\n}}\n"));
+    assert!(local.contains("val total: Long = 42L"), "{local}");
+    let cast = fx.hover(&format!("{HEADER}fun f(x: Any) {{\n    if (x is String) println(x$0.length)\n}}\n"));
+    assert!(cast.contains("Smart cast to `String`"), "{cast}");
 }

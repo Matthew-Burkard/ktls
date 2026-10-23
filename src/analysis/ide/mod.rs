@@ -3,6 +3,7 @@
 
 pub mod assists;
 pub mod completion;
+pub mod constant;
 pub mod create;
 pub mod extract;
 pub mod file_rename;
@@ -552,6 +553,18 @@ pub fn hover(snap: &Snapshot, path: &Path, offset: TextSize) -> Option<HoverInfo
             }
             md.push_str("```kotlin\n");
             md.push_str(&shown.signature());
+            // The value of constants (`const val TIMEOUT = 60 * 1000` → `= 60000`).
+            if sym.kind == SymbolKind::Property
+                && !sym.modifiers.has(crate::symbols::Modifiers::VAR)
+                && let Origin::Source { file, name_range, .. } = &sym.origin
+            {
+                let other = if *file == e.path { None } else { Engine::new(snap, file) };
+                let owner = other.as_ref().unwrap_or(&e);
+                let decl = crate::syntax::covering(&owner.root, *name_range).and_then(|c| c.ancestors().find(|a| a.kind() == SyntaxKind::PROPERTY));
+                if let Some(v) = decl.filter(|d| !d.children().any(|c| matches!(c.kind(), SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::PROPERTY_DELEGATE))).and_then(|d| constant::shown_value(owner, &d, sym.modifiers.has(crate::symbols::Modifiers::CONST))) {
+                    md.push_str(&format!(" = {v}"));
+                }
+            }
             md.push_str("\n```\n");
             // The type in this context, when generics were substituted (`list.first()` → `User`).
             if !subst.is_empty()
@@ -594,9 +607,23 @@ pub fn hover(snap: &Snapshot, path: &Path, offset: TextSize) -> Option<HoverInfo
                 LocalKind::Function => format!("fun {}(…): {ty}", l.name),
                 LocalKind::Class => format!("class {}", l.name),
             };
-            md.push_str(&format!("```kotlin\n{sig}\n```\n"));
+            let value = (l.kind == LocalKind::Val)
+                .then(|| crate::syntax::covering(&e.root, l.name_range).and_then(|c| c.ancestors().find(|a| a.kind() == SyntaxKind::PROPERTY)))
+                .flatten()
+                .and_then(|d| constant::shown_value(&e, &d, false))
+                .map(|v| format!(" = {v}"))
+                .unwrap_or_default();
+            md.push_str(&format!("```kotlin\n{sig}{value}\n```\n"));
             if l.kind == LocalKind::It {
                 md.push_str("\nimplicit lambda parameter\n");
+            }
+            // The type where it is used, when narrowed by a check (`if (x is String)`).
+            let here = token_at(&e.root, offset).and_then(|t| t.parent()).filter(|p| p.kind() == SyntaxKind::NAME_REF).and_then(|n| e.type_of(&n));
+            if let (Some(here), Some(declared)) = (here, &l.ty)
+                && here.display() != declared.display()
+                && !here.display().contains("<error>")
+            {
+                md.push_str(&format!("\nSmart cast to `{}`\n", here.display()));
             }
         }
         Def::Package(p) => md.push_str(&format!("```kotlin\npackage {p}\n```\n")),

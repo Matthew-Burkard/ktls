@@ -1079,6 +1079,12 @@ impl<'s> Engine<'s> {
         Some((recv, params))
     }
 
+    /// The return type a lambda is expected to have (from the function it is passed to).
+    pub fn lambda_return(&self, lambda: &SyntaxNode) -> Option<TypeRef> {
+        let (expected, _) = self.lambda_expected(lambda)?;
+        function_parts(&expected).map(|(_, _, r)| r)
+    }
+
     /// How a lambda runs: (`suspend` function type expected, passed to an `inline`
     /// function). `None` when its expected type is unknown.
     pub fn lambda_kind(&self, lambda: &SyntaxNode) -> Option<(bool, bool)> {
@@ -1629,7 +1635,20 @@ impl<'s> Engine<'s> {
                     _ => return None,
                 };
                 let lt = self.type_of(&lhs)?;
-                let (sym, mut s) = self.members_named(&lt, name).into_iter().next().or_else(|| self.extensions(&lt, name).into_iter().next())?;
+                // Among overloads (`Int.times(Int)`, `Int.times(Long)`), the one taking the
+                // right operand's type.
+                let rt = rhs.as_ref().and_then(|r| self.type_of(r));
+                let mut cands = self.members_named(&lt, name);
+                if cands.is_empty() {
+                    cands = self.extensions(&lt, name);
+                }
+                let fitting = rt.as_ref().and_then(|rt| {
+                    cands.iter().position(|(m, s)| m.params.len() == 1 && fq_of(&substitute(&self.resolve_declared(m, &m.params[0].ty), s)).is_some_and(|p| Some(p) == fq_of(rt)))
+                });
+                let (sym, mut s) = match fitting {
+                    Some(i) => cands.swap_remove(i),
+                    None => cands.into_iter().next()?,
+                };
                 // Bind type parameters from the right operand (`a to b`).
                 if let (Some(r), Some(p)) = (rhs.as_ref(), sym.params.first())
                     && let Some(rt) = self.type_of(r) {

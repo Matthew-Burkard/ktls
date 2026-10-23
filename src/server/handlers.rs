@@ -700,13 +700,13 @@ pub fn inlay_hints(cx: &Ctx, path: &Path, range: lsp_types::Range, config: &crat
             position: index.position(text, h.offset, cx.enc),
             label: InlayHintLabel::String(h.label),
             kind: Some(match h.kind {
-                HintKind::Type => InlayHintKind::TYPE,
-                HintKind::Parameter => InlayHintKind::PARAMETER,
+                HintKind::Type | HintKind::Chain => InlayHintKind::TYPE,
+                HintKind::Parameter | HintKind::Return => InlayHintKind::PARAMETER,
             }),
             text_edits: None,
             tooltip: None,
-            padding_left: None,
-            padding_right: Some(h.kind == HintKind::Parameter),
+            padding_left: Some(h.kind == HintKind::Chain),
+            padding_right: Some(matches!(h.kind, HintKind::Parameter | HintKind::Return)),
             data: None,
         })
         .collect())

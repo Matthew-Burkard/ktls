@@ -20,6 +20,10 @@ pub struct InlayConfig {
     pub lambda_parameters: bool,
     /// Return types of expression-bodied functions without one.
     pub return_types: bool,
+    /// Types along call chains split over lines (at each line end).
+    pub chained_calls: bool,
+    /// The implicit `this` of lambdas with a receiver, and what multi-line lambdas return.
+    pub lambdas: bool,
     pub parameter_names: ParameterNames,
 }
 
@@ -35,7 +39,7 @@ pub enum ParameterNames {
 
 impl Default for InlayConfig {
     fn default() -> Self {
-        InlayConfig { types: true, lambda_parameters: true, return_types: true, parameter_names: ParameterNames::Literals }
+        InlayConfig { types: true, lambda_parameters: true, return_types: true, chained_calls: true, lambdas: true, parameter_names: ParameterNames::Literals }
     }
 }
 
@@ -43,6 +47,10 @@ impl Default for InlayConfig {
 pub enum HintKind {
     Type,
     Parameter,
+    /// A type after the end of a line of a call chain (shown with a space before).
+    Chain,
+    /// What a lambda returns, before its result (`^map`).
+    Return,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,7 +69,16 @@ pub fn inlay_hints(snap: &Snapshot, path: &Path, range: TextRange, config: &Inla
             SyntaxKind::DESTRUCTURING_ENTRY if config.types => local_name(&e, &n, &mut out),
             SyntaxKind::VALUE_PARAMETER if config.types && n.parent().is_some_and(|p| p.kind() == SyntaxKind::FOR_EXPR) => local_name(&e, &n, &mut out),
             SyntaxKind::VALUE_PARAMETER if config.lambda_parameters && n.parent().is_some_and(|p| p.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) => local_name(&e, &n, &mut out),
-            SyntaxKind::LAMBDA_EXPR if config.lambda_parameters => implicit_it(&e, &n, &mut out),
+            SyntaxKind::LAMBDA_EXPR => {
+                if config.lambda_parameters {
+                    implicit_it(&e, &n, &mut out);
+                }
+                if config.lambdas {
+                    lambda_receiver(&e, &n, &mut out);
+                    lambda_result(&e, &n, &mut out);
+                }
+            }
+            SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR if config.chained_calls => chain(&e, &n, &mut out),
             SyntaxKind::FUN if config.return_types => return_type(&e, &n, &mut out),
             SyntaxKind::VALUE_ARGUMENT_LIST if config.parameter_names != ParameterNames::None => parameter_names(&e, &n, config.parameter_names, &mut out),
             _ => {}
@@ -235,6 +252,74 @@ fn implicit_it(e: &Engine, lambda: &SyntaxNode, out: &mut Vec<Hint>) {
     let Some(open) = lambda.first_token() else { return };
     if let Some(s) = shown(t).filter(|_| in_scope(t, &open)) {
         out.push(Hint { offset: open.text_range().end(), label: format!(" it: {s} ->"), kind: HintKind::Type });
+    }
+}
+
+/// `buildString { … }`: the receiver as ` this: StringBuilder` after `{`.
+fn lambda_receiver(e: &Engine, lambda: &SyntaxNode, out: &mut Vec<Hint>) {
+    let Some((Some(r), _)) = e.lambda_signature(lambda) else { return };
+    let Some(open) = lambda.first_token() else { return };
+    if let Some(s) = shown(&r).filter(|_| in_scope(&r, &open)) {
+        out.push(Hint { offset: open.text_range().end(), label: format!(" this: {s}"), kind: HintKind::Type });
+    }
+}
+
+/// `^label` before the value a multi-line lambda returns (not for `Unit` lambdas).
+fn lambda_result(e: &Engine, lambda: &SyntaxNode, out: &mut Vec<Hint>) {
+    let Some(body) = lambda.children().find(|c| c.kind() == SyntaxKind::BLOCK) else { return };
+    if !lambda.text().to_string().contains('\n') || body.children().count() < 2 {
+        return;
+    }
+    let Some(last) = body.children().last() else { return };
+    let statement = matches!(last.kind(), SyntaxKind::PROPERTY | SyntaxKind::FUN | SyntaxKind::CLASS | SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR | SyntaxKind::DO_WHILE_EXPR | SyntaxKind::RETURN_EXPR | SyntaxKind::THROW_EXPR)
+        || crate::analysis::lints::assignment_op(&last).is_some();
+    if statement || e.lambda_return(lambda).is_none_or(|r| matches!(r.fq_name(), Some("kotlin.Unit"))) {
+        return;
+    }
+    // The lambda's label, or the function it is passed to.
+    let label = lambda.parent().filter(|p| p.kind() == SyntaxKind::LABELED_EXPR).and_then(|p| p.children().find(|c| c.kind() == SyntaxKind::LABEL)).map(|l| l.text().to_string().trim_end_matches('@').to_string()).or_else(|| {
+        lambda.ancestors().skip(1).find(|c| c.kind() == SyntaxKind::CALL_EXPR).and_then(|c| c.first_child()).filter(|n| n.kind() == SyntaxKind::NAME_REF).map(|n| n.text().to_string())
+    });
+    let Some(label) = label else { return };
+    out.push(Hint { offset: last.text_range().start(), label: format!("^{label}"), kind: HintKind::Return });
+}
+
+/// A call chain over three or more lines: the type at the end of each line but the last,
+/// when the chain has at least two different types.
+fn chain(e: &Engine, n: &SyntaxNode, out: &mut Vec<Hint>) {
+    // The whole chain only.
+    if n.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() == Some(n)) {
+        return;
+    }
+    // Receivers of the chain, innermost last, that end right before a line break.
+    let mut parts: Vec<SyntaxNode> = Vec::new();
+    let mut cur = n.clone();
+    while matches!(cur.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) {
+        let Some(recv) = cur.first_child() else { break };
+        let breaks = recv.next_sibling_or_token().into_iter().flat_map(|t| std::iter::successors(Some(t), |t| t.next_sibling_or_token())).take_while(|t| t.as_token().is_some()).any(|t| t.kind() == SyntaxKind::NEWLINE);
+        if breaks {
+            parts.push(recv.clone());
+        }
+        cur = recv;
+    }
+    if parts.len() < 2 {
+        return;
+    }
+    let types: Vec<(SyntaxNode, String)> = parts
+        .into_iter()
+        .filter_map(|p| {
+            let t = e.type_of(&p)?;
+            let last = p.last_token()?;
+            let s = shown(&t).filter(|_| in_scope(&t, &last))?;
+            Some((p, s))
+        })
+        .collect();
+    let distinct: std::collections::HashSet<&String> = types.iter().map(|(_, s)| s).collect();
+    if distinct.len() < 2 {
+        return;
+    }
+    for (p, s) in types {
+        out.push(Hint { offset: p.text_range().end(), label: s, kind: HintKind::Chain });
     }
 }
 
