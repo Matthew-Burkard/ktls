@@ -14,6 +14,7 @@ mod flow;
 mod inheritance;
 mod jumps;
 mod markers;
+mod shapes;
 mod signatures;
 mod types;
 mod typing;
@@ -38,4 +39,5 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     inheritance::check(cx, out);
     markers::check(cx, out);
     dataflow::check(cx, out);
+    shapes::check(cx, out);
 }

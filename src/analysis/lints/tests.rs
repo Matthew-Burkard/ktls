@@ -1948,3 +1948,117 @@ class D(val other: D?) {
         assert!(!quiet.iter().any(|f| f.starts_with(rule)), "{rule}: {quiet:#?}");
     }
 }
+
+#[test]
+fn declaration_shape_errors() {
+    let fx = Fixture::new();
+    if !fx.typed() {
+        return;
+    }
+    let found = lint(
+        r#"package a
+
+val ro: Int = 1
+    set(v) {}
+val lazyOne by lazy { 1 }
+    get() = 2
+val String.ext: Int = 1
+inline val inl: Int = 1
+val untyped
+abstract class Abs {
+    abstract var a: Int
+        private set
+    open var o: Int = 0
+        private set
+    private var hidden: Int = 0
+        public set
+    val g: Int = 0
+        private get
+}
+interface I {
+    val d by lazy { 1 }
+    private fun nobody()
+}
+fun interface Two {
+    fun a()
+    fun b()
+}
+fun interface Gen {
+    fun <T> a(t: T = TODO())
+}
+value class Empty()
+value class Pair2(val a: Int, val b: Int)
+value class Mutable(var a: Int)
+open value class Opened(val a: Int)
+@JvmInline
+value class Ok(val a: Int) {
+    val twice = a * 2
+}
+sealed class S public constructor()
+enum class Op {
+    PLUS { override fun apply(x: Int) = x },
+    MINUS;
+    abstract fun apply(x: Int): Int
+}
+interface J
+class Twice : J, J
+fun f(cb: (() -> Unit)?) {
+    cb()
+    val local
+    local = 1
+    { println() }
+    cb
+    1
+    println(local)
+}
+"#,
+    );
+    for expected in [
+        "VAL_WITH_SETTER: set(v) {}",
+        "ACCESSOR_FOR_DELEGATED_PROPERTY: get() = 2",
+        "EXTENSION_PROPERTY_WITH_BACKING_FIELD: ext",
+        "INLINE_PROPERTY_WITH_BACKING_FIELD: inl",
+        "PROPERTY_WITH_NO_TYPE_NO_INITIALIZER: untyped",
+        "PRIVATE_SETTER_FOR_ABSTRACT_PROPERTY: private set",
+        "PRIVATE_SETTER_FOR_OPEN_PROPERTY: private set",
+        "SETTER_VISIBILITY_INCONSISTENT_WITH_PROPERTY_VISIBILITY: public set",
+        "GETTER_VISIBILITY_DIFFERS_FROM_PROPERTY_VISIBILITY: private get",
+        "DELEGATED_PROPERTY_IN_INTERFACE: d",
+        "PRIVATE_FUNCTION_WITH_NO_BODY: nobody",
+        "FUN_INTERFACE_WRONG_COUNT_OF_ABSTRACT_MEMBERS: Two",
+        "FUN_INTERFACE_ABSTRACT_METHOD_WITH_TYPE_PARAMETERS: a",
+        "FUN_INTERFACE_ABSTRACT_METHOD_WITH_DEFAULT_VALUE: a",
+        "VALUE_CLASS_EMPTY_CONSTRUCTOR: Empty",
+        "INLINE_CLASS_CONSTRUCTOR_WRONG_PARAMETERS_SIZE: Pair2",
+        "VALUE_CLASS_CONSTRUCTOR_NOT_FINAL_READ_ONLY_PARAMETER: a",
+        "VALUE_CLASS_NOT_FINAL: open",
+        "VALUE_CLASS_WITHOUT_JVM_INLINE_ANNOTATION: value",
+        "PROPERTY_WITH_BACKING_FIELD_INSIDE_VALUE_CLASS: twice",
+        "NON_PRIVATE_OR_PROTECTED_CONSTRUCTOR_IN_SEALED: public",
+        "ABSTRACT_MEMBER_NOT_IMPLEMENTED_BY_ENUM_ENTRY: MINUS",
+        "SUPERTYPE_APPEARS_TWICE: J",
+        "UNSAFE_IMPLICIT_INVOKE_CALL: cb",
+        "VARIABLE_WITH_NO_TYPE_NO_INITIALIZER: local",
+        "UNUSED_LAMBDA_EXPRESSION: {",
+        "UNUSED_EXPRESSION: cb",
+        "UNUSED_EXPRESSION: 1",
+    ] {
+        has(&found, expected);
+    }
+    // `Ok` is fine apart from its backing field; `PLUS` implements `apply`.
+    assert!(!found.iter().any(|f| f.ends_with(": Ok") || f.ends_with(": PLUS")), "{found:#?}");
+    assert_eq!(fixed("fun f(cb: (() -> Unit)?) {\n    cb()\n}\n", "UNSAFE_IMPLICIT_INVOKE_CALL"), "fun f(cb: (() -> Unit)?) {\n    cb?.invoke()\n}\n");
+    assert_eq!(fixed("fun f() {\n    { println() }\n    println()\n}\n", "UNUSED_LAMBDA_EXPRESSION"), "fun f() {\n    run { println() }\n    println()\n}\n");
+
+    // Sealed classes: inheritors in another package of the same module.
+    let mut fx = Fixture::new();
+    fx.run("src/main/kotlin/a/S.kt", "package a\n\nsealed interface Shape\n");
+    let (lints, text) = fx.run("src/main/kotlin/b/C.kt", "package b\n\nimport a.Shape\n\nclass Circle : Shape\nfun f() = object : Shape {}\n");
+    let found: Vec<String> = lints.iter().map(|l| format!("{}: {}", l.rule.id, &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    has(&found, "SEALED_INHERITOR_IN_DIFFERENT_PACKAGE: Shape");
+    has(&found, "SEALED_SUPERTYPE_IN_LOCAL_CLASS: Shape");
+
+    // Values that are used: the last statement of a lambda or `if` branch, `when` bodies.
+    let quiet = lint("package a\n\nfun g(xs: List<Int>, ok: Boolean): Int {\n    val r = xs.map { x -> x }\n    val v = if (ok) {\n        println()\n        1\n    } else 2\n    println(r)\n    return when (v) {\n        1 -> v\n        else -> 0\n    }\n}\n");
+    assert!(!quiet.iter().any(|f| f.starts_with("UNUSED_EXPRESSION") || f.starts_with("UNUSED_LAMBDA")), "{quiet:#?}");
+}
