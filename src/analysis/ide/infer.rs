@@ -1222,7 +1222,149 @@ impl<'s> Engine<'s> {
         if out.iter().any(|d| !low_priority(d)) {
             out.retain(|d| !low_priority(d));
         }
+        // Overloads of functions only: argument types choose among them.
+        let functions: Option<Vec<(&Symbol, &Subst)>> = out
+            .iter()
+            .map(|d| match d {
+                Def::Symbol { sym, subst } if matches!(sym.kind, SymbolKind::Function | SymbolKind::Constructor) => Some((sym, subst)),
+                _ => None,
+            })
+            .collect();
+        if let Some(keep) = functions.and_then(|f| self.overload_keep(&f, call)) {
+            let mut keep = keep.into_iter();
+            out.retain(|_| keep.next().unwrap_or(true));
+        }
         out
+    }
+
+    /// Narrow overloads `cands` of `call` by argument types: drop those an argument of
+    /// known class type cannot be passed to, then keep the most specific (parameter types
+    /// that are subtypes of the others', non-generic before generic, non-vararg before
+    /// vararg; only a candidate every argument certainly fits wins that way). `None`: keep all (one candidate, nothing to tell them apart, none fits).
+    pub fn overload_keep(&self, cands: &[(&Symbol, &Subst)], call: &SyntaxNode) -> Option<Vec<bool>> {
+        if cands.len() < 2 {
+            return None;
+        }
+        // Explicit type arguments rule out overloads with another count or violated bounds.
+        let explicit = call.children().find(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST).map(|l| l.children().filter(|c| c.kind() == SyntaxKind::TYPE_PROJECTION).map(|p| p.children().find_map(ast::TypeRef::cast).map(|t| self.resolve_syntax_type(&t))).collect::<Vec<_>>());
+        if let Some(targs) = &explicit {
+            let ok: Vec<bool> = cands.iter().map(|(sym, _)| sym.kind != SymbolKind::Function || self.type_arguments_fit(sym, targs)).collect();
+            if ok.iter().any(|k| !k) && ok.iter().any(|k| *k) {
+                let rest: Vec<(&Symbol, &Subst)> = cands.iter().zip(&ok).filter(|(_, k)| **k).map(|(c, _)| *c).collect();
+                let mut inner = self.overload_keep(&rest, call).unwrap_or_else(|| vec![true; rest.len()]).into_iter();
+                return Some(ok.iter().map(|k| *k && inner.next().unwrap_or(true)).collect());
+            }
+        }
+        let list = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST)?;
+        let args: Vec<(Option<String>, SyntaxNode)> = list
+            .children()
+            .filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT)
+            .filter(|a| token_at(a, SyntaxKind::STAR).is_none())
+            .filter_map(|a| {
+                let name = a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| token_at(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t));
+                Some((name, a.children().filter(|c| c.kind() != SyntaxKind::VALUE_ARGUMENT_NAME).last()?))
+            })
+            .collect();
+        if args.is_empty() {
+            return None;
+        }
+        // Each candidate's parameter (type, vararg) per argument.
+        let params: Vec<Vec<Option<(TypeRef, bool)>>> = cands
+            .iter()
+            .map(|(sym, subst)| {
+                let mut subst = (*subst).clone();
+                if sym.receiver.is_none() && sym.kind == SymbolKind::Function {
+                    for tp in &sym.type_params {
+                        subst.remove(&tp.name);
+                    }
+                }
+                let vararg = sym.params.iter().position(|p| p.vararg);
+                args.iter()
+                    .enumerate()
+                    .map(|(i, (name, _))| {
+                        let p = match name {
+                            Some(n) => sym.params.iter().find(|p| p.name == *n)?,
+                            None => match vararg {
+                                Some(v) if i >= v => &sym.params[v],
+                                _ => sym.params.get(i)?,
+                            },
+                        };
+                        Some((substitute(&self.resolve_declared(sym, &p.ty), &subst), p.vararg))
+                    })
+                    .collect()
+            })
+            .collect();
+        // Per candidate: no argument rules it out; every argument certainly fits.
+        let checked: Vec<Vec<Option<bool>>> = params.iter().map(|ps| args.iter().zip(ps).map(|((_, v), p)| p.as_ref().map_or(Some(true), |(t, _)| self.argument_fit(v, t))).collect()).collect();
+        let fits: Vec<bool> = checked.iter().map(|c| c.iter().all(|f| *f != Some(false))).collect();
+        let certain: Vec<bool> = checked.iter().map(|c| c.iter().all(|f| *f == Some(true))).collect();
+        if !fits.iter().any(|f| *f) {
+            return None;
+        }
+        // `a` is at least as specific as `b` for every argument.
+        let as_specific = |a: &[Option<(TypeRef, bool)>], b: &[Option<(TypeRef, bool)>]| {
+            a.iter().zip(b).all(|(pa, pb)| match (pa, pb) {
+                (Some((ta, va)), Some((tb, vb))) => {
+                    if *va && !*vb {
+                        return false;
+                    }
+                    match (strip(ta), strip(tb)) {
+                        (_, TypeRef::TypeParam { .. }) => true,
+                        (TypeRef::TypeParam { .. }, _) => false,
+                        _ => match (fq_of(ta), fq_of(tb)) {
+                            (Some(fa), Some(fb)) => fa == fb || self.conforms(&TypeRef::named(fa), fb) == Some(true),
+                            _ => ta.display() == tb.display(),
+                        },
+                    }
+                }
+                _ => true,
+            })
+        };
+        let keep: Vec<bool> = (0..cands.len())
+            .map(|i| fits[i] && !(0..cands.len()).any(|j| j != i && certain[j] && as_specific(&params[j], &params[i]) && !as_specific(&params[i], &params[j])))
+            .collect();
+        (keep.iter().any(|k| !k)).then_some(keep)
+    }
+
+    /// Whether explicit type arguments `targs` suit `sym`'s type parameters: as many, and
+    /// none certainly outside its bounds.
+    fn type_arguments_fit(&self, sym: &Symbol, targs: &[Option<TypeRef>]) -> bool {
+        if targs.len() != sym.type_params.len() {
+            return false;
+        }
+        sym.type_params.iter().zip(targs).all(|(tp, t)| {
+            let Some(afq) = t.as_ref().filter(|t| !matches!(strip(t), TypeRef::TypeParam { .. })).and_then(|t| fq_of(t)) else { return true };
+            tp.bounds.iter().all(|b| {
+                let bound = self.resolve_declared(sym, b);
+                matches!(strip(&bound), TypeRef::TypeParam { .. }) || fq_of(&bound).is_none_or(|bfq| self.conforms(&TypeRef::named(afq), bfq) != Some(false))
+            })
+        })
+    }
+
+    /// Whether argument `value` can be passed to a parameter of type `param`: `None` when
+    /// unknown (lambdas, references, generic or function-typed parameters, unknown types).
+    fn argument_fit(&self, value: &SyntaxNode, param: &TypeRef) -> Option<bool> {
+        if matches!(value.kind(), SyntaxKind::LAMBDA_EXPR | SyntaxKind::CALLABLE_REFERENCE | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::OBJECT_LITERAL | SyntaxKind::LABELED_EXPR) {
+            return None;
+        }
+        let want = match strip(param) {
+            TypeRef::Named { fq: Some(fq), .. } => fq.to_string(),
+            _ => return None,
+        };
+        let literal = match value.kind() {
+            SyntaxKind::LITERAL => value.first_token(),
+            SyntaxKind::PREFIX_EXPR if value.first_token().is_some_and(|t| t.kind() == SyntaxKind::MINUS) => value.children().find(|c| c.kind() == SyntaxKind::LITERAL).and_then(|l| l.first_token()),
+            _ => None,
+        };
+        match literal.map(|t| (t.kind(), t.text().to_ascii_lowercase())) {
+            Some((SyntaxKind::NULL_KW, _)) => return Some(matches!(param, TypeRef::Platform(_) | TypeRef::Named { nullable: true, .. })),
+            // Integer literals take the integral type they are passed as.
+            Some((SyntaxKind::INT_LITERAL, text)) if !text.ends_with(['l', 'u']) && matches!(want.as_str(), "kotlin.Long" | "kotlin.Short" | "kotlin.Byte") => return Some(true),
+            _ => {}
+        }
+        let have = self.type_of(value)?;
+        fq_of(&have)?;
+        self.conforms(&non_null(have), &want)
     }
 
     pub fn resolve_qualifier(&self, e: &SyntaxNode) -> Qualifier {

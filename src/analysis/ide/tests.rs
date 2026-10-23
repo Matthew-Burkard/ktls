@@ -692,7 +692,7 @@ fn signature_help() {
     assert_eq!(labels.len(), 2);
     assert_eq!(param.as_deref(), Some("b: Int = …"));
     // Unclosed argument list, nested call: the innermost list around the cursor.
-    let (labels, param) = fx.signatures(&src("    add(add(\"x\"), $0\n"));
+    let (labels, param) = fx.signatures(&src("    add(add(1), $0\n"));
     assert!(labels[0].starts_with("*add(a: Int"), "{labels:?}");
     assert_eq!(param.as_deref(), Some("b: Int = …"));
     let (labels, _) = fx.signatures(&src("    add(add(\"x$0\"), 1)"));
@@ -1547,4 +1547,18 @@ fn document_links() {
         url
     }).collect();
     assert_eq!(links, ["https://kotlinlang.org/docs/home.html", "https://example.com/a_(b)", "https://x.dev/y", "https://api.example.com/v1?q=1"]);
+}
+
+#[test]
+fn overloads_resolved_by_argument_types() {
+    let Some(mut fx) = fixture() else { return };
+    let decls = "fun pick(a: Int): Int = a\nfun pick(a: String): String = a\nfun pick(a: Any): Boolean = true\nfun <T> wrap(v: T): List<T> = listOf(v)\nfun wrap(v: Int): Long = 1L\n";
+    let h = |fx: &mut Fx, call: &str| fx.hover(&format!("{HEADER}{decls}fun f(u: User) {{\n    val r$0 = {call}\n}}\n"));
+    // The parameter type the argument fits; the most specific one among several.
+    assert!(h(&mut fx, "pick(\"x\")").contains("val r: String"), "{}", h(&mut fx, "pick(\"x\")"));
+    assert!(h(&mut fx, "pick(1)").contains("val r: Int"), "{}", h(&mut fx, "pick(1)"));
+    assert!(h(&mut fx, "pick(u)").contains("val r: Boolean"), "{}", h(&mut fx, "pick(u)"));
+    // Non-generic before generic.
+    assert!(h(&mut fx, "wrap(1)").contains("val r: Long"), "{}", h(&mut fx, "wrap(1)"));
+    assert!(h(&mut fx, "wrap(u)").contains("val r: List<User>"), "{}", h(&mut fx, "wrap(u)"));
 }
