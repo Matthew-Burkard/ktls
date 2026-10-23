@@ -75,7 +75,17 @@ fn missing_return(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
         }
     }
     let Some(close) = block.last_token().filter(|t| t.kind() == SyntaxKind::R_CURLY) else { return };
-    out.report(&NO_RETURN, close.text_range(), "Missing return statement.", None);
+    // "Add 'return' statement": `return <default>` as the last statement.
+    let base = indent_at(cx.text, f.text_range().start());
+    let line_start = cx.text[..usize::from(close.text_range().start())].rfind('\n').map_or(0, |i| i + 1);
+    let alone = cx.text[line_start..usize::from(close.text_range().start())].trim().is_empty();
+    let ret = format!("return {}", default_value(&ty_text));
+    let fix = if alone {
+        Fix::replace("Add 'return' statement", TextRange::empty(close.text_range().start()), format!("    {ret}\n{base}"))
+    } else {
+        Fix::replace("Add 'return' statement", TextRange::empty(close.text_range().start()), format!("\n{base}    {ret}\n{base}"))
+    };
+    out.report(&NO_RETURN, close.text_range(), "Missing return statement.", Some(fix));
 }
 
 fn unreachable(block: &SyntaxNode, out: &mut Sink) {

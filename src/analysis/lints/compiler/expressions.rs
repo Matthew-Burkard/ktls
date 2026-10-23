@@ -446,17 +446,10 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     if sym.receiver.is_some() || !matches!(sym.kind, SymbolKind::Function | SymbolKind::Property | SymbolKind::Field) || matches!(sym.name.as_str(), "toString" | "hashCode" | "equals") {
         return;
     }
-    let report = |shown: &str, out: &mut Sink| {
+    let report = |shown: &str, out: &mut Sink, extra: Option<Fix>| {
         let Some(dot) = n.children_with_tokens().filter_map(|t| t.into_token()).find(|t| t.kind() == SyntaxKind::DOT) else { return };
-        out.report_fixes(
-            &UNSAFE_CALL,
-            dot.text_range(),
-            format!("Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{shown}'."),
-            vec![
-                Fix::replace("Replace with safe (?.) call", dot.text_range(), "?."),
-                Fix::replace("Add non-null asserted (!!.) call", dot.text_range(), "!!."),
-            ],
-        );
+        let fixes = vec![Fix::replace("Replace with safe (?.) call", dot.text_range(), "?."), Fix::replace("Add non-null asserted (!!.) call", dot.text_range(), "!!.")];
+        out.report_fixes(&UNSAFE_CALL, dot.text_range(), format!("Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{shown}'."), fixes.into_iter().chain(extra).collect());
     };
     let nullable = |t: &TypeRef| matches!(t, TypeRef::Named { nullable: true, .. } | TypeRef::Function { nullable: true, .. });
     // Call results (never smart cast): `f().g()`, `m[k].g()`, `a?.f().g()`.
@@ -467,17 +460,29 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
             && nullable(&t)
             && fq_of(&t) != Some("kotlin.Nothing")
         {
-            report(&super::certain::shown(&t), out);
+            report(&super::certain::shown(&t), out, None);
         }
         return;
     }
     if recv.kind() == SyntaxKind::NAME_REF
         && let Some(ty) = nullable_local(e, &recv)
     {
-        report(&ty, out);
+        report(&ty, out, surround_with_null_check(cx, n, &recv.text().to_string()));
     } else if let Some(ty) = nullable_property_chain(e, &recv) {
-        report(&ty, out);
+        report(&ty, out, None);
     }
+}
+
+/// "Surround with null check": `if (x != null) { statement }` around the statement that
+/// contains `at` (not a declaration, whose scope would change).
+fn surround_with_null_check(cx: &Cx, at: &SyntaxNode, name: &str) -> Option<Fix> {
+    let stmt = at.ancestors().take_while(|a| !matches!(a.kind(), SyntaxKind::LAMBDA_EXPR | SyntaxKind::FUN)).find(|a| a.parent().is_some_and(|p| p.kind() == SyntaxKind::BLOCK))?;
+    if matches!(stmt.kind(), SyntaxKind::PROPERTY | SyntaxKind::FUN | SyntaxKind::CLASS | SyntaxKind::RETURN_EXPR) {
+        return None;
+    }
+    let indent = indent_at(cx.text, stmt.text_range().start());
+    let body = stmt.text().to_string().replace('\n', "\n    ");
+    Some(Fix::replace("Surround with null check", stmt.text_range(), format!("if ({name} != null) {{\n{indent}    {body}\n{indent}}}")))
 }
 
 /// The nullable type of local or parameter `nr` at this use, when no earlier use (or one
@@ -1113,7 +1118,10 @@ pub(super) fn type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: 
             return Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: inferred type is '{actual_shown}' but '{shown}' was expected."), actual_shown, Some(fix)));
         }
         let to = if nullable && !actual_shown.ends_with('?') { format!("{actual_shown}?") } else { actual_shown.clone() };
-        let convert = actual.fq_name().and_then(|a| conversion(value, a, &fq, false));
+        // A cast when the expected type is a subtype (`any as String`: the value may already
+        // be one), else a conversion call.
+        let cast = fq_of(&actual).filter(|a| e.conforms(&TypeRef::named(&fq), a) == Some(true)).map(|_| Fix::replace(format!("Cast to '{shown}'"), value.text_range(), format!("{} as {shown}", operand(value))));
+        let convert = cast.or_else(|| actual.fq_name().and_then(|a| conversion(value, a, &fq, false)));
         return Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual_shown}'."), to, convert));
     };
     let Some(lit) = lit else {

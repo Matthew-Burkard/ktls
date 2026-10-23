@@ -39,6 +39,14 @@ fn main() {
         let h = signature::signature_help(&snap, &probe, at);
         println!("signature: {:?} {:?}", t.elapsed(), h.map(|h| h.signatures.into_iter().map(|s| s.label).collect::<Vec<_>>()));
     }
+    // Completion of a lowercase prefix (also searches library top-level functions) and
+    // after a dot (unimported extensions); the first builds the library name index.
+    for (label, needle) in [("runBl", "runBlocking"), ("runBl again", "runBlocking"), ("xs.joinTo", "joinToString")] {
+        let at = TextSize::from((text.find(needle).unwrap() + 5) as u32);
+        let t = std::time::Instant::now();
+        let c = kotlin_lsp::analysis::ide::completion::complete(&snap, &probe, at, kotlin_lsp::analysis::ide::completion::Options { snippets: true });
+        println!("complete {label}: {:?} {} items", t.elapsed(), c.map_or(0, |c| c.items.len()));
+    }
     for fq in std::env::args().skip(2) {
         let t = std::time::Instant::now();
         let found = hierarchy::inheritors(&snap, &fq, &|| false);

@@ -723,6 +723,38 @@ pub(crate) fn deletion_range(text: &str, range: TextRange) -> TextRange {
     TextRange::new(TextSize::from((start - ws) as u32), range.end())
 }
 
+/// A value for a written type, for quick fixes that need one (`0`, `""`, `null`,
+/// `emptyList()`, …); `TODO()` when there is no obvious one.
+pub(crate) fn default_value(ty: &str) -> String {
+    let ty = ty.trim();
+    if ty.ends_with('?') {
+        return "null".into();
+    }
+    let base = ty.split('<').next().unwrap_or(ty).trim_start_matches("kotlin.").trim_start_matches("collections.");
+    match base {
+        "Int" | "Short" | "Byte" => "0",
+        "Long" => "0L",
+        "Double" => "0.0",
+        "Float" => "0f",
+        "UInt" | "UShort" | "UByte" => "0u",
+        "ULong" => "0uL",
+        "Boolean" => "false",
+        "Char" => "' '",
+        "String" | "CharSequence" => "\"\"",
+        "Unit" => "Unit",
+        "List" | "Collection" | "Iterable" => "emptyList()",
+        "MutableList" | "ArrayList" => "mutableListOf()",
+        "Set" => "emptySet()",
+        "MutableSet" | "HashSet" | "LinkedHashSet" => "mutableSetOf()",
+        "Map" => "emptyMap()",
+        "MutableMap" | "HashMap" | "LinkedHashMap" => "mutableMapOf()",
+        "Sequence" => "emptySequence()",
+        "Array" => "emptyArray()",
+        _ => "TODO()",
+    }
+    .into()
+}
+
 /// The indentation of the line containing `offset`.
 pub(crate) fn indent_at(text: &str, offset: TextSize) -> String {
     let o = usize::from(offset);

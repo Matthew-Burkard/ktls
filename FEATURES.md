@@ -135,7 +135,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P0] Scope members: locals, parameters, members, top-levels, imported symbols
 - [x] [P0] Member completion after `.` and `?.` (incl. extensions applicable to receiver type; Java getters as properties)
 - [~] [P0] Keyword completion (context-aware: `override`, `return@label`, `when` branches…) — *partial: statement, expression, top-level and class-body keyword sets; no labels*
-- [~] [P0] Auto-import: unimported classes, top-level functions, extensions (adds `import` via `additionalTextEdits`) — *partial: classes (libraries + project) and project top-level functions; not library functions/extensions*
+- [~] [P0] Auto-import: unimported classes, top-level functions, extensions (adds `import` via `additionalTextEdits`) — *partial: classes (libraries + project), top-level functions and properties (project + libraries, outside default imports), and extensions applicable to the receiver after `.` (project + libraries)*
 - [~] [P1] Smart/type-aware ranking (expected type first, recently used, same module) — *partial: locals → members → extensions → package/imports → defaults → keywords → imports needed; case-matching first; no expected type*
 - [x] [P1] Named argument completion (`param =`)
 - [x] [P1] Override/implement member completion (generates full signature + body)
@@ -323,18 +323,18 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 
 ### 6.1 Quick fixes (bound to diagnostics)
 - [~] [P0] **Import** unresolved symbol (with chooser when ambiguous; class, function, extension, operator, delegate accessor) — *partial: classes, top-level functions/properties and extensions applicable to the receiver, from the project and libraries; not operators or delegate accessors*
-- [~] [P0] **Add `?.`** / **add `!!`** / **surround with null check** / **add elvis** for unsafe calls — *partial: `?.` and `!!`*
+- [~] [P0] **Add `?.`** / **add `!!`** / **surround with null check** / **add elvis** for unsafe calls — *partial: `?.`, `!!` (also for nullable type mismatches), surround the statement with a null check (locals)*
 - [~] [P0] **Change type** of variable/parameter/return to match — *partial: for type mismatches and `null` (`T?`); parameter type of the called project function (also in another file); **Convert to 'T'** (`.toInt()`, `.toString()`, `.code`, `"1"`, `1.0`)*
-- [ ] [P0] **Add explicit cast** (`as T`) / **change to safe cast** (`as?`)
-- [~] [P0] **Implement members** / **make class abstract** — *partial: implement members*
+- [~] [P0] **Add explicit cast** (`as T`) / **change to safe cast** (`as?`) — *partial: "Cast to 'T'" for type mismatches where the expected type is a subtype*
+- [x] [P0] **Implement members** / **make class abstract**
 - [~] [P0] **Add `override` modifier**, **remove `override`**, **make super member `open`** — *partial: add/remove `override`, make a project super member `open` (also in another file)*
 - [x] [P0] **Add missing `when` branches** / **add `else` branch**
 - [~] [P0] **Remove unused** variable/parameter/import/declaration — *partial: variable, import, private/local declaration*
 - [x] [P0] **Change `val` to `var`**
-- [ ] [P0] **Initialize property** / **make `lateinit`** / **make `abstract`** / **move to constructor**
+- [~] [P0] **Initialize property** / **make `lateinit`** / **make `abstract`** / **move to constructor** — *partial: initializer with a default value for the written type, `lateinit`, `abstract` (in abstract/sealed classes)*
 - [~] [P0] **Add `suspend` modifier** to containing function / wrap in `runBlocking`/`launch` — *partial: add `suspend`*
 - [~] [P0] **Create from usage**: function, extension function, property, local variable, parameter, class, interface, enum, object, enum entry, constructor, type parameter, annotation, `component`/operator functions — *partial: function (top-level or member, incl. in other files), extension function/property, property, local variable, parameter, class; types from arguments and the expected type*
-- [ ] [P0] **Add missing return** / **add `return` with expression**
+- [x] [P0] **Add missing return** / **add `return` with expression** (a default value for the return type)
 - [~] [P1] **Add/remove argument**, **add named argument**, **change function signature** to match call, **add parameter to function** — *partial: add parameter(s) to a project function from extra positional or unknown named arguments (typed from the arguments, also in another file)*
 - [ ] [P1] **Add type arguments**, **specify type explicitly**
 - [ ] [P1] **Make visible** (change visibility of referenced declaration), **make `public`/`internal`/`private`/`protected`**
@@ -517,7 +517,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 ## 11. Non-functional Requirements
 
 - [ ] [P0] Responsiveness: completion < 100 ms p95, diagnostics on keystroke < 300 ms for open files
-- [ ] [P0] Never crash on malformed input; isolate panics per request
+- [x] [P0] Never crash on malformed input; isolate panics per request
 - [ ] [P1] Bounded memory with LRU eviction of analysis results; lazy library indexing
 - [ ] [P1] Parallel analysis across files/modules; work-stealing scheduler with priority for the active file
 - [ ] [P1] Deterministic results independent of request order (salsa-style incremental queries)

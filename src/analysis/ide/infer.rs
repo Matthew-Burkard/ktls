@@ -796,6 +796,11 @@ impl<'s> Engine<'s> {
         self.applicable_extensions(candidates, t)
     }
 
+    /// The extensions among `candidates` that apply to a receiver of type `t`.
+    pub fn applicable(&self, candidates: Vec<Symbol>, t: &TypeRef) -> Vec<(Symbol, Subst)> {
+        self.applicable_extensions(candidates.into_iter().filter(|s| s.receiver.is_some()).map(|s| (s, Subst::new())).collect(), t)
+    }
+
     /// Keep extension candidates whose receiver accepts `t`, most specific first.
     fn applicable_extensions(&self, candidates: Vec<(Symbol, Subst)>, t: &TypeRef) -> Vec<(Symbol, Subst)> {
         if candidates.is_empty() {

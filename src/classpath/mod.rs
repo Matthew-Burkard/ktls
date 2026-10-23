@@ -158,6 +158,8 @@ pub struct ClasspathIndex {
     /// Kotlin package → facade classes declared in a different JVM package
     /// (`@file:JvmPackageName`, e.g. kotlin-test's `kotlin.test` annotations).
     relocated_facades: HashMap<String, Vec<Box<str>>>,
+    /// Top-level callable name → packages declaring it (built on first use).
+    callable_index: OnceLock<HashMap<String, Vec<Box<str>>>>,
     pub problems: Vec<String>,
 }
 
@@ -229,6 +231,7 @@ impl ClasspathIndex {
             package_cache: RwLock::new(HashMap::new()),
             package_names_cache: RwLock::new(HashMap::new()),
             relocated_facades: HashMap::new(),
+            callable_index: OnceLock::new(),
             problems,
         };
         idx.load_builtins();
@@ -495,6 +498,35 @@ impl ClasspathIndex {
 
     /// FQ names of top-level classes whose simple name satisfies `keep` (for auto-import).
     /// Kotlin file facades (`FooKt`) are skipped.
+    /// Kotlin top-level functions and properties (of any package) whose name passes `keep`.
+    pub fn top_level_callables_where(&self, keep: &dyn Fn(&str) -> bool) -> Vec<Symbol> {
+        let index = self.callable_index.get_or_init(|| {
+            // Packages with Kotlin file facades (`FooKt`, multi-file parts) or built-ins.
+            let mut pkgs: Vec<&str> = self.packages.iter().filter(|(_, cs)| cs.iter().any(|c| c.ends_with("Kt") || c.contains("Kt__"))).map(|(p, _)| &**p).collect();
+            pkgs.extend(self.relocated_facades.keys().map(String::as_str));
+            pkgs.extend(self.builtin_members.keys().map(String::as_str));
+            pkgs.sort_unstable();
+            pkgs.dedup();
+            let mut map: HashMap<String, Vec<Box<str>>> = HashMap::new();
+            for pkg in pkgs {
+                for m in self.package_members(pkg).iter() {
+                    let v = map.entry(m.name.clone()).or_default();
+                    if v.last().is_none_or(|l| &**l != pkg) {
+                        v.push(pkg.into());
+                    }
+                }
+            }
+            map
+        });
+        let mut out = Vec::new();
+        for (name, pkgs) in index.iter().filter(|(n, _)| keep(n)) {
+            for pkg in pkgs {
+                out.extend(self.package_members_named(pkg, name));
+            }
+        }
+        out
+    }
+
     pub fn top_level_classes_where(&self, keep: &dyn Fn(&str) -> bool) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for (pkg, classes) in &self.packages {

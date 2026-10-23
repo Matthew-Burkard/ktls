@@ -468,6 +468,9 @@ impl Collector<'_, '_> {
                 for (m, s) in self.e.all_extensions(&at, &t) {
                     self.symbol(&m, &s, 2, true, call);
                 }
+                if call {
+                    self.unimported_extensions(&t);
+                }
             }
             Qualifier::Static(c) => {
                 if callable_ref {
@@ -938,9 +941,18 @@ impl Collector<'_, '_> {
             }
         } else if callables && prefix.chars().count() >= 2 {
             let in_scope: HashSet<String> = self.items.iter().map(|i| i.label.clone()).collect();
-            let syms = self.e.res.source_top_level_where(&|n| matches(&prefix, n) && !in_scope.contains(n));
+            let mut syms: Vec<Symbol> = self.e.res.source_top_level_where(&|n| matches(&prefix, n) && !in_scope.contains(n)).into_iter().filter(|s| matches!(&s.origin, Origin::Source { .. })).collect();
+            // Library functions and properties too (not of default-imported packages).
+            syms.extend(self.e.res.classpath.top_level_callables_where(&|n| matches(&prefix, n) && !in_scope.contains(n)).into_iter().filter(|s| {
+                let pkg = s.fq_name.rsplit_once('.').map_or("", |(p, _)| p);
+                !crate::analysis::resolve::KOTLIN_DEFAULT_IMPORTS.contains(&pkg) && importable(&s.fq_name)
+            }));
+            if syms.len() > MAX_AUTO_IMPORTS {
+                self.truncated = true;
+            }
+            let mut seen = HashSet::new();
             for s in syms.into_iter().filter(|s| s.receiver.is_none()).take(MAX_AUTO_IMPORTS) {
-                if !matches!(&s.origin, Origin::Source { .. }) || s.visibility == crate::symbols::Visibility::Private {
+                if s.visibility != crate::symbols::Visibility::Public && s.visibility != crate::symbols::Visibility::Internal || !seen.insert(s.fq_name.clone()) {
                     continue;
                 }
                 let fq = s.fq_name.clone();
@@ -951,6 +963,39 @@ impl Collector<'_, '_> {
                     item.additional = vec![import_edit(self.file, &fq)];
                     item.description = Some(package_of(&fq));
                 }
+            }
+        }
+    }
+}
+
+impl Collector<'_, '_> {
+    /// Extensions of libraries and other packages applicable to a receiver of type `t`
+    /// that need an import (`flow.collectLatest`, `"…".toInstant()`).
+    fn unimported_extensions(&mut self, t: &TypeRef) {
+        if self.prefix.is_empty() {
+            return;
+        }
+        let prefix = self.prefix.clone();
+        let in_scope: HashSet<String> = self.items.iter().map(|i| i.label.split('(').next().unwrap_or(&i.label).trim().to_string()).collect();
+        let keep = |n: &str| matches(&prefix, n) && !in_scope.contains(n);
+        let mut cands: Vec<Symbol> = self.e.res.classpath.top_level_callables_where(&keep);
+        cands.extend(self.e.res.source_top_level_where(&keep).into_iter().filter(|s| matches!(&s.origin, Origin::Source { .. })));
+        cands.retain(|s| {
+            let pkg = s.fq_name.rsplit_once('.').map_or("", |(p, _)| p);
+            s.receiver.is_some() && s.visibility != crate::symbols::Visibility::Private && importable(&s.fq_name) && !crate::analysis::resolve::KOTLIN_DEFAULT_IMPORTS.contains(&pkg)
+        });
+        let applicable = self.e.applicable(cands, t);
+        let mut seen = HashSet::new();
+        for (s, subst) in applicable.into_iter().take(MAX_AUTO_IMPORTS) {
+            if !seen.insert(s.fq_name.clone()) {
+                continue;
+            }
+            let before = self.items.len();
+            self.symbol(&s, &subst, 6, true, true);
+            if self.items.len() > before {
+                let item = self.items.last_mut().unwrap();
+                item.additional = vec![import_edit(self.file, &s.fq_name)];
+                item.description = Some(package_of(&s.fq_name));
             }
         }
     }

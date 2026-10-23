@@ -1421,3 +1421,20 @@ fn formatting() {
     assert_eq!(fmt(messy), want);
     assert_eq!(fmt(want), want);
 }
+
+#[test]
+fn completes_unimported_library_functions_and_extensions() {
+    let Some(mut fx) = fixture() else { return };
+    let src = |body: &str| format!("{HEADER}fun run(d: Double) {{\n{body}\n}}\n");
+    // A top-level function of a package that is not imported by default.
+    let c = fx.complete(&src("    val r = sqr$0"));
+    let sqrt = c.items.iter().find(|i| i.label == "sqrt" && i.description.as_deref() == Some("kotlin.math")).expect("sqrt");
+    assert_eq!(sqrt.additional.len(), 1);
+    assert!(sqrt.additional[0].1.contains("import kotlin.math.sqrt"), "{:?}", sqrt.additional);
+    // An extension property of the receiver's type from such a package.
+    let c = fx.complete(&src("    d.absol$0"));
+    let abs = c.items.iter().find(|i| i.label == "absoluteValue").expect("absoluteValue");
+    assert!(abs.additional[0].1.contains("import kotlin.math.absoluteValue"), "{:?}", abs.additional);
+    // Not for receivers it does not apply to.
+    assert!(!fx.labels(&format!("{HEADER}fun run(u: User) {{\n    u.absol$0\n}}\n")).iter().any(|l| l == "absoluteValue"));
+}

@@ -235,9 +235,26 @@ fn property(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
     if exempt {
         return;
     }
+    // Fixes: an initializer for the written type, `lateinit`, `abstract` (in abstract classes).
+    let keyword = ast::token(p, SyntaxKind::VAR_KW).or_else(|| ast::token(p, SyntaxKind::VAL_KW));
+    let initialization_fixes = |abstract_owner: bool| -> Vec<Fix> {
+        let mut fixes = Vec::new();
+        if let Some(ty) = decl.type_ref() {
+            let text = ty.syntax().text().to_string();
+            fixes.push(Fix::replace("Add initializer", TextRange::empty(ty.syntax().text_range().end()), format!(" = {}", default_value(&text))));
+            let lateinit_ok = decl.is_var() && !text.trim_end().ends_with('?') && !PRIMITIVES.contains(&text.trim());
+            if let (true, Some(k)) = (lateinit_ok, &keyword) {
+                fixes.push(Fix::replace("Make 'lateinit'", TextRange::empty(k.text_range().start()), "lateinit "));
+            }
+        }
+        if let (true, Some(k)) = (abstract_owner, &keyword) {
+            fixes.push(Fix::replace(format!("Make '{n}' abstract"), TextRange::empty(k.text_range().start()), "abstract "));
+        }
+        fixes
+    };
     match &owner {
         None if p.parent().is_some_and(|x| x.kind() == SyntaxKind::KOTLIN_FILE) => {
-            out.report(&MUST_BE_INITIALIZED, name.text_range(), format!("Property '{n}' must be initialized."), None);
+            out.report_fixes(&MUST_BE_INITIALIZED, name.text_range(), format!("Property '{n}' must be initialized."), initialization_fixes(false));
         }
         Some(o) => {
             // Initialized in an `init` block, or by secondary constructors.
@@ -248,7 +265,8 @@ fn property(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
                 .any(|c| idents(&c).any(|t| ast::ident_text(&t) == ast::ident_text(&name)));
             let secondary = body.children().any(|c| c.kind() == SyntaxKind::SECONDARY_CONSTRUCTOR);
             if !assigned_in_init && !(secondary && o.kind() == SyntaxKind::CLASS) {
-                out.report(&MUST_BE_INITIALIZED_OR_BE_ABSTRACT, name.text_range(), format!("Property '{n}' must be initialized or be abstract."), None);
+                let abstract_owner = ["abstract", "sealed"].iter().any(|m| has_modifier(o, m));
+                out.report_fixes(&MUST_BE_INITIALIZED_OR_BE_ABSTRACT, name.text_range(), format!("Property '{n}' must be initialized or be abstract."), initialization_fixes(abstract_owner));
             }
         }
         None => {}
@@ -407,7 +425,15 @@ fn implementations(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
             }),
             None => Some(Fix::replace("Implement members", TextRange::empty(c.text_range().end()), format!(" {{\n{}\n{}}}", stubs.join("\n\n"), indent_at(cx.text, c.text_range().start())))),
         };
-        out.report(rule, at, format!("{what} is not abstract and does not implement abstract members: {}.", names.join(", ")), fix);
+        // "Make 'X' abstract" for classes that can be.
+        let make_abstract = (c.kind() == SyntaxKind::CLASS && !["data", "value", "inline", "enum", "annotation", "inner"].iter().any(|m| has_modifier(c, m)))
+            .then(|| ast::token(c, SyntaxKind::CLASS_KW))
+            .flatten()
+            .map(|kw| match modifiers(c).and_then(|l| l.modifiers().find(|t| t.text() == "open")) {
+                Some(open) => Fix::replace(format!("Make '{}' abstract", name_token(c).map(|t| t.text().to_string()).unwrap_or_default()), open.text_range(), "abstract"),
+                None => Fix::replace(format!("Make '{}' abstract", name_token(c).map(|t| t.text().to_string()).unwrap_or_default()), TextRange::empty(kw.text_range().start()), "abstract "),
+            });
+        out.report_fixes(rule, at, format!("{what} is not abstract and does not implement abstract members: {}.", names.join(", ")), fix.into_iter().chain(make_abstract).collect());
     }
     hidden_and_final(cx, e, c, &t, body.as_ref(), out);
     // `override` of nothing.

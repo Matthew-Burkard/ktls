@@ -1814,3 +1814,38 @@ fun narrowed(s: String?, u: User, list: MutableList<Int>?, n: Int?) {
     ];
     assert_eq!(found, expected, "{found:#?}");
 }
+
+#[test]
+fn quick_fixes_for_compiler_errors() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    // Initialization.
+    assert_eq!(fixed_with("package a\n\nvar count: Int\n", "MUST_BE_INITIALIZED", "Add initializer"), "package a\n\nvar count: Int = 0\n");
+    assert_eq!(fixed_with("package a\n\nvar name: String\n", "MUST_BE_INITIALIZED", "Make 'lateinit'"), "package a\n\nlateinit var name: String\n");
+    assert_eq!(fixed_with("package a\n\nval items: List<String>\n", "MUST_BE_INITIALIZED", "Add initializer"), "package a\n\nval items: List<String> = emptyList()\n");
+    assert_eq!(
+        fixed_with("package a\n\nabstract class A {\n    val id: Long\n}\n", "MUST_BE_INITIALIZED_OR_BE_ABSTRACT", "Make 'id' abstract"),
+        "package a\n\nabstract class A {\n    abstract val id: Long\n}\n"
+    );
+    // Missing return.
+    assert_eq!(
+        fixed_with("package a\n\nfun f(x: Int): String {\n    println(x)\n}\n", "NO_RETURN_IN_FUNCTION_WITH_BLOCK_BODY", "Add 'return' statement"),
+        "package a\n\nfun f(x: Int): String {\n    println(x)\n    return \"\"\n}\n"
+    );
+    // Abstract class instead of implementing.
+    assert_eq!(
+        fixed_with("package a\n\ninterface Shape { fun area(): Double }\nopen class Square : Shape\n", "ABSTRACT_MEMBER_NOT_IMPLEMENTED", "Make 'Square' abstract"),
+        "package a\n\ninterface Shape { fun area(): Double }\nabstract class Square : Shape\n"
+    );
+    // Downcast.
+    assert_eq!(
+        fixed_with("package a\n\nfun takes(s: String) {}\nfun f(any: Any) {\n    takes(any)\n}\n", "ARGUMENT_TYPE_MISMATCH", "Cast to 'String'"),
+        "package a\n\nfun takes(s: String) {}\nfun f(any: Any) {\n    takes(any as String)\n}\n"
+    );
+    // Null check around the statement.
+    assert_eq!(
+        fixed_with("package a\n\nfun f(s: String?) {\n    println(s.length)\n}\n", "UNSAFE_CALL", "Surround with null check"),
+        "package a\n\nfun f(s: String?) {\n    if (s != null) {\n        println(s.length)\n    }\n}\n"
+    );
+}
