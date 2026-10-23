@@ -30,8 +30,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         if body.is_empty() {
             continue;
         }
+        let result = result_type(&root);
         let mut a = Analysis::new(e, &root);
-        if a.vars.is_empty() && !body.iter().any(|b| b.descendants().any(|d| matches!(d.kind(), SyntaxKind::RETURN_EXPR | SyntaxKind::THROW_EXPR | SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR | SyntaxKind::CALL_EXPR))) {
+        if result.is_none() && a.vars.is_empty() && !body.iter().any(|b| b.descendants().any(|d| matches!(d.kind(), SyntaxKind::RETURN_EXPR | SyntaxKind::THROW_EXPR | SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR | SyntaxKind::CALL_EXPR))) {
             continue;
         }
         let mut st = a.initial();
@@ -39,7 +40,34 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             st = a.walk(b, st);
         }
         a.finish(out);
+        // The end of a block body that must produce a value is reachable.
+        if let (Some(ty), [block]) = (result, body.as_slice())
+            && block.kind() == SyntaxKind::BLOCK
+            && !st.dead
+            && !st.unsure
+            && let Some(close) = block.last_token().filter(|t| t.kind() == SyntaxKind::R_CURLY)
+        {
+            out.report(&NO_RETURN, close.text_range(), "Missing return statement.", Some(super::flow::add_return_fix(cx, &close, &ty)));
+        }
     }
+}
+
+/// The written result type of a block-bodied function or getter that must return a value
+/// (not `Unit` or `Nothing`).
+fn result_type(root: &SyntaxNode) -> Option<String> {
+    let ty = match root.kind() {
+        SyntaxKind::FUN | SyntaxKind::ANONYMOUS_FUNCTION => {
+            let f = ast::FunDecl::cast(root.clone())?;
+            f.body_block()?;
+            f.return_type()?
+        }
+        SyntaxKind::PROPERTY_ACCESSOR if ast::token(root, SyntaxKind::IDENT).is_some_and(|t| t.text() == "get") && root.children().any(|c| c.kind() == SyntaxKind::BLOCK) => {
+            ast::PropertyDecl::cast(root.parent()?)?.type_ref()?
+        }
+        _ => return None,
+    };
+    let text = ty.syntax().text().to_string();
+    (!matches!(text.trim(), "Unit" | "kotlin.Unit" | "Nothing" | "kotlin.Nothing")).then_some(text)
 }
 
 /// Bodies analysed on their own: functions, accessors, initializers, constructors, lambdas.
@@ -84,6 +112,9 @@ impl Init {
 #[derive(Clone, Debug)]
 struct State {
     dead: bool,
+    /// Live, but possibly not: after a `when` that may be exhaustive, an unresolved call,
+    /// or a call whose lambda may return from the function.
+    unsure: bool,
     init: Vec<Init>,
     /// Assignments (indexes into `Analysis::defs`) that may still be read, per local.
     defs: Vec<BTreeSet<usize>>,
@@ -99,6 +130,7 @@ impl State {
         }
         State {
             dead: false,
+            unsure: self.unsure && other.unsure,
             init: self.init.iter().zip(&other.init).map(|(a, b)| a.join(*b)).collect(),
             defs: self.defs.iter().zip(&other.defs).map(|(a, b)| a.union(b).copied().collect()).collect(),
         }
@@ -193,7 +225,7 @@ impl<'e, 'a> Analysis<'e, 'a> {
     }
 
     fn initial(&self) -> State {
-        State { dead: false, init: vec![Init::Unassigned; self.vars.len()], defs: vec![BTreeSet::new(); self.vars.len()] }
+        State { dead: false, unsure: false, init: vec![Init::Unassigned; self.vars.len()], defs: vec![BTreeSet::new(); self.vars.len()] }
     }
 
     fn var_of(&self, n: &SyntaxNode) -> Option<usize> {
@@ -342,8 +374,14 @@ impl<'e, 'a> Analysis<'e, 'a> {
             }
             SyntaxKind::TRY_EXPR => self.try_expr(n, st),
             SyntaxKind::CALL_EXPR => {
-                let st = self.children(n, st);
-                if self.returns_nothing(n) { st.dead() } else { st }
+                let mut st = self.children(n, st);
+                if self.returns_nothing(n) {
+                    return st.dead();
+                }
+                if self.may_not_return(n) {
+                    st.unsure = true;
+                }
+                st
             }
             _ => self.children(n, st),
         }
@@ -359,6 +397,55 @@ impl<'e, 'a> Analysis<'e, 'a> {
                 Def::Symbol { sym, .. } => sym.kind == SymbolKind::Function && sym.ty.as_ref().is_some_and(|t| matches!(self.e.resolve_declared(sym, t), TypeRef::Named { ref fq, nullable: false, .. } if fq.as_deref() == Some("kotlin.Nothing"))),
                 _ => false,
             })
+    }
+
+    /// A `when` subject of a known type other than `Boolean`, enums and sealed types: no
+    /// set of branches without `else` covers it.
+    fn never_exhaustive(&self, subject: &SyntaxNode) -> bool {
+        let expr = match subject.children().find(|c| c.kind() == SyntaxKind::PROPERTY) {
+            Some(p) => initializer(&p),
+            None => subject.first_child(),
+        };
+        let Some(t) = expr.and_then(|x| self.e.type_of(&x)) else { return false };
+        let Some(fq) = crate::analysis::ide::infer::fq_of(&t) else { return false };
+        if fq == "kotlin.Boolean" {
+            return false;
+        }
+        self.e.classifier(fq).is_some_and(|c| {
+            let sym = c.symbol();
+            matches!(sym.kind, SymbolKind::Class | SymbolKind::Interface) && !sym.modifiers.has(crate::symbols::Modifiers::SEALED)
+        })
+    }
+
+    /// A call after which the path may end without this analysis seeing it: an unresolved
+    /// callee (it may return `Nothing`), or lambda arguments that may `return`/`throw` out
+    /// of the function, or make a generic result `Nothing` (`run { return x }`).
+    fn may_not_return(&self, call: &SyntaxNode) -> bool {
+        let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return false };
+        let defs = self.e.resolve_name_ref(&callee);
+        if defs.is_empty() {
+            return true;
+        }
+        let lambdas: Vec<SyntaxNode> = call
+            .children()
+            .filter(|c| matches!(c.kind(), SyntaxKind::LAMBDA_ARGUMENT | SyntaxKind::VALUE_ARGUMENT_LIST))
+            .flat_map(|c| c.descendants().filter(|d| d.kind() == SyntaxKind::LAMBDA_EXPR).collect::<Vec<_>>())
+            .collect();
+        if lambdas.is_empty() {
+            return false;
+        }
+        let generic_result = defs.iter().any(|d| match d {
+            Def::Symbol { sym, .. } => sym.ty.as_ref().is_none_or(|t| matches!(self.e.resolve_declared(sym, t), TypeRef::TypeParam { .. })),
+            _ => true,
+        });
+        let leaves = lambdas.iter().any(|l| {
+            l.descendants().any(|d| match d.kind() {
+                SyntaxKind::RETURN_EXPR => !d.children().any(|c| c.kind() == SyntaxKind::LABEL_QUALIFIER) && !d.ancestors().take_while(|a| a != l).any(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::ANONYMOUS_FUNCTION)),
+                SyntaxKind::THROW_EXPR => true,
+                _ => false,
+            })
+        });
+        generic_result || leaves
     }
 
     fn children(&mut self, n: &SyntaxNode, mut st: State) -> State {
@@ -441,9 +528,20 @@ impl<'e, 'a> Analysis<'e, 'a> {
             });
         }
         // Without `else` the `when` may still be exhaustive (enums, sealed classes): locals
-        // left unassigned by falling through are unknown.
+        // left unassigned by falling through are unknown, and so is whether the path goes on.
+        let covered = match n.children().find(|c| c.kind() == SyntaxKind::WHEN_SUBJECT) {
+            Some(subject) if !exhaustive => super::when::missing_branches(self.e, n, &subject, None).map(|m| m.is_empty()).or_else(|| self.never_exhaustive(&subject).then_some(false)),
+            _ => Some(exhaustive),
+        };
+        if covered == Some(true)
+            && !exhaustive
+            && let Some(r) = result
+        {
+            return r;
+        }
         if !exhaustive {
             let mut fall = st.clone();
+            fall.unsure |= covered.is_none();
             for i in fall.init.iter_mut() {
                 if *i == Init::Unassigned {
                     *i = Init::Unknown;

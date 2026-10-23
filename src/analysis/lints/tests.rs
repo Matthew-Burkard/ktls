@@ -2154,3 +2154,37 @@ class Consumer<in T> {
     let src = "inline fun f(block: () -> Unit) {\n    val b = block\n    println(b)\n}\n";
     assert_eq!(fixed(src, "USAGE_IS_NOT_INLINABLE"), "inline fun f(noinline block: () -> Unit) {\n    val b = block\n    println(b)\n}\n");
 }
+
+#[test]
+fn missing_return_on_some_paths() {
+    let fx = Fixture::new();
+    if !fx.typed() {
+        return;
+    }
+    let missing = |body: &str| {
+        let src = format!("package a\n\nenum class Color {{ RED, GREEN }}\nval lock = Any()\n\n{body}\n");
+        lint(&src).iter().filter(|f| f.starts_with("NO_RETURN")).count()
+    };
+    // Some paths fall off the end.
+    assert_eq!(missing("fun f(x: Int): Int {\n    if (x > 0) return 1\n}"), 1);
+    assert_eq!(missing("fun f(x: Int): Int {\n    if (x > 0) {\n        return 1\n    } else {\n        println(x)\n    }\n}"), 1);
+    assert_eq!(missing("fun f(x: Int): Int {\n    when (x) {\n        1 -> return 1\n        2 -> return 2\n    }\n}"), 1);
+    assert_eq!(missing("fun f(xs: List<Int>): Int {\n    for (x in xs) {\n        if (x > 1) return x\n    }\n}"), 1);
+    assert_eq!(missing("fun f(x: Int): Int {\n    try {\n        return x\n    } catch (e: Exception) {\n        println(e)\n    }\n}"), 1);
+    assert_eq!(missing("fun f(c: Color): Int {\n    when (c) {\n        Color.RED -> return 1\n    }\n}"), 1);
+    assert_eq!(missing("val g: Int\n    get() {\n        if (lock.hashCode() > 0) return 1\n    }"), 1);
+    assert_eq!(missing("fun f(xs: List<Int>): Int {\n    xs.forEach { println(it) }\n}"), 1);
+    // Every path returns, throws, or never ends.
+    assert_eq!(missing("fun f(x: Int): Int {\n    if (x > 0) return 1 else return 2\n}"), 0);
+    assert_eq!(missing("fun f(x: Int): Int {\n    when {\n        x > 0 -> return 1\n        else -> throw IllegalStateException()\n    }\n}"), 0);
+    assert_eq!(missing("fun f(c: Color): Int {\n    when (c) {\n        Color.RED -> return 1\n        Color.GREEN -> return 2\n    }\n}"), 0);
+    assert_eq!(missing("fun f(x: Int): Int {\n    while (true) {\n        if (x > 0) return x\n    }\n}"), 0);
+    assert_eq!(missing("fun f(x: Int): Int {\n    if (x > 0) return 1\n    error(\"no\")\n}"), 0);
+    assert_eq!(missing("fun f(x: Int?): Int {\n    val y = x ?: return 0\n    return y\n}"), 0);
+    assert_eq!(missing("fun f(x: Int): Int {\n    try {\n        return x\n    } finally {\n        println()\n    }\n}"), 0);
+    // Inline lambdas may return for the function (contracts are not read).
+    assert_eq!(missing("fun f(x: Int): Int {\n    synchronized(lock) {\n        return x\n    }\n}"), 0);
+    assert_eq!(missing("fun f(x: Int): Int {\n    run { return x }\n}"), 0);
+    // Unit, Nothing, and expression bodies need no return.
+    assert_eq!(missing("fun f(x: Int): Unit {\n    println(x)\n}\nfun g(): Nothing {\n    throw Exception()\n}\nfun h(x: Int): Int = x"), 0);
+}
