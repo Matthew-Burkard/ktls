@@ -2861,3 +2861,59 @@ fun f(n: Int) {
     has(&found, "ENUM_ENTRY_AS_TYPE: Color.RED");
     has(&found, "IS_ENUM_ENTRY: Color.RED");
 }
+
+#[test]
+fn operator_modifier_and_argument_checks() {
+    let found = compiler(
+        r#"package a
+
+class V(val x: Int) {
+    operator fun plus(o: V) = V(x + o.x)
+    operator fun minus() = this
+    operator fun frobnicate() = 1
+    operator fun inc() {}
+    operator fun compareTo(o: V): Boolean = true
+    operator fun plusAssign(o: V): V = this
+    operator fun component1() = x
+    operator fun get(i: Int, j: Int) = x
+    infix fun and(o: V) = this
+    infix fun or(a: V, b: V) = this
+    open inline fun bad() {}
+}
+operator fun top(v: V) = v
+infix fun lone(v: V) = v
+val outside = this
+fun f(x: Int, y: Int) = x + y
+val g = f(x = 1, x = 2)
+"#,
+    );
+    let codes = |c: &str| found.iter().filter(|f| f.starts_with(c)).count();
+    assert_eq!(codes("INAPPLICABLE_OPERATOR_MODIFIER"), 3, "minus(), frobnicate, top: {found:#?}");
+    assert_eq!(codes("INC_DEC_SHOULD_NOT_RETURN_UNIT"), 1, "{found:#?}");
+    assert_eq!(codes("COMPARE_TO_TYPE_MISMATCH"), 1, "{found:#?}");
+    assert_eq!(codes("ASSIGNMENT_OPERATOR_SHOULD_RETURN_UNIT"), 1, "{found:#?}");
+    assert_eq!(codes("INAPPLICABLE_INFIX_MODIFIER"), 2, "or, lone: {found:#?}");
+    assert_eq!(codes("DECLARATION_CANT_BE_INLINED"), 1, "{found:#?}");
+    has(&found, "NO_THIS: this");
+    has(&found, "ARGUMENT_PASSED_TWICE: x");
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+fun f(a: Int, b: Int) = a + b
+fun v(vararg xs: Int) = xs.size
+fun g(arr: IntArray, s: StringBuilder) {
+    println(f(1, a = 2))
+    println(f(*arr))
+    println(v(*arr))
+    println(java.io.File(pathname = "x"))
+}
+"#,
+    );
+    has(&found, "ARGUMENT_PASSED_TWICE: 1");
+    has(&found, "NON_VARARG_SPREAD: *");
+    assert_eq!(found.iter().filter(|f| f.starts_with("NON_VARARG_SPREAD")).count(), 1, "{found:#?}");
+    has(&found, "NAMED_ARGUMENTS_NOT_ALLOWED: pathname");
+}

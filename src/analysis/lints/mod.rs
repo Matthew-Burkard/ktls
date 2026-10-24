@@ -257,6 +257,17 @@ rules! {
     BOUND_ON_TYPE_ALIAS_PARAMETER_NOT_ALLOWED = "BOUND_ON_TYPE_ALIAS_PARAMETER_NOT_ALLOWED", Compiler, Error, false, [], "Upper bound on a type alias parameter";
     IS_ENUM_ENTRY = "IS_ENUM_ENTRY", Compiler, Error, false, [], "'is' check against an enum entry";
     ENUM_ENTRY_AS_TYPE = "ENUM_ENTRY_AS_TYPE", Compiler, Error, false, [], "Enum entry used as a type";
+    INAPPLICABLE_OPERATOR_MODIFIER = "INAPPLICABLE_OPERATOR_MODIFIER", Compiler, Error, false, [], "'operator' on a function whose name or parameters fit no operator convention";
+    INAPPLICABLE_INFIX_MODIFIER = "INAPPLICABLE_INFIX_MODIFIER", Compiler, Error, false, [], "'infix' on a function that is not a member/extension with one plain parameter";
+    INC_DEC_SHOULD_NOT_RETURN_UNIT = "INC_DEC_SHOULD_NOT_RETURN_UNIT", Compiler, Error, false, [], "'operator fun inc()'/'dec()' returning Unit";
+    COMPARE_TO_TYPE_MISMATCH = "COMPARE_TO_TYPE_MISMATCH", Compiler, Error, false, [], "'operator fun compareTo' not returning Int";
+    ASSIGNMENT_OPERATOR_SHOULD_RETURN_UNIT = "ASSIGNMENT_OPERATOR_SHOULD_RETURN_UNIT", Compiler, Error, false, [], "'operator fun plusAssign' (etc.) not returning Unit";
+    DECLARATION_CANT_BE_INLINED = "DECLARATION_CANT_BE_INLINED", Compiler, Error, false, [], "'inline' on an open, abstract or interface member";
+    NO_THIS = "NO_THIS", Compiler, Error, false, [], "'this' outside any class, extension or lambda";
+    SUPER_NOT_AVAILABLE = "SUPER_NOT_AVAILABLE", Compiler, Error, false, [], "'super' outside any class";
+    ARGUMENT_PASSED_TWICE = "ARGUMENT_PASSED_TWICE", Compiler, Error, false, [], "Two arguments for one parameter";
+    NON_VARARG_SPREAD = "NON_VARARG_SPREAD", Compiler, Error, false, [], "'*' spread into a parameter that is not 'vararg'";
+    NAMED_ARGUMENTS_NOT_ALLOWED = "NAMED_ARGUMENTS_NOT_ALLOWED", Compiler, Error, false, [], "Named arguments for a Java method or constructor";
     SMARTCAST_IMPOSSIBLE = "SMARTCAST_IMPOSSIBLE", Compiler, Error, false, [], "Member of a nullable 'var', open, delegated or custom-getter property used after a null check";
     CANNOT_CHECK_FOR_ERASED = "CANNOT_CHECK_FOR_ERASED", Compiler, Error, false, [], "'is' check against type arguments erased at run time";
     TYPE_VARIANCE_CONFLICT = "TYPE_VARIANCE_CONFLICT", Compiler, Error, false, [], "'out' type parameter in an 'in' position (or the reverse) of a member";

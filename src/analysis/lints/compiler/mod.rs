@@ -18,6 +18,7 @@ mod labels;
 mod inheritance;
 mod jumps;
 mod markers;
+mod operators;
 mod references;
 mod restrictions;
 mod shapes;
@@ -58,4 +59,5 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     smartcast::check(cx, out);
     annotations::check(cx, out);
     references::check(cx, out);
+    operators::check(cx, out);
 }
