@@ -114,6 +114,7 @@ fn interpret_build(root: &Path, settings: &Settings, conventions: &HashMap<Strin
         }
         let mut it = ScriptInterpreter::new(settings, &dir, vars, conventions);
         it.ev.root_name = settings.root_name.clone();
+        it.ev.project_name = Some(if path == ":" { settings.root_name.clone() } else { path.rsplit(':').next().unwrap_or_default().to_string() });
         it.model.files.extend(files.into_iter().filter(|f| f.starts_with(root)));
         for c in &allprojects {
             it.run_stmts(c);
@@ -678,6 +679,21 @@ mod tests {
         assert_eq!(classify("jvmTestCompileOnly"), Some(("jvmTest".into(), ConfigKind::CompileOnly)));
         assert_eq!(classify("kspTest"), Some(("test".into(), ConfigKind::Processor)));
         assert_eq!(classify("detektPlugins"), None);
+    }
+
+    #[test]
+    fn project_name_conditions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write(d, "settings.gradle.kts", "rootProject.name = \"demo\"\ninclude(\":lib\", \":examples\")\n");
+        write(d, "build.gradle.kts", "subprojects {\n  if (project.name != \"examples\") {\n    kotlin { explicitApi() }\n  }\n}\n");
+        for m in ["lib", "examples"] {
+            write(d, &format!("{m}/build.gradle.kts"), "plugins { kotlin(\"jvm\") }\n");
+            std::fs::create_dir_all(d.join(m).join("src/main/kotlin")).unwrap();
+        }
+        let project = load_static(d, &LoadOptions::isolated(d.join("cache")));
+        let explicit: Vec<(&str, bool)> = project.modules.iter().map(|m| (m.name.as_str(), m.kotlin.explicit_api)).collect();
+        assert_eq!(explicit, vec![(":lib", true), (":examples", false)]);
     }
 
     #[test]

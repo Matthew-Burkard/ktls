@@ -315,6 +315,8 @@ pub struct Evaluator {
     pub group: Option<String>,
     pub version: Option<String>,
     pub root_name: String,
+    /// The name of the project being configured (`project.name`), when known.
+    pub project_name: Option<String>,
 }
 
 impl Evaluator {
@@ -327,6 +329,24 @@ impl Evaluator {
             group: None,
             version: None,
             root_name: String::new(),
+            project_name: None,
+        }
+    }
+
+    /// `project.name == "x"` / `name != "x"`: the value when the project name is known.
+    pub fn condition(&self, cond: &Expr) -> Option<bool> {
+        let Expr::Infix(l, op, r) = cond else { return None };
+        let name = self.project_name.as_deref()?;
+        let is_name = |e: &Expr| matches!(e.path().as_deref(), Some("project.name" | "name" | "it.name"));
+        let literal = |e: &Expr| match e {
+            Expr::Str(_) => self.string(e),
+            _ => None,
+        };
+        let other = if is_name(l) { literal(r)? } else if is_name(r) { literal(l)? } else { return None };
+        match op.as_str() {
+            "==" => Some(other == name),
+            "!=" => Some(other != name),
+            _ => None,
         }
     }
 
@@ -671,10 +691,15 @@ impl<'s> ScriptInterpreter<'s> {
                 }
             }
             Stmt::Assign { target, value, .. } => self.assign(target, value, ctx),
-            Stmt::If { then, otherwise, .. } => {
-                self.stmts(then, ctx);
-                self.stmts(otherwise, ctx);
-            }
+            Stmt::If { cond, then, otherwise } => match self.ev.condition(cond) {
+                Some(true) => self.stmts(then, ctx),
+                Some(false) => self.stmts(otherwise, ctx),
+                // Unknown conditions: both branches (what they configure may apply).
+                None => {
+                    self.stmts(then, ctx);
+                    self.stmts(otherwise, ctx);
+                }
+            },
             Stmt::Expr(e) => self.expr(e, ctx),
         }
     }
