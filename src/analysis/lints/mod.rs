@@ -352,6 +352,8 @@ rules! {
     REDUNDANT_RUN_CATCHING = "RedundantRunCatching", Redundancy, Warning, true, [], "'runCatching { … }.getOrThrow()' instead of 'run { … }'";
     REDUNDANT_NULLABLE_RETURN_TYPE = "RedundantNullableReturnType", Redundancy, Warning, true, [], "Nullable return type of a function that never returns null";
     SIMPLE_REDUNDANT_LET = "SimpleRedundantLet", Redundancy, Warning, true, [], "'x.let { it.f() }' instead of 'x.f()'";
+    REDUNDANT_VALUE_ARGUMENT = "RedundantValueArgument", Redundancy, Warning, true, [], "Argument equal to the parameter's default value";
+    REDUNDANT_LAMBDA = "RedundantLambdaOrAnonymousFunction", Redundancy, Warning, false, [], "Lambda called right where it is written ('{ … }()')";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
@@ -389,6 +391,12 @@ rules! {
     LIFT_RETURN_OR_ASSIGNMENT = "LiftReturnOrAssignment", Style, Info, false, [], "'return' or assignment in every branch of an 'if'/'when'";
     INCOMPLETE_DESTRUCTURING = "IncompleteDestructuring", Style, Info, false, [], "Destructuring that leaves out trailing data class components";
     MOVE_DECLARATION_INTO_WHEN = "MoveVariableDeclarationIntoWhen", Style, Info, false, [], "Local used only as the subject of the next 'when'";
+    OBJECT_TYPE_CHECK = "RedundantObjectTypeCheck", Style, Info, false, [], "'x is SomeObject' instead of 'x == SomeObject'";
+    ARRAY_OF_IN_ANNOTATION = "ReplaceArrayOfWithLiteral", Style, Info, false, [], "'arrayOf(…)' in an annotation argument instead of '[…]'";
+    JAVA_COLLECTIONS_STATIC = "JavaCollectionsStaticMethod", Style, Info, false, [], "'Collections.sort(list)' instead of 'list.sort()'";
+    JAVA_MAP_FOR_EACH = "JavaMapForEach", Style, Info, false, [], "Java 'Map.forEach { k, v -> }' instead of 'forEach { (k, v) -> }'";
+    FILE_NAME_MATCHES_CLASS = "FileNameMatchesClass", Style, Info, false, [], "File with one top-level class named differently";
+    NOT_NULL_ASSERTION_TO_ELVIS_RETURN = "ReplaceNotNullAssertionWithElvisReturn", Style, Info, false, [], "'val x = y!!' in a function that could 'return' instead";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";

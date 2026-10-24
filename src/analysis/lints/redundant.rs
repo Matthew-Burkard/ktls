@@ -26,7 +26,14 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                         redundant_override(cx, &n, out);
                         nullable_return_type(cx, &n, out);
                     }
-                    SyntaxKind::CALL_EXPR if n.first_child().is_some_and(|c| matches!(c.text().to_string().as_str(), "requireNotNull" | "checkNotNull")) => require_not_null(cx, &n, out),
+                    SyntaxKind::CALL_EXPR => {
+                        lambda_parens(&n, out);
+                        value_argument(cx, &n, out);
+                        invoked_lambda(cx, &n, out);
+                        if n.first_child().is_some_and(|c| matches!(c.text().to_string().as_str(), "requireNotNull" | "checkNotNull")) {
+                            require_not_null(cx, &n, out);
+                        }
+                    }
                     SyntaxKind::RETURN_EXPR => elvis_return_null(cx, &n, out),
                     SyntaxKind::IF_EXPR => redundant_if(&n, out),
                     SyntaxKind::CLASS_BODY => empty_class_body(&n, out),
@@ -35,7 +42,6 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                         constructor_keyword(&n, out);
                     }
                     SyntaxKind::ENUM_ENTRY => enum_entry_parens(&n, out),
-                    SyntaxKind::CALL_EXPR => lambda_parens(&n, out),
                     SyntaxKind::PROPERTY_ACCESSOR => accessor(&n, out),
                     SyntaxKind::CLASS_INITIALIZER => init_block(cx, &n, out),
                     SyntaxKind::NAME_REF if n.text() == "Unit" => unit_expression(cx, &n, out),
@@ -1076,4 +1082,73 @@ fn redundant_let(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     }
     let dot = if n.kind() == SyntaxKind::SAFE_QUALIFIED_EXPR || body.kind() == SyntaxKind::SAFE_QUALIFIED_EXPR { "?." } else { "." };
     out.report(&SIMPLE_REDUNDANT_LET, callee.text_range(), "Redundant 'let' call could be removed", Some(Fix::replace("Remove 'let' call", n.text_range(), format!("{}{dot}{}", recv.text(), sel.text()))));
+}
+
+/// `f(x, flag = false)` where `flag` defaults to `false` (project functions, simple
+/// default values).
+fn value_argument(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    use crate::analysis::ide::infer::Def;
+    if !cx.on(&REDUNDANT_VALUE_ARGUMENT) {
+        return;
+    }
+    let Some(list) = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) else { return };
+    let args: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT).collect();
+    if args.is_empty() {
+        return;
+    }
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let Some(e) = cx.engine() else { return };
+    let Some(cands) = e.call_candidates(&callee) else { return };
+    let [(sym, _)] = cands.as_slice() else { return };
+    let Some(Def::Symbol { .. }) = e.resolve_name_ref(&callee).first() else { return };
+    let crate::symbols::Origin::Source { file, range, .. } = &sym.origin else { return };
+    let root = if file == cx.path { cx.root.clone() } else { match cx.snap.file(file) { Some(f) => f.parse().syntax(), None => return } };
+    let Some(decl) = root.covering_element(*range).ancestors().find(|a| a.text_range() == *range && matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::PRIMARY_CONSTRUCTOR | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::CLASS)) else { return };
+    let params: Vec<SyntaxNode> = decl.descendants().filter(|d| d.kind() == SyntaxKind::VALUE_PARAMETER && d.parent().is_some_and(|l| l.kind() == SyntaxKind::VALUE_PARAMETER_LIST && l.ancestors().nth(1).as_ref() == Some(&decl) || l.parent().is_some_and(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR && c.parent().as_ref() == Some(&decl)))).collect();
+    let default_of = |name: &str| -> Option<String> {
+        let p = params.iter().find(|p| name_token(p).is_some_and(|t| ast::ident_text(&t) == name))?;
+        let value = initializer(p)?;
+        // Literals and plain names only (calls may have effects or differ per call).
+        matches!(value.kind(), SyntaxKind::LITERAL | SyntaxKind::STRING_TEMPLATE | SyntaxKind::NAME_REF | SyntaxKind::DOT_QUALIFIED_EXPR).then(|| value.text().to_string())
+    };
+    let named_seen = args.iter().any(|a| a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME));
+    for (i, a) in args.iter().enumerate() {
+        let Some(value) = a.children().last() else { continue };
+        let name = match a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| ast::token(&n, SyntaxKind::IDENT)) {
+            Some(t) => ast::ident_text(&t),
+            // A positional argument can only go if no later positional one follows.
+            None if i + 1 == args.len() && !named_seen && call.children().all(|c| c.kind() != SyntaxKind::LAMBDA_ARGUMENT) => match sym.params.get(i) {
+                Some(p) if !p.vararg => p.name.clone(),
+                _ => continue,
+            },
+            None => continue,
+        };
+        let Some(default) = default_of(&name) else { continue };
+        if value.text().to_string().split_whitespace().collect::<String>() != default.split_whitespace().collect::<String>() {
+            continue;
+        }
+        // Remove the argument and one comma.
+        let range = if i > 0 { TextRange::new(args[i - 1].text_range().end(), a.text_range().end()) } else if args.len() > 1 { TextRange::new(a.text_range().start(), args[1].text_range().start()) } else { a.text_range() };
+        out.report(&REDUNDANT_VALUE_ARGUMENT, a.text_range(), "Value argument matches the default value of parameter", Some(Fix::delete("Remove redundant argument", range)));
+    }
+}
+
+/// `{ … }()` → `run { … }`.
+fn invoked_lambda(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&REDUNDANT_LAMBDA) {
+        return;
+    }
+    let Some(callee) = call.first_child() else { return };
+    let lambda = match callee.kind() {
+        SyntaxKind::LAMBDA_EXPR => callee.clone(),
+        SyntaxKind::PAREN_EXPR => match callee.children().next().filter(|c| c.kind() == SyntaxKind::LAMBDA_EXPR) {
+            Some(l) => l,
+            None => return,
+        },
+        _ => return,
+    };
+    if lambda.children().any(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) || call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_none_or(|l| l.children().next().is_some()) || call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) {
+        return;
+    }
+    out.report(&REDUNDANT_LAMBDA, call.text_range(), "Redundant lambda: it is called right away", Some(Fix::replace("Replace with 'run'", call.text_range(), format!("run {}", lambda.text()))));
 }

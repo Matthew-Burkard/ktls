@@ -217,19 +217,19 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `RedundantModalityModifier` (`final` default, `open` in interface)
 - [x] [P1] `RedundantUnitExpression`
 - [x] [P1] `RedundantIf` (`if (x) true else false`)
-- [~] [P1] `RedundantLambdaArrow`, `RedundantLambdaOrAnonymousFunction` — *partial: `RedundantLambdaArrow` (`{ -> … }`, `{ it -> … }`; as a call argument only when the call has one candidate)*
+- [~] [P1] `RedundantLambdaArrow`, `RedundantLambdaOrAnonymousFunction` — *partial: `RedundantLambdaOrAnonymousFunction` (lambdas invoked in place, fix: `run`); `RedundantLambdaArrow` (`{ -> … }`, `{ it -> … }`; as a call argument only when the call has one candidate)*
 - [x] [P1] `RedundantSuspendModifier` (final, non-override functions whose bodies call nothing that is or may be `suspend`)
 - [x] [P1] `RemoveRedundantBackticks`
 - [~] [P1] `RemoveEmptyParenthesesFromLambdaCall`, `RemoveEmptyClassBody`, `RemoveEmptyPrimaryConstructor`, `RemoveEmptySecondaryConstructorBody` — *partial: all but `RemoveEmptySecondaryConstructorBody`*
 - [x] [P1] `RemoveCurlyBracesFromTemplate` (`${x}` → `$x`), `RemoveSingleExpressionStringTemplate`
-- [~] [P1] `RedundantCompanionReference`, `RedundantObjectTypeCheck` — *partial: `RedundantCompanionReference` (`C.Companion.member`)*
+- [x] [P1] `RedundantCompanionReference`, `RedundantObjectTypeCheck` (`C.Companion.member`; `is Obj` → `== Obj`)
 - [x] [P1] `RedundantGetter` / `RedundantSetter`
 - [~] [P1] `RedundantInnerClassModifier`, `RedundantEmptyInitializerBlock` — *partial: `RedundantEmptyInitializerBlock`*
 - [x] [P1] `RedundantNullableReturnType`, `RedundantRequireNotNullCall` (final functions whose every result is certainly non-null; values of certain non-null type)
 - [~] [P1] `RedundantWith`, `RedundantAsSequence`, `RedundantSamConstructor` — *partial: `RedundantAsSequence` (iterables and arrays followed by a terminal operation)*
 - [x] [P1] `RedundantElvisReturnNull`, `RedundantRunCatching`
 - [x] [P1] `RedundantConstructorKeyword`, `RedundantEnumConstructorInvocation`
-- [ ] [P1] `RedundantLabelMigration`, `RedundantValueArgument` (arg equals default)
+- [~] [P1] `RedundantLabelMigration`, `RedundantValueArgument` (arg equals default) — *partial: `RedundantValueArgument` (project functions, literal or name defaults; named or trailing positional arguments)*
 - [~] [P1] `RedundantExplicitTypeArguments` (`listOf<Int>(1)`) — *partial: as `RemoveExplicitTypeArguments`, for calls with one candidate whose type parameters are whole parameter types bound by arguments of exactly that certain type*
 - [~] [P1] `UnusedImport`, `UnusedSymbol` (unused private/internal declarations), `UnusedReceiverParameter`, `UnusedLambdaExpressionBody`, `UnusedUnaryOperator` — *partial: `UnusedImport`, `UnusedSymbol` for private and local declarations*
 - [~] [P2] `RedundantOverride` (only calls super), `RedundantInterpolationPrefix` — *partial: `RedundantOverride` (functions forwarding their parameters; not in data/value/enum classes or with other modifiers)*
@@ -252,7 +252,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `ReplaceToStringWithStringTemplate`, `ReplaceSubstringWithTake/Drop/SubstringBefore/After` — *partial: `ReplaceSubstringWithTake`, `ReplaceSubstringWithDropLast`*
 - [x] [P1] `ReplaceManualRangeWithIndicesCalls` (`0 until list.size` → `list.indices`)
 - [x] [P1] `ReplaceWithOperatorAssignment` (`x = x + 1` → `x += 1`) — *numbers, chars and strings (other types may have `plusAssign`); names and `this.x`/`a.b` chains only*
-- [ ] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `ReplaceArrayOfWithLiteral` (annotations)
+- [~] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `ReplaceArrayOfWithLiteral` (annotations) — *partial: `ReplaceArrayOfWithLiteral`; array `==` via the compiler warning*
 - [x] [P1] `ReplacePutWithAssignment` (`map.put(k, v)` → `map[k] = v`) — *on `MutableMap`s, when the result is not used*
 - [~] [P1] `ReplaceAssociateFunction`, `ReplaceMapIndexedWithListGenerator` — *partial: `ReplaceAssociateFunction` (`associateWith`, `associateBy`)*
 - [x] [P1] `JoinDeclarationAndAssignment`, `MoveVariableDeclarationIntoWhen` (assignment / `when` right after)
@@ -260,7 +260,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `ObjectLiteralToLambda`, `ConvertLambdaToReference`, `ConvertReferenceToLambda`
 - [~] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate` — *partial: `RemoveExplicitTypeArguments`*
 - [~] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda` — *partial: `SelfAssignment` of local variables*
-- [~] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`) — *partial: `ReplaceGuardClauseWithFunctionCall` (`require`, `check`, `requireNotNull`, `checkNotNull`)*
+- [x] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`, `requireNotNull`/`checkNotNull`; `val x = y!!` in functions returning Unit or nullable)
 - [~] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals` — *partial: `ReplaceWithIgnoreCaseEquals`*
 - [~] [P1] `ReplaceStringFormatWithLiteral`, `ReplaceReadLineWithReadln`, `ReplacePrintlnWithLogging` — *partial: `ReplaceReadLineWithReadln`*
 - [~] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet` — *partial: `SimpleRedundantLet` (`x.let { it.f() }`, `x?.let { it.f() }`)*
@@ -278,14 +278,14 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `UselessCallOnCollection` / `UselessCallOnNotNull` (`orEmpty()` on non-null, `filterNotNull()` on non-null elements) — *partial: `UselessCallOnNotNull` (`orEmpty()`, `isNullOrEmpty()`, `isNullOrBlank()` on values of certain non-null type)*
 - [ ] [P1] `ReplaceManualForEachWithMap` / loop-to-stdlib suggestions (`for` loop → `map/filter/sum/any/all/count`)
 - [~] [P1] `ReplaceWithCount`, `RedundantAsSequence` — *partial: `RedundantAsSequence`; `filter { }.count()` via `SimplifiableCallChain`*
-- [ ] [P2] `JavaCollectionsStaticMethod`, `JavaMapForEach`
+- [x] [P2] `JavaCollectionsStaticMethod`, `JavaMapForEach`
 
 **Naming & formatting conventions**
 - [x] [P1] `ClassName`, `FunctionName`, `PropertyName`, `ConstPropertyName`, `PrivatePropertyName`, `ObjectPropertyName`, `LocalVariableName`, `EnumEntryName`, `PackageName`, `TestFunctionName`
 - [x] [P1] `PackageDirectoryMismatch`
 - [~] [P1] `MayBeConstant`, `TrailingComma` (missing/redundant per code style) — *partial: `MayBeConstant`*
 - [ ] [P2] `KDocUnresolvedReference`, `KDocMissingDocumentation` (public API)
-- [ ] [P2] `FileNameMatchesClass` (single top-level class)
+- [x] [P2] `FileNameMatchesClass` (single top-level class)
 
 **Probable bugs**
 - [x] [P1] `EqualsOrHashCode` (one without the other)

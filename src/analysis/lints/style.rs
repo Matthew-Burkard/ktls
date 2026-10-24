@@ -5,6 +5,7 @@ use crate::analysis::ide::infer::{Def, fq_of};
 use crate::symbols::{Modifiers, SymbolKind, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
+    file_name(cx, out);
     for n in cx.root.descendants() {
         if in_error(&n) {
             continue;
@@ -27,6 +28,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 count_with_size(cx, &n, out);
                 java_static_method(cx, &n, out);
                 copy_without_names(cx, &n, out);
+                java_map_for_each(cx, &n, out);
                 substring(cx, &n, out);
                 simplifiable_call(cx, &n, out);
                 associate_function(cx, &n, out);
@@ -55,6 +57,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 move_into_when(cx, &n, out);
             }
             SyntaxKind::DESTRUCTURING_DECLARATION => incomplete_destructuring(cx, &n, out),
+            SyntaxKind::IS_EXPR => object_type_check(cx, &n, out),
+            SyntaxKind::WHEN_CONDITION if ast::token(&n, SyntaxKind::IS_KW).is_some() => object_type_check(cx, &n, out),
+            SyntaxKind::ANNOTATION => array_of_in_annotation(&n, cx, out),
+            SyntaxKind::POSTFIX_EXPR => not_null_to_elvis_return(cx, &n, out),
             _ => {}
         }
     }
@@ -732,6 +738,12 @@ const JAVA_STATICS: &[(&str, &str, Analog)] = &[
     ("java.lang.Character", "isLowerCase", Analog::Extension("isLowerCase", None)),
     ("java.lang.Character", "toUpperCase", Analog::Extension("uppercaseChar", None)),
     ("java.lang.Character", "toLowerCase", Analog::Extension("lowercaseChar", None)),
+    ("java.util.Collections", "sort", Analog::Extension("sort", None)),
+    ("java.util.Collections", "reverse", Analog::Extension("reverse", None)),
+    ("java.util.Collections", "shuffle", Analog::Extension("shuffle", None)),
+    ("java.util.Collections", "fill", Analog::Extension("fill", None)),
+    ("java.util.Collections", "max", Analog::Extension("max", None)),
+    ("java.util.Collections", "min", Analog::Extension("min", None)),
     ("java.lang.System.out", "println", Analog::Function("println", None)),
     ("java.lang.System.out", "print", Analog::Function("print", None)),
 ];
@@ -740,7 +752,7 @@ const JAVA_STATICS: &[(&str, &str, Analog)] = &[
 /// `System.out.println(x)` → `println(x)`.
 fn java_static_method(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     use crate::analysis::ide::infer::Qualifier;
-    if !cx.on(&JAVA_STATIC_METHOD) || has_comments(n) {
+    if !cx.on(&JAVA_STATIC_METHOD) && !cx.on(&JAVA_COLLECTIONS_STATIC) || has_comments(n) {
         return;
     }
     let mut parts = n.children();
@@ -766,13 +778,19 @@ fn java_static_method(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     let name = callee.text().to_string();
     let Some((_, _, analog)) = JAVA_STATICS.iter().find(|(o, m, _)| *o == owner && *m == name) else { return };
     // Overloads whose arguments Kotlin orders differently (`fill(a, from, to, v)`) are left alone.
+    let collections = owner == "java.util.Collections";
     let arity_ok = match name.as_str() {
+        _ if collections => match name.as_str() {
+            "fill" => args.len() == 2,
+            _ => args.len() == 1,
+        },
         "fill" | "equals" | "copyOf" | "pow" => args.len() == 2,
         "toString" | "deepToString" | "hashCode" => args.len() == 1,
         "sort" => matches!(args.len(), 1 | 3),
         _ => true,
     };
-    if !arity_ok {
+    let rule = if collections { &JAVA_COLLECTIONS_STATIC } else { &JAVA_STATIC_METHOD };
+    if !arity_ok || !cx.on(rule) {
         return;
     }
     let arg_text: Vec<String> = args.iter().map(|a| a.text().to_string()).collect();
@@ -799,7 +817,7 @@ fn java_static_method(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         }
     };
     edits.push(Edit { range: n.text_range(), text: replacement });
-    out.report(&JAVA_STATIC_METHOD, n.text_range(), format!("Should be replaced with Kotlin function '{shown}'"), Some(Fix::new(format!("Replace with '{shown}'"), edits)));
+    out.report(rule, n.text_range(), format!("Should be replaced with Kotlin function '{shown}'"), Some(Fix::new(format!("Replace with '{shown}'"), edits)));
 }
 
 /// `readLine()!!` → `readln()`, `readLine()` → `readlnOrNull()` (Kotlin 1.6+).
@@ -1436,4 +1454,117 @@ fn move_into_when(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
         let Some(name_tok) = name_token(decl) else { continue };
         out.report(&MOVE_DECLARATION_INTO_WHEN, name_tok.text_range(), "Variable declaration could be moved into 'when'", Some(Fix::new("Move variable declaration into 'when'", edits)));
     }
+}
+
+/// `x is Obj` (an `object`) → `x == Obj`.
+fn object_type_check(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&OBJECT_TYPE_CHECK) {
+        return;
+    }
+    let Some(tr) = n.children().find_map(ast::TypeRef::cast) else { return };
+    if tr.syntax().text().to_string().contains(['<', '?']) {
+        return;
+    }
+    let Some(op) = n.children_with_tokens().filter_map(|t| t.into_token()).chain(n.children().filter(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE).filter_map(|c| c.first_token())).find(|t| matches!(t.kind(), SyntaxKind::IS_KW | SyntaxKind::NOT_IS_KW)) else { return };
+    let Some(e) = cx.engine() else { return };
+    let t = e.resolve_syntax_type(&tr);
+    let Some(c) = fq_of(&t).and_then(|fq| e.classifier(fq)) else { return };
+    if c.symbol().kind != SymbolKind::Object {
+        return;
+    }
+    let negated = op.kind() == SyntaxKind::NOT_IS_KW;
+    let (title, edits) = if n.kind() == SyntaxKind::WHEN_CONDITION {
+        if negated {
+            return;
+        }
+        ("Replace 'is' with equality check", vec![Edit { range: TextRange::new(op.text_range().start(), tr.syntax().text_range().start()), text: String::new() }])
+    } else {
+        ("Replace 'is' with equality check", vec![Edit { range: op.text_range(), text: if negated { "!=" } else { "==" }.to_string() }])
+    };
+    out.report(&OBJECT_TYPE_CHECK, op.text_range(), "Redundant type checks for object", Some(Fix::new(title, edits)));
+}
+
+/// `@Ann(names = arrayOf("a"))` → `@Ann(names = ["a"])`.
+fn array_of_in_annotation(a: &SyntaxNode, cx: &Cx, out: &mut Sink) {
+    if !cx.on(&ARRAY_OF_IN_ANNOTATION) {
+        return;
+    }
+    let Some(list) = a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) else { return };
+    for arg in list.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT) {
+        let Some(call) = arg.children().last().filter(|c| c.kind() == SyntaxKind::CALL_EXPR) else { continue };
+        let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && matches!(c.text().to_string().as_str(), "arrayOf" | "intArrayOf" | "longArrayOf" | "doubleArrayOf" | "floatArrayOf" | "booleanArrayOf" | "charArrayOf" | "shortArrayOf" | "byteArrayOf" | "emptyArray")) else { continue };
+        let Some(items) = plain_arguments(&call) else { continue };
+        if call.children().any(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) {
+            continue;
+        }
+        // Positional vararg arguments to the annotation itself stay as they are.
+        if arg.children().all(|c| c.kind() != SyntaxKind::VALUE_ARGUMENT_NAME) && list.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT).count() > 1 {
+            continue;
+        }
+        let text = format!("[{}]", items.iter().map(|i| i.text().to_string()).collect::<Vec<_>>().join(", "));
+        out.report(&ARRAY_OF_IN_ANNOTATION, callee.text_range(), format!("'{}' call should be replaced with array literal [...]", callee.text()), Some(Fix::replace("Replace with [...]", call.text_range(), text)));
+    }
+}
+
+/// `map.forEach { k, v -> }` calls Java 8's `BiConsumer` overload.
+fn java_map_for_each(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&JAVA_MAP_FOR_EACH) {
+        return;
+    }
+    let Some((recv, callee, lambda)) = lambda_only_call(n) else { return };
+    if callee.text() != "forEach" {
+        return;
+    }
+    let Some(list) = lambda.children().find(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) else { return };
+    let params: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER).collect();
+    if params.len() != 2 || params.iter().any(|p| p.children().any(|c| matches!(c.kind(), SyntaxKind::TYPE_REFERENCE | SyntaxKind::DESTRUCTURING_DECLARATION))) {
+        return;
+    }
+    if !matches!(container(cx, &recv), Some(Container::Map)) {
+        return;
+    }
+    out.report(&JAVA_MAP_FOR_EACH, callee.text_range(), "Java Map.forEach method call should be replaced with Kotlin's forEach", Some(Fix::replace("Replace with Kotlin's forEach", list.text_range(), format!("({})", list.text()))));
+}
+
+/// A file whose only top-level declaration is a class named differently.
+fn file_name(cx: &Cx, out: &mut Sink) {
+    if !cx.on(&FILE_NAME_MATCHES_CLASS) || cx.path.extension().is_some_and(|x| x == "kts") {
+        return;
+    }
+    let decls: Vec<SyntaxNode> = cx.root.children().filter(|c| matches!(c.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::TYPEALIAS)).collect();
+    let [class] = decls.as_slice() else { return };
+    if !matches!(class.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION) {
+        return;
+    }
+    let (Some(name), Some(stem)) = (name_token(class), cx.path.file_stem().and_then(|s| s.to_str())) else { return };
+    let shown = ast::ident_text(&name);
+    if shown == stem {
+        return;
+    }
+    out.report(&FILE_NAME_MATCHES_CLASS, name.text_range(), format!("File name '{stem}.kt' does not match the name of the single top-level declaration '{shown}'"), None);
+}
+
+/// `val x = y!!` in a function returning `Unit` or a nullable type → `val x = y ?: return`.
+fn not_null_to_elvis_return(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&NOT_NULL_ASSERTION_TO_ELVIS_RETURN) {
+        return;
+    }
+    let Some(op) = binary_op(n).filter(|o| o.kind() == SyntaxKind::EXCL2) else { return };
+    let Some(decl) = n.parent().filter(|p| p.kind() == SyntaxKind::PROPERTY && p.parent().is_some_and(|b| b.kind() == SyntaxKind::BLOCK)) else { return };
+    if initializer(&decl).as_ref() != Some(n) {
+        return;
+    }
+    // The nearest function (not across lambdas, where `return` would mean something else).
+    let Some(f) = n.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::CLASS_BODY)) else { return };
+    if f.kind() != SyntaxKind::FUN {
+        return;
+    }
+    let Some(d) = ast::FunDecl::cast(f) else { return };
+    let jump = match d.return_type() {
+        None if d.body_block().is_some() => "return",
+        Some(t) if t.syntax().text().to_string().trim_end().ends_with('?') => "return null",
+        Some(t) if t.syntax().text() == "Unit" => "return",
+        _ => return,
+    };
+    out.report(&NOT_NULL_ASSERTION_TO_ELVIS_RETURN, op.text_range(), format!("Replace '!!' with '?: {jump}'"), Some(Fix::replace(format!("Replace with '?: {jump}'"), op.text_range(), format!(" ?: {jump}"))));
 }

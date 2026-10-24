@@ -3037,3 +3037,44 @@ val u: () -> Unit = { 1 }
     }
     assert!(!mismatches.iter().any(|m| m.ends_with(": 1") || m.ends_with("\"one\"") || m.ends_with("\"a\"")), "{mismatches:#?}");
 }
+
+#[test]
+fn object_checks_defaults_and_java_idioms() {
+    let found = lint_at(
+        "src/main/kotlin/a/Other.kt",
+        r#"package a
+
+annotation class Names(val value: Array<String>)
+object Marker
+fun greet(name: String, loud: Boolean = false, times: Int = 1) = name
+@Names(value = arrayOf("a", "b"))
+class Widget {
+    fun f(x: Any): String? {
+        val q = greet("a", loud = false)
+        val r = greet("a", false, 2)
+        val run = { 1 }()
+        val s = (x as? String)!!
+        return if (x is Marker) q + r + run + s else null
+    }
+}
+"#,
+    );
+    assert!(!found.iter().any(|f| f.starts_with("FileNameMatchesClass")), "{found:#?}");
+    has(&lint_at("src/main/kotlin/a/Other.kt", "package a\n\nclass Widget\n"), "FileNameMatchesClass: Widget");
+    assert!(lint_at("src/main/kotlin/a/Widget.kt", "package a\n\nclass Widget\n").iter().all(|f| !f.starts_with("FileNameMatchesClass")));
+    for code in ["RedundantObjectTypeCheck: is", "ReplaceArrayOfWithLiteral: arrayOf", "RedundantValueArgument: loud = false", "RedundantLambdaOrAnonymousFunction: { 1 }()", "ReplaceNotNullAssertionWithElvisReturn: !!"] {
+        has(&found, code);
+    }
+    // `greet("a", false, 2)`: only a trailing positional argument could go, and 2 is not the default.
+    assert_eq!(found.iter().filter(|f| f.starts_with("RedundantValueArgument")).count(), 1, "{found:#?}");
+    let out = fixed("package a\n\nfun greet(name: String, loud: Boolean = false) = name\nval g = greet(\"a\", loud = false)\n", "RedundantValueArgument");
+    assert!(out.contains("greet(\"a\")"), "{out}");
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = lint("package a\n\nfun f(xs: MutableList<Int>, m: Map<String, Int>) {\n    java.util.Collections.sort(xs)\n    m.forEach { k, v -> println(k + v) }\n}\n");
+    has(&found, "JavaCollectionsStaticMethod: java.util.Collections.sort(xs)");
+    has(&found, "JavaMapForEach: forEach");
+    let out = fixed("package a\n\nfun f(m: Map<String, Int>) = m.forEach { k, v -> println(k + v) }\n", "JavaMapForEach");
+    assert!(out.contains("forEach { (k, v) -> "), "{out}");
+}
