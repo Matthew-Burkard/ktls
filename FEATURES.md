@@ -255,7 +255,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `ReplaceArrayOfWithLiteral` (annotations)
 - [x] [P1] `ReplacePutWithAssignment` (`map.put(k, v)` → `map[k] = v`) — *on `MutableMap`s, when the result is not used*
 - [~] [P1] `ReplaceAssociateFunction`, `ReplaceMapIndexedWithListGenerator` — *partial: `ReplaceAssociateFunction` (`associateWith`, `associateBy`)*
-- [~] [P1] `JoinDeclarationAndAssignment`, `MoveVariableDeclarationIntoWhen` — *partial: `JoinDeclarationAndAssignment` (assignment right after)*
+- [x] [P1] `JoinDeclarationAndAssignment`, `MoveVariableDeclarationIntoWhen` (assignment / `when` right after)
 - [x] [P1] `MayBeConstant` (`val` → `const val`)
 - [ ] [P1] `ObjectLiteralToLambda`, `ConvertLambdaToReference`, `ConvertReferenceToLambda`
 - [~] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate` — *partial: `RemoveExplicitTypeArguments`*
@@ -263,9 +263,9 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`) — *partial: `ReplaceGuardClauseWithFunctionCall` (`require`, `check`, `requireNotNull`, `checkNotNull`)*
 - [~] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals` — *partial: `ReplaceWithIgnoreCaseEquals`*
 - [~] [P1] `ReplaceStringFormatWithLiteral`, `ReplaceReadLineWithReadln`, `ReplacePrintlnWithLogging` — *partial: `ReplaceReadLineWithReadln`*
-- [ ] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet`
+- [~] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet` — *partial: `SimpleRedundantLet` (`x.let { it.f() }`, `x?.let { it.f() }`)*
 - [~] [P1] `UnnecessaryVariable`, `UnnecessaryOptInAnnotation` — *partial: `UnnecessaryVariable` (`val x = e; return x`)*
-- [ ] [P1] `KotlinConstantConditions` (always true/false)
+- [~] [P1] `KotlinConstantConditions` (always true/false) — *partial: literal conditions (not `while (true)`) and comparisons of integer literals*
 - [ ] [P1] `ConvertSecondaryConstructorToPrimary`, `ConvertTryFinallyToUseCall`
 - [~] [P1] `ControlFlowWithEmptyBody`, `EmptyRange` — *partial: `ControlFlowWithEmptyBody`*
 - [x] [P2] `DestructuringWrongName`, `UnusedDataClassCopyResult`
@@ -292,7 +292,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `RecursivePropertyAccessor` / `RecursiveEqualsCall` — *partial: `RecursivePropertyAccessor` (getters reading, setters assigning their own property; "Replace with 'field'" when there is a backing field)*
 - [x] [P1] `ArrayInDataClass` (needs custom `equals`/`hashCode`)
 - [x] [P1] `LeakingThis` (calling open member / passing `this` in constructor): init blocks, property initializers and secondary constructor bodies of open/abstract/sealed classes; not inside lambdas
-- [~] [P1] `SuspiciousVarProperty`, `SuspiciousCollectionReassignment` (`+=` on `var` read-only list) — *partial: `SuspiciousCollectionReassignment`*
+- [x] [P1] `SuspiciousVarProperty`, `SuspiciousCollectionReassignment` (`+=` on `var` read-only list)
 - [~] [P1] `ImplicitNullableNothingType`, `ImplicitThis` (configurable) — *partial: `ImplicitNullableNothingType`*
 - [x] [P1] `DelegationToVarProperty`
 - [x] [P1] `WrapUnaryOperator` (`-1.inc()` precedence)
@@ -302,18 +302,18 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `RunBlockingInSuspendFunction`, `BlockingMethodInNonBlockingContext` (`Thread.sleep` in coroutine) — *partial: `RunBlockingInSuspendFunction`*
 - [~] [P1] `FlowCollectWithoutLaunch`, `GlobalCoroutineUsage` (`GlobalScope`) — *partial: `GlobalCoroutineUsage`*
 - [~] [P1] `WarningOnMainUnusedParameterMigration`, `MainFunctionReturnUnit` — *partial: `MainFunctionReturnUnit`*
-- [ ] [P1] `OverridingDeprecatedMember`, `DeprecatedCallableAddReplaceWith`
+- [~] [P1] `OverridingDeprecatedMember`, `DeprecatedCallableAddReplaceWith` — *partial: `OverridingDeprecatedMember`*
 - [x] [P1] `ConvertNaNEquality` (`x == Double.NaN`)
 - [x] [P1] `ThrowableNotThrown` (`IllegalStateException()` without `throw`)
 - [ ] [P1] `KotlinThrowsInspection` / `@Throws` mismatch for Java callers
 - [ ] [P1] `PublicApiImplicitType` (explicit API mode: `-Xexplicit-api`)
 - [~] [P2] `SuspiciousCascadingIf`, `ProtectedInFinal`, `NonExhaustiveWhenStatementMigration` — *partial: `ProtectedInFinal`*
-- [ ] [P2] `IncompleteDestructuring`, `UnsafeCastFromDynamic` (JS)
+- [~] [P2] `IncompleteDestructuring`, `UnsafeCastFromDynamic` (JS) — *partial: `IncompleteDestructuring` (project data classes)*
 - [ ] [P2] `SerializationAnnotation`/`kotlinx.serialization` misuse, Compose-specific rules (modifier param, remember, stable)
 
 **Java interop**
 - [x] [P1] `UsePropertyAccessSyntax` (`getFoo()` → `foo`): Java getters (`isX` returning Boolean), not methods of types mapped to Kotlin or `getAndX`
-- [ ] [P1] `PlatformExtensionReceiverOfInline`, `HasPlatformType` (public API exposes platform type)
+- [~] [P1] `PlatformExtensionReceiverOfInline`, `HasPlatformType` (public API exposes platform type) — *partial: `HasPlatformType` (with nullable / non-null type fixes)*
 - [ ] [P1] `JavaIoSerializableObjectMustHaveReadResolve`
 - [~] [P2] `FunctionWithLambdaExpressionBody`, `JvmStaticWithoutCompanion` — *partial: `FunctionWithLambdaExpressionBody` (and the compiler's `JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION`)*
 

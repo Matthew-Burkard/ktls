@@ -49,7 +49,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                         companion_reference(cx, &n, out);
                         as_sequence(cx, &n, out);
                         run_catching(cx, &n, out);
+                        redundant_let(cx, &n, out);
                     }
+                    SyntaxKind::SAFE_QUALIFIED_EXPR => redundant_let(cx, &n, out),
                     SyntaxKind::PROPERTY => explicit_type(cx, &n, out),
                     SyntaxKind::USER_TYPE => type_qualifier(cx, &n, out),
                     _ => {}
@@ -1030,4 +1032,48 @@ fn nullable_return_type(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
     if ok {
         out.report(&REDUNDANT_NULLABLE_RETURN_TYPE, q.text_range(), format!("'{}' is always non-null type", ret.syntax().text()), Some(Fix::delete("Make not-nullable", q.text_range())));
     }
+}
+
+/// `x.let { it.f() }` → `x.f()`, `x?.let { it.f() }` → `x?.f()`.
+fn redundant_let(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&SIMPLE_REDUNDANT_LET) || has_comments(n) {
+        return;
+    }
+    let mut parts = n.children();
+    let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    let Some(callee) = call.first_child().filter(|c| call.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF && c.text() == "let") else { return };
+    if call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_some_and(|l| l.children().next().is_some()) {
+        return;
+    }
+    let Some(lambda) = call.children().find(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT).and_then(|a| a.children().find(|c| c.kind() == SyntaxKind::LAMBDA_EXPR)) else { return };
+    let param = match lambda.children().find(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) {
+        None => "it".to_string(),
+        Some(list) => {
+            let ps: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER).collect();
+            let [p] = ps.as_slice() else { return };
+            if p.children().any(|c| matches!(c.kind(), SyntaxKind::TYPE_REFERENCE | SyntaxKind::DESTRUCTURING_DECLARATION)) {
+                return;
+            }
+            let Some(t) = name_token(p) else { return };
+            ast::ident_text(&t)
+        }
+    };
+    let Some(body) = lambda.children().find(|c| c.kind() == SyntaxKind::BLOCK).and_then(|b| only_statement(&b)) else { return };
+    // `it.f(…)` / `it?.f(…)` (one call or property), with `it` used nowhere else.
+    if !matches!(body.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) {
+        return;
+    }
+    let mut bp = body.children();
+    let (Some(root), Some(sel), None) = (bp.next(), bp.next(), bp.next()) else { return };
+    if root.kind() != SyntaxKind::NAME_REF || root.text() != param.as_str() || sel.descendants_with_tokens().any(|t| t.as_token().is_some_and(|t| t.kind() == SyntaxKind::IDENT && t.text() == param)) {
+        return;
+    }
+    if sel.descendants().any(|d| d.kind() == SyntaxKind::LAMBDA_EXPR) && param == "it" {
+        return;
+    }
+    if !stdlib(cx, &callee) {
+        return;
+    }
+    let dot = if n.kind() == SyntaxKind::SAFE_QUALIFIED_EXPR || body.kind() == SyntaxKind::SAFE_QUALIFIED_EXPR { "?." } else { "." };
+    out.report(&SIMPLE_REDUNDANT_LET, callee.text_range(), "Redundant 'let' call could be removed", Some(Fix::replace("Remove 'let' call", n.text_range(), format!("{}{dot}{}", recv.text(), sel.text()))));
 }

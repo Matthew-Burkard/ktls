@@ -52,7 +52,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::BLOCK => {
                 fold_initializer(cx, &n, out);
                 join_declaration(cx, &n, out);
+                move_into_when(cx, &n, out);
             }
+            SyntaxKind::DESTRUCTURING_DECLARATION => incomplete_destructuring(cx, &n, out),
             _ => {}
         }
     }
@@ -1376,4 +1378,62 @@ fn lift_return_or_assignment(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
 
 fn kw_text(n: &SyntaxNode) -> String {
     n.first_token().map(|t| t.text().to_string()).unwrap_or_default()
+}
+
+/// `val (a) = Triple(…)`-style declarations with fewer names than data class components.
+fn incomplete_destructuring(cx: &Cx, d: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&INCOMPLETE_DESTRUCTURING) {
+        return;
+    }
+    let Some(decl) = d.parent().filter(|p| p.kind() == SyntaxKind::PROPERTY) else { return };
+    let Some(value) = initializer(&decl) else { return };
+    let Some(e) = cx.engine() else { return };
+    let Some(t) = crate::analysis::lints::certain_type(e, &value, true) else { return };
+    let Some(fq) = fq_of(&t) else { return };
+    if !e.classifier(fq).is_some_and(|c| c.symbol().modifiers.has(Modifiers::DATA)) {
+        return;
+    }
+    let Some(ctor) = e.constructors(fq).into_iter().find(|k| matches!(&k.origin, crate::symbols::Origin::Source { .. })) else { return };
+    let entries: Vec<SyntaxNode> = d.children().filter(|c| c.kind() == SyntaxKind::DESTRUCTURING_ENTRY).collect();
+    if entries.len() >= ctor.params.len() || entries.is_empty() {
+        return;
+    }
+    let missing: Vec<String> = ctor.params[entries.len()..].iter().map(|p| p.name.clone()).collect();
+    let Some(close) = d.last_token().filter(|t| t.kind() == SyntaxKind::R_PAREN) else { return };
+    let fix = Fix::replace("Add missing variables to destructuring declaration", TextRange::empty(close.text_range().start()), format!(", {}", missing.join(", ")));
+    out.report(&INCOMPLETE_DESTRUCTURING, d.text_range(), format!("Incomplete destructuring declaration: '{}' left out", missing.join("', '")), Some(fix));
+}
+
+/// `val x = f()` then `when (x) { … }` with `x` used nowhere else → `when (val x = f())`.
+fn move_into_when(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&MOVE_DECLARATION_INTO_WHEN) {
+        return;
+    }
+    let stmts: Vec<SyntaxNode> = block.children().collect();
+    for (i, w) in stmts.windows(2).enumerate() {
+        let (decl, when) = (&w[0], &w[1]);
+        if decl.kind() != SyntaxKind::PROPERTY || when.kind() != SyntaxKind::WHEN_EXPR || has_comments(decl) || modifiers(decl).is_some() {
+            continue;
+        }
+        let Some(p) = ast::PropertyDecl::cast(decl.clone()) else { continue };
+        if p.is_var() || p.is_destructuring() || p.has_delegate() || p.type_ref().is_some() {
+            continue;
+        }
+        let (Some(name), Some(init)) = (name_token(decl).map(|t| ast::ident_text(&t)), initializer(decl)) else { continue };
+        let Some(subject) = when.children().find(|c| c.kind() == SyntaxKind::WHEN_SUBJECT).and_then(|s| s.children().next()) else { continue };
+        if subject.kind() != SyntaxKind::NAME_REF || subject.text() != name.as_str() {
+            continue;
+        }
+        // Only the subject may use it: not the branches, nor anything after the `when`.
+        let used = |n: &SyntaxNode| n.descendants().any(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == name.as_str());
+        if when.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY).any(|e| used(&e)) || stmts[i + 2..].iter().any(used) {
+            continue;
+        }
+        let edits = vec![
+            Edit { range: TextRange::new(decl.text_range().start(), when.text_range().start()), text: String::new() },
+            Edit { range: subject.text_range(), text: format!("val {name} = {}", init.text()) },
+        ];
+        let Some(name_tok) = name_token(decl) else { continue };
+        out.report(&MOVE_DECLARATION_INTO_WHEN, name_tok.text_range(), "Variable declaration could be moved into 'when'", Some(Fix::new("Move variable declaration into 'when'", edits)));
+    }
 }

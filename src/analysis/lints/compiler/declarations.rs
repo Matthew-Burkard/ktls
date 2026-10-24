@@ -524,6 +524,10 @@ fn hidden_and_final(cx: &Cx, e: &Engine, c: &SyntaxNode, t: &TypeRef, body: Opti
         let add_override = Edit { range: TextRange::empty(override_position(&m)), text: "override ".into() };
         let make_open = |also: Vec<Edit>| open_fix(cx, &base, &format!("{class_name}.{n}"), also);
         if has_modifier(&m, "override") {
+            let deprecated_here = modifiers(&m).is_some_and(|l| l.annotations().any(|a| a.syntax().text().to_string().contains("Deprecated")));
+            if base.modifiers.has(Modifiers::DEPRECATED) && !deprecated_here && cx.on(&OVERRIDING_DEPRECATED_MEMBER) {
+                out.report(&OVERRIDING_DEPRECATED_MEMBER, name.text_range(), format!("This declaration overrides a deprecated member '{class_name}.{n}' but is not marked deprecated itself."), None);
+            }
             if !open {
                 out.report(&OVERRIDING_FINAL_MEMBER, name.text_range(), format!("'{n}' in '{class_name}' is final and cannot be overridden."), make_open(Vec::new()));
             }

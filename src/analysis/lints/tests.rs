@@ -2941,3 +2941,65 @@ class C {
     let hits: Vec<_> = found.iter().filter(|f| f.starts_with("UNINITIALIZED_VARIABLE")).collect();
     assert_eq!(hits, vec!["UNINITIALIZED_VARIABLE: b", "UNINITIALIZED_VARIABLE: b"], "{found:#?}");
 }
+
+#[test]
+fn let_when_constants_and_suspicious_declarations() {
+    let found = lint(
+        r#"package a
+
+class C {
+    var counter: Int = 0
+        get() = 42
+    var ok: Int = 0
+        get() = field + 1
+}
+
+fun f(n: Int) {
+    if (true) println()
+    while (true) { break }
+    if (1 > 2) println()
+    val k = n * 2
+    when (k) {
+        1 -> println()
+        else -> println()
+    }
+}
+"#,
+    );
+    has(&found, "SuspiciousVarProperty: counter");
+    assert_eq!(found.iter().filter(|f| f.starts_with("SuspiciousVarProperty")).count(), 1, "{found:#?}");
+    let constants: Vec<_> = found.iter().filter(|f| f.starts_with("KotlinConstantConditions")).collect();
+    assert_eq!(constants, vec!["KotlinConstantConditions: true", "KotlinConstantConditions: 1 > 2"], "{found:#?}");
+    has(&found, "MoveVariableDeclarationIntoWhen: k");
+    let moved = fixed("package a\n\nfun f(n: Int) {\n    val k = n * 2\n    when (k) {\n        else -> println()\n    }\n}\n", "MoveVariableDeclarationIntoWhen");
+    assert!(moved.contains("{\n    when (val k = n * 2) {"), "{moved}");
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = lint(
+        r#"package a
+
+data class T3(val a: Int, val b: Int, val c: Int)
+open class Base { @Deprecated("old") open fun old() {} }
+class Sub : Base() { override fun old() {} }
+
+val home = System.getProperty("user.home")
+private val hidden = System.getProperty("x")
+
+fun g(s: String?, t: T3) {
+    println(s?.let { it.length })
+    println(s?.let { v -> v.trim() })
+    println(s?.let { it.length + it.length })
+    val (a, b) = t
+    println(a + b)
+}
+"#,
+    );
+    has(&found, "OverridingDeprecatedMember: old");
+    has(&found, "HasPlatformType: home");
+    assert!(!found.iter().any(|f| f == "HasPlatformType: hidden"), "{found:#?}");
+    assert_eq!(found.iter().filter(|f| f.starts_with("SimpleRedundantLet")).count(), 2, "{found:#?}");
+    has(&found, "IncompleteDestructuring: (a, b)");
+    let out = fixed("package a\n\nfun g(s: String?) = s?.let { it.length }\n", "SimpleRedundantLet");
+    assert!(out.contains("= s?.length"), "{out}");
+}

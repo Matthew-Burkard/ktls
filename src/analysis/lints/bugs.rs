@@ -35,8 +35,14 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 main_return_unit(cx, &n, out);
                 lambda_expression_body(cx, &n, out);
                 implicit_nullable_nothing(cx, &n, out);
+                platform_type(cx, &n, out);
             }
-            SyntaxKind::PROPERTY => implicit_nullable_nothing(cx, &n, out),
+            SyntaxKind::PROPERTY => {
+                implicit_nullable_nothing(cx, &n, out);
+                suspicious_var(cx, &n, out);
+                platform_type(cx, &n, out);
+            }
+            SyntaxKind::CONDITION => constant_condition(cx, &n, out),
             SyntaxKind::DELEGATED_SUPER_TYPE_ENTRY => delegation_to_var(cx, &n, out),
             SyntaxKind::PREFIX_EXPR => wrap_unary(cx, &n, out),
             SyntaxKind::NAME_REF if n.text() == "GlobalScope" => global_scope(cx, &n, out),
@@ -577,4 +583,87 @@ fn coroutine_calls(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
     if cx.on(&DEFERRED_RESULT_UNUSED) {
         out.report(&DEFERRED_RESULT_UNUSED, callee.text_range(), "Deferred result is never used: use 'launch' or 'await' it", Some(Fix::replace("Replace with 'launch'", callee.text_range(), "launch")));
     }
+}
+
+
+/// `var x = 0; get() = 1`: assignments go to a field the getter never reads.
+fn suspicious_var(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&SUSPICIOUS_VAR_PROPERTY) || !ast::PropertyDecl::cast(p.clone()).is_some_and(|d| d.is_var() && d.has_initializer()) {
+        return;
+    }
+    let accessors: Vec<SyntaxNode> = p.children().filter(|c| c.kind() == SyntaxKind::PROPERTY_ACCESSOR).collect();
+    let is = |a: &SyntaxNode, n: &str| ast::token(a, SyntaxKind::IDENT).is_some_and(|t| t.text() == n);
+    let Some(getter) = accessors.iter().find(|a| is(a, "get") && (ast::token(a, SyntaxKind::EQ).is_some() || a.children().any(|c| c.kind() == SyntaxKind::BLOCK))) else { return };
+    let custom_setter = accessors.iter().any(|a| is(a, "set") && (ast::token(a, SyntaxKind::EQ).is_some() || a.children().any(|c| c.kind() == SyntaxKind::BLOCK)));
+    if custom_setter || getter.descendants().any(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == "field") {
+        return;
+    }
+    let Some(name) = name_token(p) else { return };
+    out.report(&SUSPICIOUS_VAR_PROPERTY, name.text_range(), "Suspicious 'var' property: its setter does not influence its getter result", None);
+}
+
+/// A public `fun f() = javaCall()` or `val x = javaCall()` of platform type `T!`.
+fn platform_type(cx: &Cx, d: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&HAS_PLATFORM_TYPE) || ["private", "internal", "protected", "override"].iter().any(|m| has_modifier(d, m)) || d.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::BLOCK | SyntaxKind::SCRIPT_BODY)) {
+        return;
+    }
+    // Members of private or local classes are not public API.
+    if d.ancestors().skip(1).any(|a| matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION) && (has_modifier(&a, "private") || a.parent().is_some_and(|p| p.kind() == SyntaxKind::BLOCK)) || a.kind() == SyntaxKind::OBJECT_LITERAL) {
+        return;
+    }
+    let typed = match d.kind() {
+        SyntaxKind::FUN => ast::FunDecl::cast(d.clone()).is_none_or(|f| f.return_type().is_some() || !f.has_expression_body()),
+        _ => ast::PropertyDecl::cast(d.clone()).is_none_or(|p| p.type_ref().is_some() || p.is_destructuring()),
+    };
+    if typed {
+        return;
+    }
+    let Some(value) = expression_body(d) else { return };
+    let Some(e) = cx.engine() else { return };
+    let Some(crate::symbols::TypeRef::Platform(inner)) = e.type_of(&value) else { return };
+    let Some(name) = name_token(d) else { return };
+    let shown = inner.display();
+    let at = match d.kind() {
+        SyntaxKind::FUN => d.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER_LIST).map(|l| l.text_range().end()),
+        _ => Some(name.text_range().end()),
+    };
+    let fixes = at.map(|at| vec![Fix::replace(format!("Specify type explicitly as nullable ('{shown}?')"), TextRange::empty(at), format!(": {shown}?")), Fix::replace(format!("Specify type explicitly as non-nullable ('{shown}')"), TextRange::empty(at), format!(": {shown}"))]).unwrap_or_default();
+    out.report_fixes(&HAS_PLATFORM_TYPE, name.text_range(), format!("Declaration has type inferred from a platform call, which can lead to unchecked nullability issues. Specify type explicitly as nullable or non-nullable ('{shown}!')."), fixes);
+}
+
+/// `if (true)`, `while (false)`, `1 > 2`: conditions with a constant value (not
+/// `while (true)` loops).
+fn constant_condition(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&CONSTANT_CONDITIONS) {
+        return;
+    }
+    let Some(expr) = c.children().next() else { return };
+    let owner = c.parent();
+    let bool_literal = |x: &SyntaxNode| x.kind() == SyntaxKind::LITERAL && x.first_token().and_then(|t| match t.kind() {
+        SyntaxKind::TRUE_KW => Some(true),
+        SyntaxKind::FALSE_KW => Some(false),
+        _ => None,
+    }).is_some();
+    let value = if bool_literal(&expr) {
+        let v = expr.text() == "true";
+        // `while (true)` and `do … while (true)` are loops by design.
+        if v && owner.as_ref().is_some_and(|o| matches!(o.kind(), SyntaxKind::WHILE_EXPR | SyntaxKind::DO_WHILE_EXPR)) {
+            return;
+        }
+        v
+    } else {
+        let (Some(op), Some((l, r))) = (binary_op(&expr), binary_operands(&expr)) else { return };
+        let int = |x: &SyntaxNode| (x.kind() == SyntaxKind::LITERAL && x.first_token().is_some_and(|t| t.kind() == SyntaxKind::INT_LITERAL)).then(|| x.text().to_string().replace('_', "").parse::<i64>().ok()).flatten();
+        let (Some(a), Some(b)) = (int(&l), int(&r)) else { return };
+        match op.kind() {
+            SyntaxKind::EQ2 => a == b,
+            SyntaxKind::NOT_EQ => a != b,
+            SyntaxKind::LT => a < b,
+            SyntaxKind::GT => a > b,
+            SyntaxKind::LT_EQ => a <= b,
+            SyntaxKind::GT_EQ => a >= b,
+            _ => return,
+        }
+    };
+    out.report(&CONSTANT_CONDITIONS, expr.text_range(), format!("Condition '{}' is always '{value}'", expr.text()), None);
 }

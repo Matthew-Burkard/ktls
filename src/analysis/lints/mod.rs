@@ -351,6 +351,7 @@ rules! {
     REDUNDANT_AS_SEQUENCE = "RedundantAsSequence", Redundancy, Warning, true, [], "'asSequence()' followed right away by a terminal operation";
     REDUNDANT_RUN_CATCHING = "RedundantRunCatching", Redundancy, Warning, true, [], "'runCatching { … }.getOrThrow()' instead of 'run { … }'";
     REDUNDANT_NULLABLE_RETURN_TYPE = "RedundantNullableReturnType", Redundancy, Warning, true, [], "Nullable return type of a function that never returns null";
+    SIMPLE_REDUNDANT_LET = "SimpleRedundantLet", Redundancy, Warning, true, [], "'x.let { it.f() }' instead of 'x.f()'";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
@@ -386,6 +387,8 @@ rules! {
     JOIN_DECLARATION_AND_ASSIGNMENT = "JoinDeclarationAndAssignment", Style, Info, false, [], "Local declared without a value and assigned right after";
     STRING_TEMPLATE_CONCATENATION = "ConvertToStringTemplate", Style, Info, false, [], "String concatenation with '+' instead of a template";
     LIFT_RETURN_OR_ASSIGNMENT = "LiftReturnOrAssignment", Style, Info, false, [], "'return' or assignment in every branch of an 'if'/'when'";
+    INCOMPLETE_DESTRUCTURING = "IncompleteDestructuring", Style, Info, false, [], "Destructuring that leaves out trailing data class components";
+    MOVE_DECLARATION_INTO_WHEN = "MoveVariableDeclarationIntoWhen", Style, Info, false, [], "Local used only as the subject of the next 'when'";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
@@ -401,6 +404,10 @@ rules! {
     DESTRUCTURING_WRONG_NAME = "DestructuringWrongName", Bugs, Warning, false, [], "Destructured variable named like a different component of the data class";
     RUN_BLOCKING_IN_SUSPEND = "RunBlockingInSuspendFunction", Bugs, Warning, false, [], "'runBlocking' inside a suspend function";
     DEFERRED_RESULT_UNUSED = "DeferredResultUnused", Bugs, Warning, false, [], "'async { … }' whose Deferred result is never used";
+    OVERRIDING_DEPRECATED_MEMBER = "OverridingDeprecatedMember", Bugs, Warning, false, [], "Override of a deprecated member that is not deprecated itself";
+    SUSPICIOUS_VAR_PROPERTY = "SuspiciousVarProperty", Bugs, Warning, false, [], "'var' with an initializer whose getter ignores the backing field";
+    HAS_PLATFORM_TYPE = "HasPlatformType", Bugs, Warning, false, [], "Public declaration whose inferred type comes from Java (unknown nullability)";
+    CONSTANT_CONDITIONS = "KotlinConstantConditions", Bugs, Warning, false, [], "Condition that is a constant ('if (true)', '1 > 2')";
     SELF_ASSIGNMENT = "SelfAssignment", Bugs, Warning, false, [], "Variable assigned to itself";
     EQUALS_OR_HASH_CODE = "EqualsOrHashCode", Bugs, Warning, false, [], "Class overrides only one of 'equals()' and 'hashCode()'";
     ARRAY_IN_DATA_CLASS = "ArrayInDataClass", Bugs, Warning, false, [], "Array property in a data class without custom 'equals()'/'hashCode()'";
