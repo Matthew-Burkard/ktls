@@ -19,6 +19,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 nan_equality(&n, out);
                 self_assignment(cx, &n, out);
                 collection_reassignment(cx, &n, out);
+                empty_range(cx, &n, out);
+                recursive_equals(cx, &n, out);
             }
             SyntaxKind::CLASS => {
                 equals_hash_code(&n, out);
@@ -43,6 +45,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 platform_type(cx, &n, out);
             }
             SyntaxKind::CONDITION => constant_condition(cx, &n, out),
+            SyntaxKind::OBJECT_DECLARATION => serializable_object(cx, &n, out),
             SyntaxKind::DELEGATED_SUPER_TYPE_ENTRY => delegation_to_var(cx, &n, out),
             SyntaxKind::PREFIX_EXPR => wrap_unary(cx, &n, out),
             SyntaxKind::NAME_REF if n.text() == "GlobalScope" => global_scope(cx, &n, out),
@@ -554,12 +557,19 @@ fn destructuring_names(cx: &Cx, d: &SyntaxNode, out: &mut Sink) {
 fn coroutine_calls(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
     let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
     let name = callee.text().to_string();
-    if !matches!(name.as_str(), "runBlocking" | "async") || !cx.on(&RUN_BLOCKING_IN_SUSPEND) && !cx.on(&DEFERRED_RESULT_UNUSED) {
+    if !matches!(name.as_str(), "runBlocking" | "async" | "sleep") || !cx.on(&RUN_BLOCKING_IN_SUSPEND) && !cx.on(&DEFERRED_RESULT_UNUSED) && !cx.on(&BLOCKING_IN_SUSPEND) {
         return;
     }
     let Some(e) = cx.engine() else { return };
     let defs = e.resolve_name_ref(&callee);
     let [Def::Symbol { sym, .. }, ..] = defs.as_slice() else { return };
+    let in_suspend = || call.ancestors().skip(1).find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::CLASS_BODY)).is_some_and(|o| o.kind() == SyntaxKind::FUN && has_modifier(&o, "suspend"));
+    if name == "sleep" {
+        if sym.fq_name == "java.lang.Thread.sleep" && in_suspend() && cx.on(&BLOCKING_IN_SUSPEND) {
+            out.report(&BLOCKING_IN_SUSPEND, callee.text_range(), "Possibly blocking call in non-blocking context could lead to thread starvation: use 'delay'", None);
+        }
+        return;
+    }
     if !sym.fq_name.starts_with("kotlinx.coroutines.") {
         return;
     }
@@ -666,4 +676,74 @@ fn constant_condition(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
         }
     };
     out.report(&CONSTANT_CONDITIONS, expr.text_range(), format!("Condition '{}' is always '{value}'", expr.text()), None);
+}
+
+
+/// `10..1`: empty (`downTo` was probably meant).
+fn empty_range(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let Some(op) = binary_op(n) else { return };
+    let inclusive = match op.kind() {
+        SyntaxKind::RANGE => true,
+        SyntaxKind::RANGE_UNTIL => false,
+        SyntaxKind::IDENT if op.text() == "until" => false,
+        _ => return,
+    };
+    if !cx.on(&EMPTY_RANGE) {
+        return;
+    }
+    let Some((l, r)) = binary_operands(n) else { return };
+    let int = |x: &SyntaxNode| -> Option<i64> {
+        let neg = x.kind() == SyntaxKind::PREFIX_EXPR && binary_op(x).is_some_and(|o| o.kind() == SyntaxKind::MINUS);
+        let lit = if neg { x.children().find(|c| c.kind() == SyntaxKind::LITERAL)? } else { x.clone() };
+        if lit.kind() != SyntaxKind::LITERAL || lit.first_token()?.kind() != SyntaxKind::INT_LITERAL {
+            return None;
+        }
+        let v: i64 = lit.text().to_string().replace('_', "").trim_end_matches(['L', 'l']).parse().ok()?;
+        Some(if neg { -v } else { v })
+    };
+    let (Some(a), Some(b)) = (int(&l), int(&r)) else { return };
+    let empty = if inclusive { a > b } else { a >= b };
+    if empty {
+        let fix = inclusive.then(|| Fix::replace("Replace with 'downTo'", n.text_range(), format!("{} downTo {}", l.text(), r.text())));
+        out.report(&EMPTY_RANGE, n.text_range(), "This range is empty. Did you mean to use 'downTo'?", fix);
+    }
+}
+
+/// `this == other` inside `equals`: the comparison calls `equals` again.
+fn recursive_equals(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let Some(op) = binary_op(n).filter(|o| matches!(o.kind(), SyntaxKind::EQ2 | SyntaxKind::NOT_EQ)) else { return };
+    if !cx.on(&RECURSIVE_EQUALS) {
+        return;
+    }
+    let Some((l, r)) = binary_operands(n) else { return };
+    let Some(f) = n.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR | SyntaxKind::CLASS_BODY)).filter(|f| f.kind() == SyntaxKind::FUN) else { return };
+    if name_token(&f).is_none_or(|t| t.text() != "equals") || !has_modifier(&f, "override") {
+        return;
+    }
+    let Some(param) = ast::FunDecl::cast(f.clone()).and_then(|d| d.parameters().first().and_then(|p| name_token(p.syntax()))).map(|t| ast::ident_text(&t)) else { return };
+    let is_this = |x: &SyntaxNode| x.kind() == SyntaxKind::THIS_EXPR && x.text() == "this";
+    let is_param = |x: &SyntaxNode| x.kind() == SyntaxKind::NAME_REF && x.text() == param.as_str();
+    if is_this(&l) && is_param(&r) || is_param(&l) && is_this(&r) {
+        let identity = if op.kind() == SyntaxKind::EQ2 { "===" } else { "!==" };
+        out.report(&RECURSIVE_EQUALS, op.text_range(), "Recursive equals call", Some(Fix::replace(format!("Replace with '{identity}'"), op.text_range(), identity)));
+    }
+}
+
+/// `object O : Serializable` without `readResolve`: deserialization creates another instance.
+fn serializable_object(cx: &Cx, o: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&SERIALIZABLE_OBJECT) || has_modifier(o, "data") || has_modifier(o, "companion") {
+        return;
+    }
+    let body = o.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY);
+    if body.is_some_and(|b| b.children().any(|m| m.kind() == SyntaxKind::FUN && name_token(&m).is_some_and(|t| t.text() == "readResolve"))) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let Some(name) = name_token(o) else { return };
+    let defs = e.resolve_name_text(o, &ast::ident_text(&name));
+    let Some(Def::Symbol { sym, .. }) = defs.iter().find(|d| matches!(d, Def::Symbol { sym, .. } if sym.kind == SymbolKind::Object)) else { return };
+    let serializable = e.supertype_closure(&crate::symbols::TypeRef::named(&sym.fq_name)).iter().filter_map(fq_of).any(|f| f == "java.io.Serializable");
+    if serializable {
+        out.report(&SERIALIZABLE_OBJECT, name.text_range(), "Serializable object must implement 'readResolve'", None);
+    }
 }

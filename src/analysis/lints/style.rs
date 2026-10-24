@@ -20,6 +20,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 boolean_constants(cx, &n, out);
                 ignore_case_equals(cx, &n, out);
                 string_template(cx, &n, out);
+                until_to_range_until(cx, &n, out);
+                two_comparisons(cx, &n, out);
             }
             SyntaxKind::DOT_QUALIFIED_EXPR => {
                 operator_calls(cx, &n, out);
@@ -48,7 +50,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 cascade_if(cx, &n, out);
                 guard_clause(cx, &n, out);
                 lift_return_or_assignment(cx, &n, out);
+                if_empty(cx, &n, out);
             }
+            SyntaxKind::CLASS => primary_constructor_property(cx, &n, out),
             SyntaxKind::WHEN_EXPR => lift_return_or_assignment(cx, &n, out),
             SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR => empty_bodies(&n, out),
             SyntaxKind::BLOCK => {
@@ -1567,4 +1571,123 @@ fn not_null_to_elvis_return(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         _ => return,
     };
     out.report(&NOT_NULL_ASSERTION_TO_ELVIS_RETURN, op.text_range(), format!("Replace '!!' with '?: {jump}'"), Some(Fix::replace(format!("Replace with '?: {jump}'"), op.text_range(), format!(" ?: {jump}"))));
+}
+
+/// `class A(x: Int) { val x = x }` → `class A(val x: Int)`.
+fn primary_constructor_property(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&CAN_BE_PRIMARY_CONSTRUCTOR_PROPERTY) {
+        return;
+    }
+    let Some(ctor) = class.children().find(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR) else { return };
+    let Some(body) = class.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY) else { return };
+    let params: Vec<SyntaxNode> = ctor.descendants().filter(|d| d.kind() == SyntaxKind::VALUE_PARAMETER).collect();
+    for p in body.children().filter(|c| c.kind() == SyntaxKind::PROPERTY) {
+        let Some(decl) = ast::PropertyDecl::cast(p.clone()) else { continue };
+        if decl.accessors().next().is_some() || decl.has_delegate() || decl.receiver().is_some() || has_comments(&p) {
+            continue;
+        }
+        // Only a visibility modifier may be carried over.
+        if modifiers(&p).is_some_and(|m| m.annotations().next().is_some() || m.modifiers().any(|t| !matches!(t.text(), "private" | "internal" | "protected" | "public"))) {
+            continue;
+        }
+        let (Some(name), Some(init)) = (name_token(&p), initializer(&p)) else { continue };
+        let name = ast::ident_text(&name);
+        if init.kind() != SyntaxKind::NAME_REF || init.text() != name.as_str() {
+            continue;
+        }
+        let Some(param) = params.iter().find(|q| name_token(q).is_some_and(|t| ast::ident_text(&t) == name)) else { continue };
+        if ast::token(param, SyntaxKind::VAL_KW).is_some() || ast::token(param, SyntaxKind::VAR_KW).is_some() || modifiers(param).is_some() {
+            continue;
+        }
+        // A written type must be the parameter's.
+        let param_type = ast::child::<ast::TypeRef>(param).map(|t| t.syntax().text().to_string());
+        if decl.type_ref().is_some_and(|t| Some(t.syntax().text().to_string()) != param_type) {
+            continue;
+        }
+        let kw = if decl.is_var() { "var" } else { "val" };
+        let visibility = modifiers(&p).map(|m| format!("{} ", m.syntax().text())).unwrap_or_default();
+        let edits = vec![
+            Edit { range: TextRange::empty(param.text_range().start()), text: format!("{visibility}{kw} ") },
+            Edit { range: deletion_range(cx.text, p.text_range()), text: String::new() },
+        ];
+        let Some(tok) = name_token(&p) else { continue };
+        out.report(&CAN_BE_PRIMARY_CONSTRUCTOR_PROPERTY, tok.text_range(), "Property is explicitly assigned to parameter, can be declared directly in constructor", Some(Fix::new("Move to constructor", edits)));
+    }
+}
+
+/// `0 until n` → `0..<n` (Kotlin 1.9+).
+fn until_to_range_until(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let Some(op) = binary_op(n).filter(|o| o.kind() == SyntaxKind::IDENT && o.text() == "until") else { return };
+    if !cx.on(&UNTIL_TO_RANGE_UNTIL) || cx.language_version().is_some_and(|v| v < 109) {
+        return;
+    }
+    let Some((l, r)) = binary_operands(n) else { return };
+    let Some(e) = cx.engine() else { return };
+    let Some(op_node) = n.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE) else { return };
+    if !e.resolve_infix(&op_node).iter().all(|d| matches!(d, Def::Symbol { sym, .. } if sym.fq_name.starts_with("kotlin."))) {
+        return;
+    }
+    out.report(&UNTIL_TO_RANGE_UNTIL, op.text_range(), "'until' can be replaced with '..<' operator", Some(Fix::replace("Replace with '..<'", n.text_range(), format!("{}..<{}", l.text(), r.text()))));
+}
+
+/// `if (s.isEmpty()) d else s` → `s.ifEmpty { d }` (also `isBlank`, and the negated forms).
+fn if_empty(cx: &Cx, i: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&IS_EMPTY_TO_IF_EMPTY) || has_comments(i) {
+        return;
+    }
+    let Some(cond) = condition_of(i) else { return };
+    let (Some(then), Some(els)) = (i.children().find(|c| c.kind() == SyntaxKind::THEN_BRANCH).and_then(|b| branch_expr(&b)), i.children().find(|c| c.kind() == SyntaxKind::ELSE_BRANCH).and_then(|b| branch_expr(&b))) else { return };
+    let Some((recv, callee)) = no_arg_call(&cond) else { return };
+    let (f, value, fallback) = match callee.text().to_string().as_str() {
+        "isEmpty" => ("ifEmpty", els, then),
+        "isBlank" => ("ifBlank", els, then),
+        "isNotEmpty" => ("ifEmpty", then, els),
+        "isNotBlank" => ("ifBlank", then, els),
+        _ => return,
+    };
+    if value.text() != recv.text() || recv.kind() != SyntaxKind::NAME_REF || fallback.kind() == SyntaxKind::IF_EXPR || !stdlib_call(cx, &callee) {
+        return;
+    }
+    out.report(&IS_EMPTY_TO_IF_EMPTY, i.first_token().map_or(i.text_range(), |t| t.text_range()), format!("'if' expression can be replaced with '{f}'"), Some(Fix::replace(format!("Replace with '{f} {{...}}'"), i.text_range(), format!("{}.{f} {{ {} }}", recv.text(), fallback.text()))));
+}
+
+/// `x >= a && x <= b` → `x in a..b`; `x >= a && x < b` → `x in a..<b` (integer types).
+fn two_comparisons(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&TWO_COMPARISONS_TO_RANGE) || binary_op(n).is_none_or(|o| o.kind() != SyntaxKind::AMP2) || has_comments(n) {
+        return;
+    }
+    let Some((a, b)) = binary_operands(n) else { return };
+    // `x >= lo` / `lo <= x` → (x, lo); `x <= hi` / `hi >= x` → (x, hi, inclusive).
+    let lower = |c: &SyntaxNode| -> Option<(String, String)> {
+        let (op, (l, r)) = (binary_op(c)?, binary_operands(c)?);
+        match op.kind() {
+            SyntaxKind::GT_EQ => Some((l.text().to_string(), r.text().to_string())),
+            SyntaxKind::LT_EQ => Some((r.text().to_string(), l.text().to_string())),
+            _ => None,
+        }
+    };
+    let upper = |c: &SyntaxNode| -> Option<(String, String, bool)> {
+        let (op, (l, r)) = (binary_op(c)?, binary_operands(c)?);
+        match op.kind() {
+            SyntaxKind::LT_EQ => Some((l.text().to_string(), r.text().to_string(), true)),
+            SyntaxKind::LT => Some((l.text().to_string(), r.text().to_string(), false)),
+            SyntaxKind::GT_EQ => Some((r.text().to_string(), l.text().to_string(), true)),
+            SyntaxKind::GT => Some((r.text().to_string(), l.text().to_string(), false)),
+            _ => None,
+        }
+    };
+    let Some((x, lo)) = lower(&a) else { return };
+    let Some((x2, hi, inclusive)) = upper(&b) else { return };
+    if x != x2 || x.contains('(') {
+        return;
+    }
+    // Integral values only (floating ranges and `..<` differ for NaN and such).
+    let Some(e) = cx.engine() else { return };
+    let Some(left) = a.first_child() else { return };
+    let subject = if binary_op(&a).is_some_and(|o| o.kind() == SyntaxKind::GT_EQ) { left } else { match binary_operands(&a) { Some((_, r)) => r, None => return } };
+    if !crate::analysis::lints::certain_type(e, &subject, true).as_ref().and_then(fq_of).is_some_and(|fq| matches!(fq, "kotlin.Int" | "kotlin.Long" | "kotlin.Char")) {
+        return;
+    }
+    let range_op = if inclusive { ".." } else { "..<" };
+    out.report(&TWO_COMPARISONS_TO_RANGE, n.text_range(), "Two comparisons should be converted to a range check", Some(Fix::replace("Convert to a range check", n.text_range(), format!("{x} in {lo}{range_op}{hi}"))));
 }

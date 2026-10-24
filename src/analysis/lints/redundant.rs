@@ -18,7 +18,11 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                     continue;
                 }
                 match n.kind() {
-                    SyntaxKind::LONG_STRING_TEMPLATE_ENTRY => template_braces(cx, &n, out),
+                    SyntaxKind::LONG_STRING_TEMPLATE_ENTRY => {
+                        template_braces(cx, &n, out);
+                        to_string_in_template(cx, &n, out);
+                    }
+                    SyntaxKind::SECONDARY_CONSTRUCTOR => empty_secondary_body(cx, &n, out),
                     SyntaxKind::MODIFIER_LIST => modifier_list(cx, &n, out),
                     SyntaxKind::FUN => {
                         unit_return_type(&n, out);
@@ -56,6 +60,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                         as_sequence(cx, &n, out);
                         run_catching(cx, &n, out);
                         redundant_let(cx, &n, out);
+                        useless_on_collection(cx, &n, out);
                     }
                     SyntaxKind::SAFE_QUALIFIED_EXPR => redundant_let(cx, &n, out),
                     SyntaxKind::PROPERTY => explicit_type(cx, &n, out),
@@ -1151,4 +1156,66 @@ fn invoked_lambda(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
         return;
     }
     out.report(&REDUNDANT_LAMBDA, call.text_range(), "Redundant lambda: it is called right away", Some(Fix::replace("Replace with 'run'", call.text_range(), format!("run {}", lambda.text()))));
+}
+
+/// `constructor(x: Int) : this() {}`.
+fn empty_secondary_body(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&EMPTY_SECONDARY_CONSTRUCTOR_BODY) {
+        return;
+    }
+    let Some(body) = c.children().find(|x| x.kind() == SyntaxKind::BLOCK) else { return };
+    if body.children().next().is_some() || has_comments(&body) {
+        return;
+    }
+    let start = body.first_token().and_then(|t| prev_significant(&t)).map_or(body.text_range().start(), |t| t.text_range().end());
+    out.report(&EMPTY_SECONDARY_CONSTRUCTOR_BODY, body.text_range(), "Remove empty constructor body", Some(Fix::delete("Remove empty constructor body", TextRange::new(start, body.text_range().end()))));
+}
+
+/// `"${x.toString()}"` → `"$x"` / `"${x}"`.
+fn to_string_in_template(cx: &Cx, entry: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&TO_STRING_IN_TEMPLATE) {
+        return;
+    }
+    let mut exprs = entry.children();
+    let (Some(e), None) = (exprs.next(), exprs.next()) else { return };
+    if e.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || has_comments(entry) {
+        return;
+    }
+    let mut parts = e.children();
+    let (Some(recv), Some(call)) = (parts.next(), parts.next()) else { return };
+    let Some(callee) = call.first_child().filter(|c| call.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF && c.text() == "toString") else { return };
+    if call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_none_or(|l| l.children().next().is_some()) || call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) {
+        return;
+    }
+    if recv.kind() == SyntaxKind::SUPER_EXPR {
+        return;
+    }
+    let range = TextRange::new(recv.text_range().end(), e.text_range().end());
+    out.report(&TO_STRING_IN_TEMPLATE, callee.text_range(), "Redundant 'toString()' call in string template", Some(Fix::delete("Remove 'toString()' call", range)));
+}
+
+/// `xs.filterNotNull()` where `xs` holds no nulls.
+fn useless_on_collection(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&USELESS_CALL_ON_COLLECTION) {
+        return;
+    }
+    let mut parts = n.children();
+    let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    let Some(callee) = call.first_child().filter(|c| call.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF && c.text() == "filterNotNull") else { return };
+    if call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_none_or(|l| l.children().next().is_some()) || !stdlib(cx, &callee) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let Some(t) = crate::analysis::lints::certain_type(e, &recv, true) else { return };
+    let crate::symbols::TypeRef::Named { fq: Some(fq), args, nullable: false, .. } = crate::analysis::ide::infer::strip(&t) else { return };
+    if !matches!(fq.as_ref(), "kotlin.collections.List" | "kotlin.collections.Collection" | "kotlin.collections.Iterable" | "kotlin.collections.Set") {
+        return;
+    }
+    let [crate::symbols::TypeArg::Type { ty, .. }] = args.as_slice() else { return };
+    if !matches!(crate::analysis::ide::infer::strip(ty), crate::symbols::TypeRef::Named { nullable: false, fq: Some(_), .. }) {
+        return;
+    }
+    // `toList()` keeps the copy semantics of `filterNotNull()` for lists; drop for others.
+    let range = TextRange::new(recv.text_range().end(), call.text_range().end());
+    out.report(&USELESS_CALL_ON_COLLECTION, callee.text_range(), "Useless call on collection type: its elements are never null", Some(Fix::delete("Remove useless call", range)));
 }

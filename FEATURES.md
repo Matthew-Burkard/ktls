@@ -220,7 +220,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `RedundantLambdaArrow`, `RedundantLambdaOrAnonymousFunction` — *partial: `RedundantLambdaOrAnonymousFunction` (lambdas invoked in place, fix: `run`); `RedundantLambdaArrow` (`{ -> … }`, `{ it -> … }`; as a call argument only when the call has one candidate)*
 - [x] [P1] `RedundantSuspendModifier` (final, non-override functions whose bodies call nothing that is or may be `suspend`)
 - [x] [P1] `RemoveRedundantBackticks`
-- [~] [P1] `RemoveEmptyParenthesesFromLambdaCall`, `RemoveEmptyClassBody`, `RemoveEmptyPrimaryConstructor`, `RemoveEmptySecondaryConstructorBody` — *partial: all but `RemoveEmptySecondaryConstructorBody`*
+- [~] [P1] `RemoveEmptyParenthesesFromLambdaCall`, `RemoveEmptyClassBody`, `RemoveEmptyPrimaryConstructor`, `RemoveEmptySecondaryConstructorBody` — *partial: `RemoveEmptySecondaryConstructorBody`; all but `RemoveEmptySecondaryConstructorBody`*
 - [x] [P1] `RemoveCurlyBracesFromTemplate` (`${x}` → `$x`), `RemoveSingleExpressionStringTemplate`
 - [x] [P1] `RedundantCompanionReference`, `RedundantObjectTypeCheck` (`C.Companion.member`; `is Obj` → `== Obj`)
 - [x] [P1] `RedundantGetter` / `RedundantSetter`
@@ -237,17 +237,17 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 **Idiomatic Kotlin / style**
 - [x] [P1] `CanBeVal` (`var` never reassigned)
 - [x] [P1] `CanBeParameter` (constructor `val` used only in init): `private` constructor properties read only in initializers and `init` blocks
-- [ ] [P1] `CanBePrimaryConstructorProperty`
+- [x] [P1] `CanBePrimaryConstructorProperty`
 - [x] [P1] `ConvertToStringTemplate` (string concatenation starting with a plain literal, on one line)
 - [~] [P1] `LiftReturnOrAssignment` (out of `if`/`when`/`try`) — *partial: `if`/`else` and `when` with `else` whose branches are single returns or assignments to one target; not `try`*
 - [x] [P1] `CascadeIf` → `when`, `IntroduceWhenSubject` (three or more conditions; subjects via the intention)
 - [x] [P1] `ReplaceGetOrSet` (`a.get(i)` → `a[i]`), `ReplaceCallWithBinaryOperator` (`a.plus(b)` → `a + b`)
-- [~] [P1] `ReplaceRangeToWithUntil` / `ReplaceUntilWithRangeUntil` (`..<`) — *partial: `a..b - 1` (`ReplaceRangeToWithRangeUntil`)*
-- [~] [P1] `ReplaceSizeCheckWithIsNotEmpty`, `ReplaceSizeZeroCheckWithIsEmpty`, `ReplaceIsEmptyWithIfEmpty` — *partial: the size/length checks*
+- [~] [P1] `ReplaceRangeToWithUntil` / `ReplaceUntilWithRangeUntil` (`..<`) — *partial: `ReplaceUntilWithRangeUntil` (Kotlin 1.9+); `a..b - 1` (`ReplaceRangeToWithRangeUntil`)*
+- [~] [P1] `ReplaceSizeCheckWithIsNotEmpty`, `ReplaceSizeZeroCheckWithIsEmpty`, `ReplaceIsEmptyWithIfEmpty` — *partial: `ReplaceIsEmptyWithIfEmpty` (`ifEmpty`, `ifBlank`); the size/length checks*
 - [x] [P1] `UseExpressionBody` (single `return` block body; a cursor action by default)
 - [x] [P1] `IfThenToSafeAccess`, `IfThenToElvis`, `FoldInitializerAndIfToElvis`
 - [x] [P1] `ReplaceNegatedIsEmptyWithIsNotEmpty`, `SimplifyNegatedBinaryExpression`, `SimplifyBooleanWithConstants` (stdlib `isEmpty`/`isBlank` pairs; `==`, `===`, `in`, `is`; `&& true`, `|| false`, `== true/false` on non-null Booleans)
-- [~] [P1] `ConvertTwoComparisonsToRangeCheck`, `ConvertNaNEquality` — *partial: `ConvertNaNEquality`*
+- [~] [P1] `ConvertTwoComparisonsToRangeCheck`, `ConvertNaNEquality` — *partial: `ConvertTwoComparisonsToRangeCheck` (integral values, `..`/`..<`); `ConvertNaNEquality`*
 - [x] [P1] `ReplaceJavaStaticMethodWithKotlinAnalog` (`Math.max`, `System.out.println`, `Arrays.asList`…): `Math` functions (adding `kotlin.math` imports), `Arrays` content functions, `parseInt`-style parsing, `Character` tests, `System.out.print(ln)`
 - [~] [P1] `ReplaceToStringWithStringTemplate`, `ReplaceSubstringWithTake/Drop/SubstringBefore/After` — *partial: `ReplaceSubstringWithTake`, `ReplaceSubstringWithDropLast`*
 - [x] [P1] `ReplaceManualRangeWithIndicesCalls` (`0 until list.size` → `list.indices`)
@@ -258,7 +258,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `JoinDeclarationAndAssignment`, `MoveVariableDeclarationIntoWhen` (assignment / `when` right after)
 - [x] [P1] `MayBeConstant` (`val` → `const val`)
 - [ ] [P1] `ObjectLiteralToLambda`, `ConvertLambdaToReference`, `ConvertReferenceToLambda`
-- [~] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate` — *partial: `RemoveExplicitTypeArguments`*
+- [~] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate` — *partial: `RemoveToStringInStringTemplate`; `RemoveExplicitTypeArguments`*
 - [~] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda` — *partial: `SelfAssignment` of local variables*
 - [x] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`, `requireNotNull`/`checkNotNull`; `val x = y!!` in functions returning Unit or nullable)
 - [~] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals` — *partial: `ReplaceWithIgnoreCaseEquals`*
@@ -267,7 +267,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `UnnecessaryVariable`, `UnnecessaryOptInAnnotation` — *partial: `UnnecessaryVariable` (`val x = e; return x`)*
 - [~] [P1] `KotlinConstantConditions` (always true/false) — *partial: literal conditions (not `while (true)`) and comparisons of integer literals*
 - [ ] [P1] `ConvertSecondaryConstructorToPrimary`, `ConvertTryFinallyToUseCall`
-- [~] [P1] `ControlFlowWithEmptyBody`, `EmptyRange` — *partial: `ControlFlowWithEmptyBody`*
+- [~] [P1] `ControlFlowWithEmptyBody`, `EmptyRange` — *partial: `EmptyRange` (integer literals, with a `downTo` fix); `ControlFlowWithEmptyBody`*
 - [x] [P2] `DestructuringWrongName`, `UnusedDataClassCopyResult`
 - [~] [P2] `ReplaceCollectionCountWithSize`, `PlatformExtensionReceiverOfInline` — *partial: `ReplaceCollectionCountWithSize`*
 
@@ -275,7 +275,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `SimplifiableCallChain` (`filter{}.first()` → `first{}`, `map{}.filterNotNull()` → `mapNotNull{}`, `sortedBy{}.first()` → `minBy{}`…) — *partial: `filter{}` + `first`/`firstOrNull`/`last`/`lastOrNull`/`single`/`singleOrNull`/`count`/`size`/`any`/`none`/`isEmpty`/`isNotEmpty`, `map{}` + `filterNotNull`/`joinToString`, `sortedBy{}`/`sortedByDescending{}` + `first`/`firstOrNull` on iterables, arrays and sequences*
 - [x] [P1] `SimplifiableCall` (`filter { it is T }` → `filterIsInstance<T>()`, `filter { it != null }` → `filterNotNull()`)
 - [ ] [P1] `ConvertCallChainIntoSequence` (long chains on large collections)
-- [~] [P1] `UselessCallOnCollection` / `UselessCallOnNotNull` (`orEmpty()` on non-null, `filterNotNull()` on non-null elements) — *partial: `UselessCallOnNotNull` (`orEmpty()`, `isNullOrEmpty()`, `isNullOrBlank()` on values of certain non-null type)*
+- [~] [P1] `UselessCallOnCollection` / `UselessCallOnNotNull` (`orEmpty()` on non-null, `filterNotNull()` on non-null elements) — *partial: `UselessCallOnCollection` (`filterNotNull()` on non-null elements); `UselessCallOnNotNull` (`orEmpty()`, `isNullOrEmpty()`, `isNullOrBlank()` on values of certain non-null type)*
 - [ ] [P1] `ReplaceManualForEachWithMap` / loop-to-stdlib suggestions (`for` loop → `map/filter/sum/any/all/count`)
 - [~] [P1] `ReplaceWithCount`, `RedundantAsSequence` — *partial: `RedundantAsSequence`; `filter { }.count()` via `SimplifiableCallChain`*
 - [x] [P2] `JavaCollectionsStaticMethod`, `JavaMapForEach`
@@ -289,7 +289,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 
 **Probable bugs**
 - [x] [P1] `EqualsOrHashCode` (one without the other)
-- [~] [P1] `RecursivePropertyAccessor` / `RecursiveEqualsCall` — *partial: `RecursivePropertyAccessor` (getters reading, setters assigning their own property; "Replace with 'field'" when there is a backing field)*
+- [~] [P1] `RecursivePropertyAccessor` / `RecursiveEqualsCall` — *partial: `RecursiveEqualsCall` (`this == other` in `equals`); `RecursivePropertyAccessor` (getters reading, setters assigning their own property; "Replace with 'field'" when there is a backing field)*
 - [x] [P1] `ArrayInDataClass` (needs custom `equals`/`hashCode`)
 - [x] [P1] `LeakingThis` (calling open member / passing `this` in constructor): init blocks, property initializers and secondary constructor bodies of open/abstract/sealed classes; not inside lambdas
 - [x] [P1] `SuspiciousVarProperty`, `SuspiciousCollectionReassignment` (`+=` on `var` read-only list)
@@ -299,7 +299,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `NestedLambdaShadowedImplicitParameter` (nested `it`) — *when the enclosing lambda's `it` is used too; not for `it.let`/`also`/`takeIf`/`takeUnless`*
 - [~] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `CopyWithoutNamedArguments` — *partial: `CopyWithoutNamedArguments` (and the compiler's `ARRAY_EQUALITY_OPERATOR_CAN_BE_REPLACED_WITH_EQUALS`)*
 - [~] [P1] `UnusedResultOfAsync` / `DeferredResultUnused`, `SuspendFunctionOnCoroutineScope`, `RedundantRunBlocking` — *partial: `DeferredResultUnused` (with "Replace with 'launch'")*
-- [~] [P1] `RunBlockingInSuspendFunction`, `BlockingMethodInNonBlockingContext` (`Thread.sleep` in coroutine) — *partial: `RunBlockingInSuspendFunction`*
+- [~] [P1] `RunBlockingInSuspendFunction`, `BlockingMethodInNonBlockingContext` (`Thread.sleep` in coroutine) — *partial: `BlockingMethodInNonBlockingContext` (`Thread.sleep`); `RunBlockingInSuspendFunction`*
 - [~] [P1] `FlowCollectWithoutLaunch`, `GlobalCoroutineUsage` (`GlobalScope`) — *partial: `GlobalCoroutineUsage`*
 - [~] [P1] `WarningOnMainUnusedParameterMigration`, `MainFunctionReturnUnit` — *partial: `MainFunctionReturnUnit`*
 - [~] [P1] `OverridingDeprecatedMember`, `DeprecatedCallableAddReplaceWith` — *partial: `OverridingDeprecatedMember`*
@@ -314,7 +314,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 **Java interop**
 - [x] [P1] `UsePropertyAccessSyntax` (`getFoo()` → `foo`): Java getters (`isX` returning Boolean), not methods of types mapped to Kotlin or `getAndX`
 - [~] [P1] `PlatformExtensionReceiverOfInline`, `HasPlatformType` (public API exposes platform type) — *partial: `HasPlatformType` (with nullable / non-null type fixes)*
-- [ ] [P1] `JavaIoSerializableObjectMustHaveReadResolve`
+- [x] [P1] `JavaIoSerializableObjectMustHaveReadResolve`
 - [~] [P2] `FunctionWithLambdaExpressionBody`, `JvmStaticWithoutCompanion` — *partial: `FunctionWithLambdaExpressionBody` (and the compiler's `JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION`)*
 
 **Build scripts**

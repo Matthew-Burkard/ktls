@@ -3078,3 +3078,66 @@ class Widget {
     let out = fixed("package a\n\nfun f(m: Map<String, Int>) = m.forEach { k, v -> println(k + v) }\n", "JavaMapForEach");
     assert!(out.contains("forEach { (k, v) -> "), "{out}");
 }
+
+#[test]
+fn constructor_ranges_and_equality_inspections() {
+    let found = lint(
+        r#"package a
+
+class P(x: Int, private val y: Int) {
+    val x = x
+    constructor() : this(1, 2) {}
+}
+class Q {
+    override fun equals(other: Any?): Boolean = this == other
+}
+fun f() {
+    for (i in 10..1) println(i)
+    for (i in 1..10) println(i)
+}
+"#,
+    );
+    has(&found, "CanBePrimaryConstructorProperty: x");
+    has(&found, "RemoveEmptySecondaryConstructorBody: {}");
+    has(&found, "RecursiveEqualsCall: ==");
+    has(&found, "EmptyRange: 10..1");
+    assert_eq!(found.iter().filter(|f| f.starts_with("EmptyRange")).count(), 1, "{found:#?}");
+    let out = fixed("package a\n\nclass P(x: Int) {\n    val x = x\n}\n", "CanBePrimaryConstructorProperty");
+    assert!(out.contains("class P(val x: Int) {\n}"), "{out}");
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = lint(
+        r#"package a
+
+object Single : java.io.Serializable
+object WithResolve : java.io.Serializable { private fun readResolve(): Any = WithResolve }
+
+suspend fun s() {
+    Thread.sleep(1)
+}
+
+fun g(n: Int, s: String, xs: List<String>) {
+    for (i in 0 until n) println(i)
+    println(if (s.isEmpty()) "none" else s)
+    println(n >= 1 && n <= 10)
+    println("${n.toString()} ${xs.filterNotNull()}")
+}
+"#,
+    );
+    has(&found, "JavaIoSerializableObjectMustHaveReadResolve: Single");
+    assert_eq!(found.iter().filter(|f| f.starts_with("JavaIoSerializableObjectMustHaveReadResolve")).count(), 1, "{found:#?}");
+    has(&found, "BlockingMethodInNonBlockingContext: sleep");
+    has(&found, "ReplaceUntilWithRangeUntil: until");
+    has(&found, "ReplaceIsEmptyWithIfEmpty: if");
+    has(&found, "ConvertTwoComparisonsToRangeCheck: n >= 1 && n <= 10");
+    has(&found, "RemoveToStringInStringTemplate: toString");
+    has(&found, "UselessCallOnCollection: filterNotNull");
+    let check = |body: &str, rule: &str, expected: &str| {
+        let out = fixed(&format!("package a\n\nfun g(n: Int, s: String) {{\n    println({body})\n}}\n"), rule);
+        assert!(out.contains(expected), "{rule}: {out}");
+    };
+    check("if (s.isEmpty()) \"none\" else s", "ReplaceIsEmptyWithIfEmpty", "println(s.ifEmpty { \"none\" })");
+    check("n >= 1 && n < 10", "ConvertTwoComparisonsToRangeCheck", "println(n in 1..<10)");
+    check("\"${n.toString()}\"", "RemoveToStringInStringTemplate", "println(\"${n}\")");
+}

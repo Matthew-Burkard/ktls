@@ -354,6 +354,9 @@ rules! {
     SIMPLE_REDUNDANT_LET = "SimpleRedundantLet", Redundancy, Warning, true, [], "'x.let { it.f() }' instead of 'x.f()'";
     REDUNDANT_VALUE_ARGUMENT = "RedundantValueArgument", Redundancy, Warning, true, [], "Argument equal to the parameter's default value";
     REDUNDANT_LAMBDA = "RedundantLambdaOrAnonymousFunction", Redundancy, Warning, false, [], "Lambda called right where it is written ('{ … }()')";
+    EMPTY_SECONDARY_CONSTRUCTOR_BODY = "RemoveEmptySecondaryConstructorBody", Redundancy, Warning, true, [], "Empty '{}' body of a secondary constructor";
+    TO_STRING_IN_TEMPLATE = "RemoveToStringInStringTemplate", Redundancy, Warning, true, [], "'${x.toString()}' in a string template";
+    USELESS_CALL_ON_COLLECTION = "UselessCallOnCollection", Redundancy, Warning, true, [], "'filterNotNull()' on a collection whose elements are never null";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
@@ -397,6 +400,10 @@ rules! {
     JAVA_MAP_FOR_EACH = "JavaMapForEach", Style, Info, false, [], "Java 'Map.forEach { k, v -> }' instead of 'forEach { (k, v) -> }'";
     FILE_NAME_MATCHES_CLASS = "FileNameMatchesClass", Style, Info, false, [], "File with one top-level class named differently";
     NOT_NULL_ASSERTION_TO_ELVIS_RETURN = "ReplaceNotNullAssertionWithElvisReturn", Style, Info, false, [], "'val x = y!!' in a function that could 'return' instead";
+    CAN_BE_PRIMARY_CONSTRUCTOR_PROPERTY = "CanBePrimaryConstructorProperty", Style, Info, false, [], "'class A(x: Int) { val x = x }' instead of 'class A(val x: Int)'";
+    UNTIL_TO_RANGE_UNTIL = "ReplaceUntilWithRangeUntil", Style, Info, false, [], "'a until b' instead of 'a..<b'";
+    IS_EMPTY_TO_IF_EMPTY = "ReplaceIsEmptyWithIfEmpty", Style, Info, false, [], "'if (s.isEmpty()) d else s' instead of 's.ifEmpty { d }'";
+    TWO_COMPARISONS_TO_RANGE = "ConvertTwoComparisonsToRangeCheck", Style, Info, false, [], "'x >= a && x <= b' instead of 'x in a..b'";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
@@ -416,6 +423,10 @@ rules! {
     SUSPICIOUS_VAR_PROPERTY = "SuspiciousVarProperty", Bugs, Warning, false, [], "'var' with an initializer whose getter ignores the backing field";
     HAS_PLATFORM_TYPE = "HasPlatformType", Bugs, Warning, false, [], "Public declaration whose inferred type comes from Java (unknown nullability)";
     CONSTANT_CONDITIONS = "KotlinConstantConditions", Bugs, Warning, false, [], "Condition that is a constant ('if (true)', '1 > 2')";
+    EMPTY_RANGE = "EmptyRange", Bugs, Warning, false, [], "'10..1': an integer range whose start is past its end";
+    RECURSIVE_EQUALS = "RecursiveEqualsCall", Bugs, Warning, false, [], "'==' with 'this' inside 'equals' (calls itself)";
+    SERIALIZABLE_OBJECT = "JavaIoSerializableObjectMustHaveReadResolve", Bugs, Warning, false, [], "Serializable 'object' without 'readResolve' (deserializing makes a second instance)";
+    BLOCKING_IN_SUSPEND = "BlockingMethodInNonBlockingContext", Bugs, Warning, false, [], "'Thread.sleep' inside a suspend function";
     SELF_ASSIGNMENT = "SelfAssignment", Bugs, Warning, false, [], "Variable assigned to itself";
     EQUALS_OR_HASH_CODE = "EqualsOrHashCode", Bugs, Warning, false, [], "Class overrides only one of 'equals()' and 'hashCode()'";
     ARRAY_IN_DATA_CLASS = "ArrayInDataClass", Bugs, Warning, false, [], "Array property in a data class without custom 'equals()'/'hashCode()'";
