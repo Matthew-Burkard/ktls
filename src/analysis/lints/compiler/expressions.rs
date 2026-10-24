@@ -1227,9 +1227,30 @@ fn literal_initializer(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     }
     let Some(ty) = ast::child::<ast::TypeRef>(n) else { return };
     let Some(value) = initializer(n) else { return };
+    if value.kind() == SyntaxKind::LAMBDA_EXPR {
+        lambda_result(e, &value, &ty, out);
+        return;
+    }
     for value in branch_leaves(&value) {
         if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "type") {
             out.report_fixes(rule, value.text_range(), msg, fixes);
+        }
+    }
+}
+
+/// `val f: () -> Int = { "x" }`: the lambda's last expression against the declared result.
+fn lambda_result(e: &Engine, lambda: &SyntaxNode, declared: &ast::TypeRef, out: &mut Sink) {
+    let Some(function) = declared.syntax().children().find(|c| c.kind() == SyntaxKind::FUNCTION_TYPE) else { return };
+    let Some(result) = function.children().find_map(ast::TypeRef::cast) else { return };
+    let t = e.resolve_syntax_type(&result);
+    if matches!(fq_of(&t), Some("kotlin.Unit") | None) {
+        return;
+    }
+    let Some(last) = lambda.children().find(|c| c.kind() == SyntaxKind::BLOCK).and_then(|b| b.children().last()) else { return };
+    for v in branch_leaves(&last) {
+        if let Some((rule, msg, _, convert)) = type_mismatch(e, &v, &t, &result.syntax().text().to_string()) {
+            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
+            out.report_fixes(rule, v.text_range(), msg, convert.into_iter().collect());
         }
     }
 }

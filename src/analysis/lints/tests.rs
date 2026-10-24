@@ -3025,9 +3025,13 @@ fun f(c: Boolean, n: Int): Int {
     return if (c) "z" else 2
 }
 fun g(c: Boolean): String = if (c) "a" else 'b'
+val h: () -> Int = { "x" }
+val k: (Int) -> Int = { if (it > 1) it else 2 }
+val u: () -> Unit = { 1 }
 "#,
     );
     let mismatches: Vec<_> = found.iter().filter(|f| f.contains("MISMATCH")).collect();
+    assert_eq!(mismatches.iter().filter(|m| m.as_str() == "RETURN_TYPE_MISMATCH: \"x\"").count(), 1, "{mismatches:#?}");
     for expected in ["INITIALIZER_TYPE_MISMATCH: \"x\"", "INITIALIZER_TYPE_MISMATCH: 2", "ASSIGNMENT_TYPE_MISMATCH: \"y\"", "RETURN_TYPE_MISMATCH: \"z\"", "RETURN_TYPE_MISMATCH: 'b'"] {
         assert!(mismatches.iter().any(|m| m.as_str() == expected), "missing {expected}: {mismatches:#?}");
     }
