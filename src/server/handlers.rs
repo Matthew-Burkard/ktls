@@ -592,8 +592,8 @@ pub fn completion(cx: &Ctx, path: &Path, pos: lsp_types::Position, snippets: boo
                 detail: it.detail,
                 documentation: it.doc.map(|d| lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent { kind: lsp_types::MarkupKind::Markdown, value: d })),
                 tags: it.deprecated.then(|| vec![lsp_types::CompletionItemTag::DEPRECATED]),
-                // Our order: rank, then name; the index keeps it stable.
-                sort_text: Some(format!("{}{:05}", it.rank, i)),
+                // Our order: expected type, rank, then name; the index keeps it stable.
+                sort_text: Some(format!("{}{}{:05}", u8::from(!it.expected), it.rank, i)),
                 filter_text: it.filter,
                 insert_text_format: Some(if it.snippet { InsertTextFormat::SNIPPET } else { InsertTextFormat::PLAIN_TEXT }),
                 text_edit: Some(CompletionTextEdit::Edit(TextEdit { range: edit_range, new_text: it.insert.unwrap_or(it.label) })),

@@ -1475,6 +1475,33 @@ fn completes_when_branches() {
 }
 
 #[test]
+fn completion_ranks_expected_type_first() {
+    let Some(mut fx) = fixture() else { return };
+    let first = |fx: &mut Fx, body: &str| -> Vec<String> {
+        let c = fx.complete(&format!("{HEADER}enum class Color {{ RED, GREEN }}\nfun paint(c: Color, n: Int) {{}}\nfun run(u: User, color: Color, count: Int, flag: Boolean, name: String?) {{\n{body}\n}}\n"));
+        c.items.iter().take_while(|i| i.expected).map(|i| i.label.clone()).collect()
+    };
+    // Argument positions: the parameter's type.
+    let labels = first(&mut fx, "    paint($0)");
+    has_all(&labels, &["color"]);
+    assert!(!labels.iter().any(|l| l == "count" || l == "u"), "{labels:?}");
+    let labels = first(&mut fx, "    paint(color, $0)");
+    has_all(&labels, &["count"]);
+    assert!(!labels.iter().any(|l| l == "color"), "{labels:?}");
+    // Declared variable types, conditions, assignments and comparisons.
+    has_all(&first(&mut fx, "    val c: Color = $0"), &["color"]);
+    let labels = first(&mut fx, "    if ($0) {}");
+    has_all(&labels, &["flag", "true", "false"]);
+    assert!(!labels.iter().any(|l| l == "count" || l == "Boolean"), "{labels:?}");
+    has_all(&first(&mut fx, "    var s: String? = null\n    s = $0"), &["name", "null"]);
+    has_all(&first(&mut fx, "    if (color == $0) {}"), &["color"]);
+    // Members after a dot.
+    has_all(&first(&mut fx, "    val s: String = u.$0"), &["name"]);
+    // No expected type: no reordering.
+    assert!(first(&mut fx, "    $0").is_empty());
+}
+
+#[test]
 fn inlay_hints_for_chains_and_lambdas() {
     let Some(mut fx) = fixture() else { return };
     let config = inlay::InlayConfig { types: false, lambda_parameters: false, return_types: false, parameter_names: inlay::ParameterNames::None, ..Default::default() };

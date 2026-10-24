@@ -5,17 +5,17 @@
 //! context: members of a receiver, names in scope, types, import paths, declarations
 //! (keywords and `override`s), or named arguments.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use super::infer::{Def, Engine, LocalKind, Qualifier, Subst, class_type, substitute};
+use super::infer::{Def, Engine, LocalKind, Qualifier, Subst, class_type, fq_of, strip, substitute};
 use crate::analysis::diagnostics::{LocalsCache, scope_at};
 use crate::analysis::resolve::Resolved;
 use crate::analysis::source::Language;
 use crate::analysis::{FileData, Snapshot};
 use crate::symbols::{Modifiers, Origin, Symbol, SymbolKind, TypeRef};
-use crate::syntax::ast;
+use crate::syntax::ast::{self, AstNode};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize};
 
 /// Inserted at the cursor before parsing.
@@ -60,6 +60,10 @@ pub struct Item {
     /// Lower sorts first: 0 named arguments, locals, 1 members, 2 extensions, 3 this
     /// package and imports, 4 default imports, 5 keywords, 6 needs an import.
     pub rank: u8,
+    /// Its type fits the type expected at the cursor (sorted first).
+    pub expected: bool,
+    /// The value's type, matched against the expected type.
+    ty: Option<TypeRef>,
     /// Extra edits (an import), in the original text.
     pub additional: Vec<(TextRange, String)>,
     pub deprecated: bool,
@@ -132,7 +136,8 @@ pub fn complete(snap: &Snapshot, path: &Path, offset: TextSize, opts: Options) -
     let prefix = text[usize::from(start)..o].to_string();
     let next_char = file.text[o..].chars().find(|c| !c.is_alphanumeric() && *c != '_');
     let context = classify(&tok, &text)?;
-    let mut c = Collector { e: &e, file, prefix, opts, next_char, offset, items: Vec::new(), seen: HashSet::new(), truncated: false };
+    let expected = tok.parent().and_then(|n| expected_type(&e, &n));
+    let mut c = Collector { e: &e, file, prefix, opts, next_char, offset, items: Vec::new(), seen: HashSet::new(), truncated: false, expected, conforming: HashMap::new() };
     match context {
         Context::Member { recv, callable_ref } => c.members(&recv, &tok, callable_ref),
         Context::Scope { at, statement, callable_ref } => c.scope(&at, statement, callable_ref),
@@ -149,7 +154,7 @@ pub fn complete(snap: &Snapshot, path: &Path, offset: TextSize, opts: Options) -
     let key = |i: &Item| {
         let name = i.filter.as_deref().unwrap_or(&i.label);
         let case_miss = first.is_some_and(|f| !name.starts_with(f));
-        (case_miss, i.rank, i.label.to_lowercase())
+        (case_miss, !i.expected, i.rank, i.label.to_lowercase())
     };
     items.sort_by_cached_key(key);
     items.truncate(MAX_ITEMS);
@@ -168,7 +173,7 @@ fn kdoc_completion(snap: &Snapshot, file: &Arc<FileData>, offset: TextSize, opts
     let decl = e.root.covering_element(link.decl.text_range()).ancestors().find(|a| a.text_range() == link.decl.text_range() && a.kind() == link.decl.kind())?;
     let (prefix, range) = link.segments.last()?.clone();
     let range = TextRange::new(range.start(), offset);
-    let mut c = Collector { e: &e, file, prefix: prefix[..usize::from(range.len()).min(prefix.len())].to_string(), opts, next_char: None, offset, items: Vec::new(), seen: HashSet::new(), truncated: false };
+    let mut c = Collector { e: &e, file, prefix: prefix[..usize::from(range.len()).min(prefix.len())].to_string(), opts, next_char: None, offset, items: Vec::new(), seen: HashSet::new(), truncated: false, expected: None, conforming: HashMap::new() };
     let at = kdoc::anchor(&decl);
     if link.segments.len() == 1 {
         for (name, _) in kdoc::parameters(&decl) {
@@ -278,6 +283,10 @@ struct Collector<'a, 's> {
     items: Vec<Item>,
     seen: HashSet<(String, Option<String>, Option<String>)>,
     truncated: bool,
+    /// The class (and nullability) the value at the cursor should have.
+    expected: Option<(String, bool)>,
+    /// Classes known to conform to the expected one.
+    conforming: HashMap<String, bool>,
 }
 
 /// `prefix` matches `name` (case-insensitively): the first letters agree, and every
@@ -308,16 +317,39 @@ pub fn matches(prefix: &str, name: &str) -> bool {
 }
 
 impl Collector<'_, '_> {
-    fn push(&mut self, item: Item) {
+    fn push(&mut self, mut item: Item) {
         let key = item.filter.clone().unwrap_or_else(|| item.label.clone());
         if !matches(&self.prefix, &key) {
             return;
+        }
+        if let Some(t) = item.ty.take() {
+            // A class is a value only through a constructor.
+            item.expected = self.fits(&t) && (item.kind != ItemKind::Class || fq_of(&t).is_some_and(|fq| self.e.constructors(fq).iter().any(|c| self.visible(c))));
         }
         // Overloads of package-level functions collapse into one item; members keep theirs.
         let overload = if item.rank >= 3 && item.kind == ItemKind::Function { None } else { item.label_detail.clone() };
         if self.seen.insert((item.label.clone(), overload, item.additional.first().map(|(_, t)| t.clone()))) {
             self.items.push(item);
         }
+    }
+
+    /// Whether a value of type `t` fits the expected type.
+    fn fits(&mut self, t: &TypeRef) -> bool {
+        let Some((want, nullable)) = &self.expected else { return false };
+        let t = strip(t);
+        let TypeRef::Named { fq: Some(fq), nullable: n, .. } = t else { return false };
+        if fq.as_ref() == "kotlin.Nothing" || *n && !nullable {
+            return false;
+        }
+        if fq.as_ref() == want {
+            return true;
+        }
+        if let Some(hit) = self.conforming.get(fq.as_ref()) {
+            return *hit;
+        }
+        let ok = self.e.conforms(&TypeRef::named(fq), want) == Some(true);
+        self.conforming.insert(fq.to_string(), ok);
+        ok
     }
 
     /// Whether `sym` can be used from this file.
@@ -343,6 +375,8 @@ impl Collector<'_, '_> {
             insert: None,
             snippet: false,
             rank,
+            expected: false,
+            ty: None,
             additional: Vec::new(),
             deprecated: false,
             doc: None,
@@ -383,6 +417,10 @@ impl Collector<'_, '_> {
                 let params: Vec<String> = sym.params.iter().map(|p| format!("{}{}: {}", if p.vararg { "vararg " } else { "" }, p.name, self.type_text(sym, &p.ty, subst))).collect();
                 item.label_detail = Some(format!("({})", params.join(", ")));
                 item.description = sym.ty.as_ref().map(|t| self.type_text(sym, t, subst));
+                item.ty = match sym.kind {
+                    SymbolKind::Constructor => Some(TypeRef::named(sym.fq_name.rsplit_once('.').map_or(sym.fq_name.as_str(), |(c, _)| c))),
+                    _ => sym.ty.as_ref().map(|t| substitute(&self.e.resolve_declared(sym, t), subst)),
+                };
                 if let Some(r) = &sym.receiver {
                     item.label_detail = Some(format!("({}) for {}", params.join(", "), self.type_text(sym, r, subst)));
                 }
@@ -392,11 +430,18 @@ impl Collector<'_, '_> {
             }
             SymbolKind::Property | SymbolKind::Field | SymbolKind::EnumEntry => {
                 item.description = sym.ty.as_ref().map(|t| self.type_text(sym, t, subst));
+                item.ty = sym.ty.as_ref().map(|t| substitute(&self.e.resolve_declared(sym, t), subst));
                 if let Some(r) = sym.receiver.as_ref().filter(|_| sym.kind == SymbolKind::Property) {
                     item.label_detail = Some(format!(" for {}", self.type_text(sym, r, subst)));
                 }
             }
-            _ => item.description = Some(package_of(&sym.fq_name)),
+            _ => {
+                item.description = Some(package_of(&sym.fq_name));
+                // A class is completed to a constructor call; an object is a value.
+                if matches!(sym.kind, SymbolKind::Class | SymbolKind::Object) {
+                    item.ty = Some(TypeRef::named(&sym.fq_name));
+                }
+            }
         }
         self.push(item);
     }
@@ -448,6 +493,10 @@ impl Collector<'_, '_> {
     fn keywords(&mut self, words: &[&str]) {
         for w in words {
             let mut item = Self::item(w, ItemKind::Keyword, 5);
+            if matches!(*w, "true" | "false") {
+                item.ty = Some(TypeRef::named("kotlin.Boolean"));
+            }
+            item.expected = *w == "null" && self.expected.as_ref().is_some_and(|(_, n)| *n);
             if !matches!(*w, "true" | "false" | "null" | "this" | "super" | "break" | "continue" | "return" | "init" | "else") {
                 item.insert = Some(format!("{w} "));
             }
@@ -708,6 +757,7 @@ impl Collector<'_, '_> {
             };
             let mut item = Self::item(&l.name, kind, 0);
             item.description = l.ty.as_ref().map(|t| t.display());
+            item.ty = l.ty.clone().filter(|_| kind == ItemKind::Variable);
             item.detail = Some(format!("{} {}{}", match l.kind {
                 LocalKind::Var => "var",
                 LocalKind::Function => "fun",
@@ -803,11 +853,13 @@ impl Collector<'_, '_> {
             item.filter = Some(self.prefix.clone());
             item.detail = Some(missing.join(", "));
             item.insert = Some(missing.iter().map(|m| format!("{m} -> TODO()")).collect::<Vec<_>>().join(&format!("\n{indent}")));
+            item.expected = true;
             self.push(item);
         }
         for m in &missing {
             let mut item = Self::item(m, ItemKind::Keyword, 0);
             item.insert = Some(format!("{m} -> "));
+            item.expected = true;
             self.push(item);
         }
     }
@@ -1267,4 +1319,82 @@ pub(super) fn suggested_name(t: &TypeRef) -> String {
         Some(n @ ("object" | "class" | "interface" | "in" | "is" | "as" | "fun" | "val" | "var" | "when" | "if" | "for" | "do" | "try" | "throw" | "return" | "package" | "typealias" | "this" | "super" | "null")) => format!("{n}Value"),
         Some(n) => n.to_string(),
     }
+}
+
+/// The class (and nullability) expected of the expression whose innermost node is `n`:
+/// a parameter type (every candidate agreeing), a declared variable, property or return
+/// type, the left side of an assignment or comparison, a condition, a `when` subject.
+fn expected_type(e: &Engine, n: &SyntaxNode) -> Option<(String, bool)> {
+    let mut node = n.clone();
+    // Out of `recv.name` and `name(…)`.
+    while let Some(p) = node.parent().filter(|p| match p.kind() {
+        SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR => p.last_child().as_ref() == Some(&node),
+        SyntaxKind::CALL_EXPR => p.first_child().as_ref() == Some(&node),
+        _ => false,
+    }) {
+        node = p;
+    }
+    let parent = node.parent()?;
+    let declared = |t: Option<ast::TypeRef>| t.map(|t| e.resolve_syntax_type(&t));
+    let t = match parent.kind() {
+        SyntaxKind::VALUE_ARGUMENT => {
+            let list = parent.parent()?;
+            let call = list.parent().filter(|c| c.kind() == SyntaxKind::CALL_EXPR)?;
+            let callee = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF)?;
+            let name = parent.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| ast::token(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t));
+            let index = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT).position(|a| a == parent)?;
+            let mut agreed: Option<(String, bool)> = None;
+            for (sym, subst) in e.call_candidates(&callee)? {
+                let p = match &name {
+                    Some(n) => sym.params.iter().find(|p| p.name == *n),
+                    None => sym.params.get(index).or_else(|| sym.params.last().filter(|p| p.vararg)),
+                };
+                let Some(p) = p else { continue };
+                if p.vararg {
+                    return None;
+                }
+                let t = class_of(&substitute(&e.resolve_declared(&sym, &p.ty), &subst))?;
+                if agreed.as_ref().is_some_and(|a| *a != t) {
+                    return None;
+                }
+                agreed = Some(t);
+            }
+            return agreed;
+        }
+        SyntaxKind::PROPERTY if node.kind() != SyntaxKind::TYPE_REFERENCE => declared(ast::child::<ast::TypeRef>(&parent))?,
+        SyntaxKind::RETURN_EXPR if parent.children().all(|c| c.kind() != SyntaxKind::LABEL_QUALIFIER) => {
+            let f = parent.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR | SyntaxKind::ANONYMOUS_FUNCTION)).filter(|f| f.kind() == SyntaxKind::FUN)?;
+            declared(ast::FunDecl::cast(f)?.return_type())?
+        }
+        SyntaxKind::FUN => declared(ast::FunDecl::cast(parent)?.return_type())?,
+        SyntaxKind::CONDITION => TypeRef::named("kotlin.Boolean"),
+        SyntaxKind::BINARY_EXPR => {
+            let lhs = parent.first_child().filter(|l| *l != node)?;
+            let op = parent.children_with_tokens().find(|t| !t.kind().is_trivia() && t.as_node() != Some(&lhs))?;
+            let op = match op {
+                rowan::NodeOrToken::Node(n) => n.first_token()?,
+                rowan::NodeOrToken::Token(t) => t,
+            };
+            if !matches!(op.kind(), SyntaxKind::EQ | SyntaxKind::EQ2 | SyntaxKind::NOT_EQ) {
+                return None;
+            }
+            e.type_of(&lhs)?
+        }
+        SyntaxKind::WHEN_CONDITION => {
+            let when = parent.parent()?.parent().filter(|w| w.kind() == SyntaxKind::WHEN_EXPR)?;
+            let subject = when.children().find(|c| c.kind() == SyntaxKind::WHEN_SUBJECT)?;
+            e.type_of(&subject.children().last()?)?
+        }
+        _ => return None,
+    };
+    class_of(&t)
+}
+
+/// The class of `t`, unless it is too general to rank by.
+fn class_of(t: &TypeRef) -> Option<(String, bool)> {
+    let fq = fq_of(t)?;
+    if matches!(fq, "kotlin.Any" | "kotlin.Unit" | "kotlin.Nothing") {
+        return None;
+    }
+    Some((fq.to_string(), matches!(strip(t), TypeRef::Named { nullable: true, .. })))
 }
