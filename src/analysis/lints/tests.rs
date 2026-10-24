@@ -3266,3 +3266,30 @@ fn explicit_api_mode_and_missing_docs() {
     let ids: Vec<&str> = lints.iter().filter(|l| l.rule.id == "KDocMissingDocumentation").map(|l| l.message.as_str()).collect();
     assert_eq!(ids, vec!["Missing documentation for 'Undocumented'"]);
 }
+
+#[test]
+fn generic_argument_mismatches() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+open class Animal
+class Dog : Animal()
+
+fun f(dogs: List<Dog>, animals: MutableList<Animal>, names: List<String?>, cmp: Comparable<Animal>) {
+    val a: List<Animal> = dogs
+    val b: List<String> = dogs
+    val c: MutableList<Dog> = animals
+    val d: MutableList<Animal> = animals
+    val e: List<String> = names
+    val g: Comparable<Dog> = cmp
+    val h: List<Any?> = names
+    println(listOf(a, b, c, d, e, g, h))
+}
+"#,
+    );
+    let hits: Vec<_> = found.iter().filter(|f| f.starts_with("INITIALIZER_TYPE_MISMATCH")).cloned().collect();
+    assert_eq!(hits, vec!["INITIALIZER_TYPE_MISMATCH: dogs", "INITIALIZER_TYPE_MISMATCH: animals", "INITIALIZER_TYPE_MISMATCH: names"], "{found:#?}");
+}

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::super::*;
 use crate::analysis::diagnostics::{LocalsCache, scope_at};
-use crate::analysis::ide::infer::{Def, Engine, LocalKind, Qualifier, fq_of};
+use crate::analysis::ide::infer::{Def, Engine, LocalKind, Qualifier, fq_of, strip};
 use crate::analysis::resolve::Resolved;
 use crate::symbols::{Modifiers, Origin, Symbol, SymbolKind, TypeRef};
 
@@ -1081,6 +1081,16 @@ pub(super) fn literal_type(n: &SyntaxNode) -> Option<Option<&'static str>> {
 /// A literal, or a value of certain type (see `certain::certain_type`), where type `t` (written
 /// `shown`) is expected: the rule, message and the type the declaration could change to.
 pub(super) fn type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: &str) -> Option<(&'static Rule, String, String, Option<Fix>)> {
+    mismatch_of(e, value, t, shown, false)
+}
+
+/// Like [`type_mismatch`] against a written (not substituted) type, also comparing type
+/// arguments of variables and properties (calls infer theirs from the expected type).
+pub(super) fn declared_type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: &str) -> Option<(&'static Rule, String, String, Option<Fix>)> {
+    mismatch_of(e, value, t, shown, true)
+}
+
+fn mismatch_of(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: &str, check_arguments: bool) -> Option<(&'static Rule, String, String, Option<Fix>)> {
     let (fq, nullable) = match t {
         TypeRef::Named { fq: Some(fq), nullable, .. } => (fq.to_string(), *nullable),
         TypeRef::Function { nullable, .. } => ("kotlin.Function".to_string(), *nullable),
@@ -1109,7 +1119,9 @@ pub(super) fn type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: 
         let null_mismatch = !nullable
             && matches!(&actual, TypeRef::Named { nullable: true, fq: Some(f), .. } if &**f != "kotlin.Nothing")
             && (value.kind() != SyntaxKind::NAME_REF || !matches!(e.resolve_name_ref(value).as_slice(), [Def::Local(_)]) || nullable_local(e, value).is_some());
-        if e.conforms(&actual, &fq)? && !null_mismatch {
+        let names_only = value.descendants_with_tokens().all(|d| matches!(d.kind(), SyntaxKind::NAME_REF | SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::IDENT | SyntaxKind::DOT | SyntaxKind::THIS_EXPR | SyntaxKind::THIS_KW) || d.kind().is_trivia());
+        let arguments = check_arguments && names_only && arguments_conflict(e, &actual, t);
+        if e.conforms(&actual, &fq)? && !null_mismatch && !arguments {
             return None;
         }
         let actual_shown = super::certain::shown(&actual);
@@ -1143,6 +1155,42 @@ pub(super) fn type_mismatch(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: 
     let to = if nullable { format!("{actual}?") } else { actual.to_string() };
     let convert = conversion(value, lit, &fq, true);
     Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual}'."), to, convert))
+}
+
+/// `List<User>` where `List<String>` is expected: type arguments of the same class that do
+/// not fit its parameters' variance (`out`: subtypes, invariant: the same class, `in`:
+/// supertypes). Unknown classes and type parameters never conflict.
+fn arguments_conflict(e: &Engine, actual: &TypeRef, expected: &TypeRef) -> bool {
+    use crate::symbols::{TypeArg, Variance};
+    let (TypeRef::Named { fq: Some(a), args: aa, .. }, TypeRef::Named { fq: Some(x), args: xa, .. }) = (strip(actual), strip(expected)) else { return false };
+    if a != x || aa.len() != xa.len() || aa.is_empty() {
+        return false;
+    }
+    let Some(c) = e.classifier(a) else { return false };
+    let declared: Vec<Variance> = c.symbol().type_params.iter().map(|p| p.variance).collect();
+    if declared.len() != aa.len() {
+        return false;
+    }
+    for ((arg, exp), decl) in aa.iter().zip(xa).zip(declared) {
+        let (TypeArg::Type { ty: at, .. }, TypeArg::Type { variance: use_site, ty: xt }) = (arg, exp) else { continue };
+        if matches!(at, TypeRef::Platform(_)) || matches!(xt, TypeRef::Platform(_)) {
+            continue;
+        }
+        let (TypeRef::Named { fq: Some(af), nullable: an, .. }, TypeRef::Named { fq: Some(xf), nullable: xn, .. }) = (at, xt) else { continue };
+        let variance = if *use_site != Variance::Invariant { *use_site } else { decl };
+        let conflict = match variance {
+            Variance::Out => (*an && !*xn) || e.conforms(&TypeRef::named(af), xf) == Some(false),
+            Variance::In => (*xn && !*an) || e.conforms(&TypeRef::named(xf), af) == Some(false),
+            Variance::Invariant => {
+                // Equal classes only (both known); nested arguments are not compared.
+                an != xn || af != xf && e.conforms(&TypeRef::named(af), xf).is_some() && e.conforms(&TypeRef::named(xf), af).is_some()
+            }
+        };
+        if conflict {
+            return true;
+        }
+    }
+    false
 }
 
 /// "Convert to 'Int'": a conversion call (`.toInt()`, `.toString()`, `.code`), or for a
@@ -1215,7 +1263,7 @@ pub(super) fn branch_leaves(v: &SyntaxNode) -> Vec<SyntaxNode> {
 /// declared type (`what`: "type" / "return type") or converting the value.
 fn mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef, what: &str) -> Option<(&'static Rule, String, Vec<Fix>)> {
     let t = e.resolve_syntax_type(expected);
-    let (rule, msg, to, convert) = type_mismatch(e, value, &t, &expected.syntax().text().to_string())?;
+    let (rule, msg, to, convert) = declared_type_mismatch(e, value, &t, &expected.syntax().text().to_string())?;
     let change = Fix::replace(format!("Change {what} to '{to}'"), expected.syntax().text_range(), to);
     Some((rule, msg, std::iter::once(change).chain(convert).collect()))
 }
