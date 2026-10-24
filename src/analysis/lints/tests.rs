@@ -2337,3 +2337,29 @@ fun f(xs: List<Int>, s: String, t: String, ok: Boolean, o: java.util.Optional<In
     check("s.uppercase() != t.uppercase()", "ReplaceWithIgnoreCaseEquals", "!s.equals(t, ignoreCase = true)");
     assert!(fixed("package a\n\nclass A constructor(val x: Int)\n", "RedundantConstructorKeyword").contains("class A(val x: Int)"));
 }
+
+#[test]
+fn java_static_methods_with_kotlin_analogs() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let text = r#"package a
+
+import java.util.Arrays
+
+fun f(a: IntArray, s: String, c: Char, x: Double) {
+    println(Math.max(1, 2) + Math.abs(-1))
+    System.out.println(Arrays.toString(a))
+    println(Integer.parseInt(s) + Math.pow(x, 2.0))
+    Arrays.fill(a, 0, 1, 5)
+    println(Character.isDigit(c))
+}
+"#;
+    let found = lint(text);
+    let hits: Vec<_> = found.iter().filter(|f| f.starts_with("ReplaceJavaStaticMethodWithKotlinAnalog")).map(|f| f.split(": ").nth(1).unwrap().to_string()).collect();
+    assert_eq!(hits, vec!["Math.max(1, 2)", "Math.abs(-1)", "System.out.println(Arrays.toString(a))", "Arrays.toString(a)", "Integer.parseInt(s)", "Math.pow(x, 2.0)", "Character.isDigit(c)"], "{found:#?}");
+    let out = fixed(&text.replace("Math.max(1, 2) + ", ""), "ReplaceJavaStaticMethodWithKotlinAnalog");
+    assert!(out.contains("println(abs(-1))") && out.contains("import kotlin.math.abs\n"), "{out}");
+    let out = fixed(&text.replace("Math.max(1, 2) + Math.abs(-1)", "1").replace("System.out.println(", "println("), "ReplaceJavaStaticMethodWithKotlinAnalog");
+    assert!(out.contains("println(a.contentToString())"), "{out}");
+}

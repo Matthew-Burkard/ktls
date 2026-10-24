@@ -243,7 +243,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `IfThenToSafeAccess`, `IfThenToElvis`, `FoldInitializerAndIfToElvis`
 - [x] [P1] `ReplaceNegatedIsEmptyWithIsNotEmpty`, `SimplifyNegatedBinaryExpression`, `SimplifyBooleanWithConstants` (stdlib `isEmpty`/`isBlank` pairs; `==`, `===`, `in`, `is`; `&& true`, `|| false`, `== true/false` on non-null Booleans)
 - [~] [P1] `ConvertTwoComparisonsToRangeCheck`, `ConvertNaNEquality` — *partial: `ConvertNaNEquality`*
-- [ ] [P1] `ReplaceJavaStaticMethodWithKotlinAnalog` (`Math.max`, `System.out.println`, `Arrays.asList`…)
+- [x] [P1] `ReplaceJavaStaticMethodWithKotlinAnalog` (`Math.max`, `System.out.println`, `Arrays.asList`…): `Math` functions (adding `kotlin.math` imports), `Arrays` content functions, `parseInt`-style parsing, `Character` tests, `System.out.print(ln)`
 - [ ] [P1] `ReplaceToStringWithStringTemplate`, `ReplaceSubstringWithTake/Drop/SubstringBefore/After`
 - [x] [P1] `ReplaceManualRangeWithIndicesCalls` (`0 until list.size` → `list.indices`)
 - [x] [P1] `ReplaceWithOperatorAssignment` (`x = x + 1` → `x += 1`) — *numbers, chars and strings (other types may have `plusAssign`); names and `this.x`/`a.b` chains only*

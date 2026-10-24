@@ -24,6 +24,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 put_assignment(cx, &n, out);
                 call_chain(cx, &n, out);
                 count_with_size(cx, &n, out);
+                java_static_method(cx, &n, out);
             }
             SyntaxKind::PREFIX_EXPR => {
                 negated_is_empty(cx, &n, out);
@@ -657,4 +658,122 @@ fn ignore_case_equals(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     let not = if op.kind() == SyntaxKind::NOT_EQ { "!" } else { "" };
     let text = format!("{not}{}.equals({}, ignoreCase = true)", a.text(), b.text());
     out.report(&IGNORE_CASE_EQUALS, n.text_range(), "Should be replaced with 'equals(..., ignoreCase = true)'", Some(Fix::replace("Replace with 'equals(..., ignoreCase = true)'", n.text_range(), text)));
+}
+
+/// How a Java static call becomes Kotlin.
+enum Analog {
+    /// A top-level function, with the import it needs.
+    Function(&'static str, Option<&'static str>),
+    /// An extension on the first argument (`Arrays.toString(a)` → `a.contentToString()`),
+    /// with the import it needs.
+    Extension(&'static str, Option<&'static str>),
+}
+
+const JAVA_STATICS: &[(&str, &str, Analog)] = &[
+    ("java.lang.Math", "max", Analog::Function("maxOf", None)),
+    ("java.lang.Math", "min", Analog::Function("minOf", None)),
+    ("java.lang.Math", "abs", Analog::Function("abs", Some("kotlin.math.abs"))),
+    ("java.lang.Math", "sqrt", Analog::Function("sqrt", Some("kotlin.math.sqrt"))),
+    ("java.lang.Math", "cbrt", Analog::Function("cbrt", Some("kotlin.math.cbrt"))),
+    ("java.lang.Math", "sin", Analog::Function("sin", Some("kotlin.math.sin"))),
+    ("java.lang.Math", "cos", Analog::Function("cos", Some("kotlin.math.cos"))),
+    ("java.lang.Math", "tan", Analog::Function("tan", Some("kotlin.math.tan"))),
+    ("java.lang.Math", "atan2", Analog::Function("atan2", Some("kotlin.math.atan2"))),
+    ("java.lang.Math", "hypot", Analog::Function("hypot", Some("kotlin.math.hypot"))),
+    ("java.lang.Math", "exp", Analog::Function("exp", Some("kotlin.math.exp"))),
+    ("java.lang.Math", "log", Analog::Function("ln", Some("kotlin.math.ln"))),
+    ("java.lang.Math", "log10", Analog::Function("log10", Some("kotlin.math.log10"))),
+    ("java.lang.Math", "floor", Analog::Function("floor", Some("kotlin.math.floor"))),
+    ("java.lang.Math", "ceil", Analog::Function("ceil", Some("kotlin.math.ceil"))),
+    ("java.lang.Math", "pow", Analog::Extension("pow", Some("kotlin.math.pow"))),
+    ("java.util.Arrays", "asList", Analog::Function("listOf", None)),
+    ("java.util.Arrays", "toString", Analog::Extension("contentToString", None)),
+    ("java.util.Arrays", "deepToString", Analog::Extension("contentDeepToString", None)),
+    ("java.util.Arrays", "equals", Analog::Extension("contentEquals", None)),
+    ("java.util.Arrays", "hashCode", Analog::Extension("contentHashCode", None)),
+    ("java.util.Arrays", "copyOf", Analog::Extension("copyOf", None)),
+    ("java.util.Arrays", "sort", Analog::Extension("sort", None)),
+    ("java.util.Arrays", "fill", Analog::Extension("fill", None)),
+    ("java.lang.Integer", "parseInt", Analog::Extension("toInt", None)),
+    ("java.lang.Long", "parseLong", Analog::Extension("toLong", None)),
+    ("java.lang.Double", "parseDouble", Analog::Extension("toDouble", None)),
+    ("java.lang.Float", "parseFloat", Analog::Extension("toFloat", None)),
+    ("java.lang.Short", "parseShort", Analog::Extension("toShort", None)),
+    ("java.lang.Byte", "parseByte", Analog::Extension("toByte", None)),
+    ("java.lang.Character", "isDigit", Analog::Extension("isDigit", None)),
+    ("java.lang.Character", "isLetter", Analog::Extension("isLetter", None)),
+    ("java.lang.Character", "isLetterOrDigit", Analog::Extension("isLetterOrDigit", None)),
+    ("java.lang.Character", "isWhitespace", Analog::Extension("isWhitespace", None)),
+    ("java.lang.Character", "isUpperCase", Analog::Extension("isUpperCase", None)),
+    ("java.lang.Character", "isLowerCase", Analog::Extension("isLowerCase", None)),
+    ("java.lang.Character", "toUpperCase", Analog::Extension("uppercaseChar", None)),
+    ("java.lang.Character", "toLowerCase", Analog::Extension("lowercaseChar", None)),
+    ("java.lang.System.out", "println", Analog::Function("println", None)),
+    ("java.lang.System.out", "print", Analog::Function("print", None)),
+];
+
+/// `Math.max(a, b)` → `maxOf(a, b)`, `Arrays.toString(a)` → `a.contentToString()`,
+/// `System.out.println(x)` → `println(x)`.
+fn java_static_method(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    use crate::analysis::ide::infer::Qualifier;
+    if !cx.on(&JAVA_STATIC_METHOD) || has_comments(n) {
+        return;
+    }
+    let mut parts = n.children();
+    let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    if call.kind() != SyntaxKind::CALL_EXPR || call.children().any(|c| matches!(c.kind(), SyntaxKind::LAMBDA_ARGUMENT | SyntaxKind::TYPE_ARGUMENT_LIST)) {
+        return;
+    }
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let Some(args) = plain_arguments(&call) else { return };
+    let Some(e) = cx.engine() else { return };
+    // The class (or `System.out`) the method is called on.
+    let owner = match e.resolve_qualifier(&recv) {
+        Qualifier::Static(c) => c.fq_name().to_string(),
+        _ => {
+            let mut p = recv.children();
+            let (Some(sys), Some(field)) = (p.next(), p.next()) else { return };
+            if field.text() != "out" || !matches!(e.resolve_qualifier(&sys), Qualifier::Static(c) if c.fq_name() == "java.lang.System") {
+                return;
+            }
+            "java.lang.System.out".to_string()
+        }
+    };
+    let name = callee.text().to_string();
+    let Some((_, _, analog)) = JAVA_STATICS.iter().find(|(o, m, _)| *o == owner && *m == name) else { return };
+    // Overloads whose arguments Kotlin orders differently (`fill(a, from, to, v)`) are left alone.
+    let arity_ok = match name.as_str() {
+        "fill" | "equals" | "copyOf" | "pow" => args.len() == 2,
+        "toString" | "deepToString" | "hashCode" => args.len() == 1,
+        "sort" => matches!(args.len(), 1 | 3),
+        _ => true,
+    };
+    if !arity_ok {
+        return;
+    }
+    let arg_text: Vec<String> = args.iter().map(|a| a.text().to_string()).collect();
+    let mut edits = Vec::new();
+    let import = match analog {
+        Analog::Function(_, i) | Analog::Extension(_, i) => *i,
+    };
+    if let Some(fq) = import
+        && !cx.text.contains(&format!("import {fq}\n"))
+        && !cx.text.contains(&format!("import {}.*", fq.rsplit_once('.').map_or("", |(p, _)| p)))
+        && let Some(file) = cx.snap.file(cx.path)
+    {
+        let (range, text) = crate::analysis::ide::completion::import_edit(file, fq);
+        edits.push(Edit { range, text });
+    }
+    let (replacement, shown) = match analog {
+        Analog::Function(f, _) => (format!("{f}({})", arg_text.join(", ")), format!("{f}()")),
+        Analog::Extension(f, _) => {
+            let Some((first, rest)) = args.split_first() else { return };
+            let simple = matches!(first.kind(), SyntaxKind::NAME_REF | SyntaxKind::CALL_EXPR | SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::PAREN_EXPR | SyntaxKind::THIS_EXPR | SyntaxKind::STRING_TEMPLATE | SyntaxKind::INDEX_EXPR);
+            let receiver = if simple { first.text().to_string() } else { format!("({})", first.text()) };
+            let rest: Vec<String> = rest.iter().map(|a| a.text().to_string()).collect();
+            (format!("{receiver}.{f}({})", rest.join(", ")), format!("{f}()"))
+        }
+    };
+    edits.push(Edit { range: n.text_range(), text: replacement });
+    out.report(&JAVA_STATIC_METHOD, n.text_range(), format!("Should be replaced with Kotlin function '{shown}'"), Some(Fix::new(format!("Replace with '{shown}'"), edits)));
 }

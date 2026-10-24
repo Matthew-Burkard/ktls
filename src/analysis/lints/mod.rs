@@ -306,6 +306,7 @@ rules! {
     BOOLEAN_CONSTANTS = "SimplifyBooleanWithConstants", Style, Info, false, [], "'x && true', 'x || false', 'x == true' and similar";
     COUNT_WITH_SIZE = "ReplaceCollectionCountWithSize", Style, Info, false, [], "'xs.count()' instead of 'xs.size'";
     IGNORE_CASE_EQUALS = "ReplaceWithIgnoreCaseEquals", Style, Info, false, [], "'a.lowercase() == b.lowercase()' instead of 'a.equals(b, ignoreCase = true)'";
+    JAVA_STATIC_METHOD = "ReplaceJavaStaticMethodWithKotlinAnalog", Style, Info, false, [], "Java static method with a Kotlin counterpart ('Math.max', 'System.out.println', 'Arrays.asList')";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
