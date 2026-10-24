@@ -401,7 +401,7 @@ rules! {
     FILE_NAME_MATCHES_CLASS = "FileNameMatchesClass", Style, Info, false, [], "File with one top-level class named differently";
     NOT_NULL_ASSERTION_TO_ELVIS_RETURN = "ReplaceNotNullAssertionWithElvisReturn", Style, Info, false, [], "'val x = y!!' in a function that could 'return' instead";
     CAN_BE_PRIMARY_CONSTRUCTOR_PROPERTY = "CanBePrimaryConstructorProperty", Style, Info, false, [], "'class A(x: Int) { val x = x }' instead of 'class A(val x: Int)'";
-    UNTIL_TO_RANGE_UNTIL = "ReplaceUntilWithRangeUntil", Style, Info, false, [], "'a until b' instead of 'a..<b'";
+    UNTIL_TO_RANGE_UNTIL = "ReplaceUntilWithRangeUntil", Style, Action, false, [], "'a until b' instead of 'a..<b'";
     IS_EMPTY_TO_IF_EMPTY = "ReplaceIsEmptyWithIfEmpty", Style, Info, false, [], "'if (s.isEmpty()) d else s' instead of 's.ifEmpty { d }'";
     TWO_COMPARISONS_TO_RANGE = "ConvertTwoComparisonsToRangeCheck", Style, Info, false, [], "'x >= a && x <= b' instead of 'x in a..b'";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";

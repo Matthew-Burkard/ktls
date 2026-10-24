@@ -156,6 +156,8 @@ fun use(p: Point, xs: List<Int>, m: Map<String, Int>): Int {
 }
 "#,
     );
+    // Code actions (`until` → `..<`) are offered, not reported.
+    let found: Vec<_> = found.into_iter().filter(|f| !f.starts_with("ReplaceUntilWithRangeUntil")).collect();
     assert!(found.is_empty(), "{found:#?}");
 }
 
