@@ -1085,6 +1085,9 @@ fn postfix_templates() {
     assert!(in_expr.contains(&"not".to_string()) && !in_expr.contains(&"val".to_string()) && !in_expr.contains(&"if".to_string()), "{in_expr:?}");
     // Snippet syntax in the receiver is escaped.
     assert!(expand(&mut fx, "    \"${u.name}\".va$0", "val").contains("= \"\\${u.name\\}\"$0"));
+    // Arrays passed as arguments can be spread.
+    assert!(expand(&mut fx, "    listOf(arrayOf(1).sp$0)", "spread").contains("listOf(*arrayOf(1)$0)"));
+    assert!(!labels(&mut fx, "    val a = arrayOf(1).$0").contains(&"spread".to_string()));
 }
 
 #[test]
@@ -1100,6 +1103,21 @@ fn lambda_parameter_completion() {
     // Not once the lambda has parameters, nor later in the body.
     assert!(snippets(&mut fx, "    xs.forEach { u -> $0 }").is_empty());
     assert!(snippets(&mut fx, "    xs.forEach {\n        println(it)\n        $0\n    }").is_empty());
+}
+
+#[test]
+fn annotation_completion() {
+    let Some(mut fx) = fixture() else { return };
+    let src = |ann: &str| format!("{HEADER}annotation class Marker\nclass Main\nclass C(\n    {ann} val x: Int,\n)\n");
+    let c = fx.complete(&src("@$0"));
+    let first: Vec<&str> = c.items.iter().take_while(|i| i.expected).map(|i| i.label.as_str()).collect();
+    assert!(first.contains(&"Marker") && first.contains(&"Deprecated") && !first.contains(&"Main"), "{first:?}");
+    has_all(&c.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>(), &["field:", "get:", "param:"]);
+    let labels = fx.labels(&src("@fi$0"));
+    has_all(&labels, &["field:", "file:"]);
+    let labels = fx.labels(&src("@field:$0"));
+    assert!(!labels.iter().any(|l| l.ends_with(':')), "{labels:?}");
+    has_all(&labels, &["Marker"]);
 }
 
 #[test]
@@ -1122,6 +1140,10 @@ fn kdoc_links() {
     has_all(&fx.labels(&doc("[User.$0")), &["name", "age", "greet"]);
     let c = fx.complete(&doc("[Us$0"));
     assert!(c.items.iter().all(|i| i.insert.is_none() && i.additional.is_empty()));
+    // Tag names after an `@` that starts a line.
+    let tags = fx.labels(&format!("{HEADER}/**\n * Greets.\n * @$0\n */\nfun greet(count: Int) {{}}\n"));
+    has_all(&tags, &["param", "return", "throws", "see"]);
+    assert_eq!(fx.labels(&format!("{HEADER}/**\n * @re$0\n */\nfun greet(count: Int) {{}}\n")), vec!["return", "receiver"]);
     // References include KDoc links (from the link or from the declaration).
     let refs = |fx: &mut Fx, text: &str| {
         let (path, offset) = fx.open(text);

@@ -137,7 +137,7 @@ pub fn complete(snap: &Snapshot, path: &Path, offset: TextSize, opts: Options) -
     let next_char = file.text[o..].chars().find(|c| !c.is_alphanumeric() && *c != '_');
     let context = classify(&tok, &text)?;
     let expected = tok.parent().and_then(|n| expected_type(&e, &n));
-    let mut c = Collector { e: &e, file, prefix, opts, next_char, offset, items: Vec::new(), seen: HashSet::new(), truncated: false, expected, conforming: HashMap::new() };
+    let mut c = Collector { e: &e, file, prefix, opts, next_char, offset, items: Vec::new(), seen: HashSet::new(), truncated: false, expected, conforming: HashMap::new(), annotation: false };
     match context {
         Context::Member { recv, callable_ref } => c.members(&recv, &tok, callable_ref),
         Context::Scope { at, statement, callable_ref } => c.scope(&at, statement, callable_ref),
@@ -167,13 +167,16 @@ fn kdoc_completion(snap: &Snapshot, file: &Arc<FileData>, offset: TextSize, opts
     use super::kdoc;
     let root = file.parse().syntax();
     let tok = kdoc::kdoc_at(&root, offset)?;
+    if let Some(c) = kdoc_tags(&tok, offset) {
+        return Some(c);
+    }
     let link = kdoc::link_at(&tok, offset, true)?;
     let e = Engine::new(snap, &file.path)?;
     // The engine has its own tree: find the same declaration there.
     let decl = e.root.covering_element(link.decl.text_range()).ancestors().find(|a| a.text_range() == link.decl.text_range() && a.kind() == link.decl.kind())?;
     let (prefix, range) = link.segments.last()?.clone();
     let range = TextRange::new(range.start(), offset);
-    let mut c = Collector { e: &e, file, prefix: prefix[..usize::from(range.len()).min(prefix.len())].to_string(), opts, next_char: None, offset, items: Vec::new(), seen: HashSet::new(), truncated: false, expected: None, conforming: HashMap::new() };
+    let mut c = Collector { e: &e, file, prefix: prefix[..usize::from(range.len()).min(prefix.len())].to_string(), opts, next_char: None, offset, items: Vec::new(), seen: HashSet::new(), truncated: false, expected: None, conforming: HashMap::new(), annotation: false };
     let at = kdoc::anchor(&decl);
     if link.segments.len() == 1 {
         for (name, _) in kdoc::parameters(&decl) {
@@ -210,6 +213,44 @@ fn kdoc_completion(snap: &Snapshot, file: &Arc<FileData>, offset: TextSize, opts
     items.sort_by_cached_key(|i| (i.rank, i.label.to_lowercase()));
     items.dedup_by(|a, b| a.label == b.label);
     Some(Completion { range, items, incomplete: c.truncated })
+}
+
+/// Block tags after an `@` that starts a KDoc line.
+fn kdoc_tags(tok: &SyntaxToken, offset: TextSize) -> Option<Completion> {
+    const TAGS: &[(&str, &str)] = &[
+        ("param", "a parameter or type parameter"),
+        ("return", "the return value"),
+        ("throws", "an exception the function throws"),
+        ("exception", "an exception the function throws"),
+        ("receiver", "the receiver of an extension"),
+        ("property", "a property of the primary constructor"),
+        ("constructor", "the primary constructor"),
+        ("sample", "a function whose body is the example"),
+        ("see", "a related declaration"),
+        ("author", "the author"),
+        ("since", "the version it was added in"),
+        ("suppress", "leave out of the documentation"),
+    ];
+    let base = tok.text_range().start();
+    let before = &tok.text()[..usize::from(offset - base)];
+    let word = before.len() - before.chars().rev().take_while(|c| c.is_ascii_alphabetic()).count();
+    let line = before[..word].strip_suffix('@')?;
+    let lead = line.rsplit('\n').next().unwrap_or(line);
+    if !lead.trim_start().trim_start_matches("/**").trim_start_matches('*').trim().is_empty() {
+        return None;
+    }
+    let prefix = &before[word..];
+    let items = TAGS
+        .iter()
+        .filter(|(t, _)| matches(prefix, t))
+        .map(|(t, doc)| {
+            let mut item = Collector::item(t, ItemKind::Keyword, 5);
+            item.detail = Some(format!("@{t}: {doc}"));
+            item.insert = Some(format!("{t} "));
+            item
+        })
+        .collect();
+    Some(Completion { range: TextRange::new(base + TextSize::from(word as u32), offset), items, incomplete: false })
 }
 
 fn classify(tok: &SyntaxToken, text: &str) -> Option<Context> {
@@ -287,6 +328,8 @@ struct Collector<'a, 's> {
     expected: Option<(String, bool)>,
     /// Classes known to conform to the expected one.
     conforming: HashMap<String, bool>,
+    /// Completing an annotation: annotation classes first.
+    annotation: bool,
 }
 
 /// `prefix` matches `name` (case-insensitively): the first letters agree, and every
@@ -325,6 +368,9 @@ impl Collector<'_, '_> {
         if let Some(t) = item.ty.take() {
             // A class is a value only through a constructor.
             item.expected = self.fits(&t) && (item.kind != ItemKind::Class || fq_of(&t).is_some_and(|fq| self.e.constructors(fq).iter().any(|c| self.visible(c))));
+        }
+        if self.annotation && item.detail.as_deref().is_some_and(|d| d.contains("annotation class ")) {
+            item.expected = true;
         }
         // Overloads of package-level functions collapse into one item; members keep theirs.
         let overload = if item.rank >= 3 && item.kind == ItemKind::Function { None } else { item.label_detail.clone() };
@@ -692,6 +738,11 @@ impl Collector<'_, '_> {
         if statement {
             templates.push(("try", format!("try {{\n    {expr}$0\n}} catch (e: Exception) {{\n    \n}}"), "try { expr } catch"));
         }
+        // An array passed to a vararg.
+        let array = !nullable && (fq == "kotlin.Array" || fq.starts_with("kotlin.") && fq.ends_with("Array") && !fq[7..].contains('.'));
+        if array && outer.parent().is_some_and(|p| p.kind() == SyntaxKind::VALUE_ARGUMENT) {
+            templates.push(("spread", format!("*{expr}$0"), "*expr"));
+        }
         let remove = TextRange::new(recv.text_range().start(), at.text_range().start());
         for (label, insert, shown) in templates {
             if !matches(&self.prefix, label) {
@@ -900,6 +951,18 @@ impl Collector<'_, '_> {
     }
 
     fn types(&mut self, at: &SyntaxNode, qualifier: &[String]) {
+        if let Some(a) = at.ancestors().find(|a| a.kind() == SyntaxKind::ANNOTATION).filter(|a| a.children().find(|c| c.kind() != SyntaxKind::ANNOTATION_TARGET).is_some_and(|c| c.text_range().contains_range(at.text_range()))) {
+            self.annotation = true;
+            // Use-site targets (`@field:`), unless one is written.
+            if qualifier.is_empty() && !a.children().any(|c| c.kind() == SyntaxKind::ANNOTATION_TARGET) {
+                for t in ["field", "get", "set", "param", "property", "setparam", "receiver", "delegate", "file", "all"] {
+                    let mut item = Self::item(&format!("{t}:"), ItemKind::Keyword, 0);
+                    item.filter = Some(t.to_string());
+                    item.detail = Some(format!("use-site target: @{t}:"));
+                    self.push(item);
+                }
+            }
+        }
         let package = self.e.package();
         let scope = scope_at(at, &package, &mut LocalsCache::default());
         if !qualifier.is_empty() {

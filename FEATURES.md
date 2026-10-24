@@ -140,12 +140,12 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P1] Named argument completion (`param =`)
 - [x] [P1] Override/implement member completion (generates full signature + body)
 - [x] [P1] `when` exhaustive branch completion (sealed/enum; also `Boolean` and `null`): each missing condition, or all at once
-- [~] [P1] Snippets / postfix templates: `.if`, `.not`, `.for`, `.val`, `.var`, `.return`, `.let`, `.notnull`, `.null`, `.try`, `.par`, `.sout`, `.when`, `.arg`, `.spread` — *partial: `.val`, `.var`, `.return`, `.if`, `.while`, `.not`, `.notnull`, `.null`, `.for`, `.when`, `.par`, `.arg`, `.println`, `.try` (by type and statement position; names from the type); not `.let`, `.spread`*
+- [~] [P1] Snippets / postfix templates: `.if`, `.not`, `.for`, `.val`, `.var`, `.return`, `.let`, `.notnull`, `.null`, `.try`, `.par`, `.sout`, `.when`, `.arg`, `.spread` — *partial: `.val`, `.var`, `.return`, `.if`, `.while`, `.not`, `.notnull`, `.null`, `.for`, `.when`, `.par`, `.arg`, `.println`, `.try`, `.spread` (arrays in arguments) (by type and statement position; names from the type); `.let` is the stdlib `let { }` completion*
 - [~] [P1] Live templates: `main`, `fun0/1/2`, `sout`, `iter`, `ifn`, `inn`, `void`, `closure`, `object`, `interface`, `exfun`, `exval` — *partial: all but `void`, plus `maina`, `soutv`, `serr` (as snippet completions in statements, at top level or in classes)*
 - [x] [P1] Lambda parameter completion (`{ a, b -> }` from expected function type; `(key, value) ->` for map entries and pairs)
 - [x] [P1] Completion in string templates (`$` / `${`)
-- [~] [P1] Completion in KDoc (`[Symbol]`, tags) — *partial: `[links]` (parameters, names in scope, members after `Type.`) and `@param`/`@throws`/`@see` subjects; not tag names*
-- [~] [P1] Annotation completion (incl. use-site targets) — *partial: annotation classes, no use-site targets*
+- [~] [P1] Completion in KDoc (`[Symbol]`, tags) — *partial: `[links]` (parameters, names in scope, members after `Type.`), `@param`/`@throws`/`@see` subjects, and tag names after an `@` that starts a line*
+- [x] [P1] Annotation completion (incl. use-site targets): annotation classes first, then other classes; `field:`, `get:`, `param:`… targets
 - [x] [P1] Package / import statement completion
 - [~] [P2] Static member completion through companion without qualifier, enum entry completion without class prefix — *partial: companion/nested members of enclosing classes*
 - [x] [P2] Callable references (`::fn`, `Type::member`)
