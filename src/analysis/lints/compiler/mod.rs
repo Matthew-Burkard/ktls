@@ -20,6 +20,7 @@ mod markers;
 mod restrictions;
 mod shapes;
 mod signatures;
+mod smartcast;
 mod types;
 mod typing;
 mod usage;
@@ -52,4 +53,5 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     variance::check(cx, out);
     restrictions::check(cx, out);
     values::check(cx, out);
+    smartcast::check(cx, out);
 }

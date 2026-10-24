@@ -2467,3 +2467,34 @@ fun f(x: Int, d: Double, s: String?, a: IntArray, b: IntArray, any: Any, xs: Lis
     has(&found, "SENSELESS_NULL_IN_WHEN: null");
     assert!(fixed("package a\n\nfun f(a: IntArray, b: IntArray) = a != b\n", "ARRAY_EQUALITY_OPERATOR_CAN_BE_REPLACED_WITH_EQUALS").contains("= !a.contentEquals(b)"));
 }
+
+#[test]
+fn impossible_smart_casts() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+open class C {
+    var name: String? = null
+    val fixed: String? = null
+    val computed: String? get() = name
+    open val opened: String? = null
+
+    fun f() {
+        if (name != null) println(name.length)
+        if (this.name != null) println(this.name.length)
+        if (fixed != null) println(fixed.length)
+        if (computed != null && computed.length > 1) println()
+        if (opened == null) return
+        println(opened.length)
+        println(name?.length)
+        if (name != null) println(name?.length)
+    }
+}
+"#,
+    );
+    let hits: Vec<_> = found.iter().filter(|f| f.starts_with("SMARTCAST_IMPOSSIBLE")).collect();
+    assert_eq!(hits, vec!["SMARTCAST_IMPOSSIBLE: name", "SMARTCAST_IMPOSSIBLE: this.name", "SMARTCAST_IMPOSSIBLE: computed", "SMARTCAST_IMPOSSIBLE: opened"], "{found:#?}");
+}
