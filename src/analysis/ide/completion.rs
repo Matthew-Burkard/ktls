@@ -797,6 +797,7 @@ impl Collector<'_, '_> {
         let call = !callable_ref;
         self.named_arguments(at);
         self.when_branches(at);
+        self.expected_entries(at);
         if statement {
             self.lambda_parameters(at);
         }
@@ -886,6 +887,32 @@ impl Collector<'_, '_> {
             }
         }
         self.auto_import(true);
+    }
+
+    /// `Color.RED` items where a `Color` is expected (outside `when` conditions, which
+    /// have their own), when the class goes by its simple name here.
+    fn expected_entries(&mut self, at: &SyntaxNode) {
+        let Some((fq, _)) = self.expected.clone() else { return };
+        if at.parent().is_some_and(|p| p.kind() == SyntaxKind::WHEN_CONDITION) {
+            return;
+        }
+        let Some(c) = self.e.classifier(&fq) else { return };
+        if c.symbol().kind != SymbolKind::Enum {
+            return;
+        }
+        let short = c.symbol().name.clone();
+        if self.e.classifier_named(at, &[&short]).as_deref() != Some(fq.as_str()) {
+            return;
+        }
+        for (m, _) in self.e.all_static_members(&c).1.into_iter().filter(|(m, _)| m.kind == SymbolKind::EnumEntry) {
+            let mut item = Self::item(&format!("{short}.{}", m.name), ItemKind::EnumMember, 1);
+            item.filter = Some(m.name.clone());
+            item.description = Some(short.clone());
+            item.detail = Some(m.signature());
+            item.deprecated = m.modifiers.has(Modifiers::DEPRECATED);
+            item.expected = true;
+            self.push(item);
+        }
     }
 
     /// In a `when` branch condition: the conditions still missing for an exhaustive `when`

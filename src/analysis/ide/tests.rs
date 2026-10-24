@@ -1538,6 +1538,10 @@ fn completion_ranks_expected_type_first() {
     has_all(&first(&mut fx, "    val s: String = u.$0"), &["name"]);
     // No expected type: no reordering.
     assert!(first(&mut fx, "    $0").is_empty());
+    // Entries of an expected enum, qualified.
+    has_all(&first(&mut fx, "    paint($0)"), &["Color.RED", "Color.GREEN"]);
+    let labels = first(&mut fx, "    paint(GR$0)");
+    assert_eq!(labels, vec!["Color.GREEN"]);
 }
 
 #[test]

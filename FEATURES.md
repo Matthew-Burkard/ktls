@@ -147,7 +147,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [~] [P1] Completion in KDoc (`[Symbol]`, tags) — *partial: `[links]` (parameters, names in scope, members after `Type.`), `@param`/`@throws`/`@see` subjects, and tag names after an `@` that starts a line*
 - [x] [P1] Annotation completion (incl. use-site targets): annotation classes first, then other classes; `field:`, `get:`, `param:`… targets
 - [x] [P1] Package / import statement completion
-- [~] [P2] Static member completion through companion without qualifier, enum entry completion without class prefix — *partial: companion/nested members of enclosing classes*
+- [~] [P2] Static member completion through companion without qualifier, enum entry completion without class prefix — *partial: companion/nested members of enclosing classes; entries of an expected enum type (`Color.RED`, matched by the entry name)*
 - [x] [P2] Callable references (`::fn`, `Type::member`)
 - [ ] [P2] Variable name suggestions from type (`val user: User` → `user`)
 - [ ] [P2] Chained completion (`users.first().` → suggests via expected-type chains)
