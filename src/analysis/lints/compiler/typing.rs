@@ -103,9 +103,11 @@ fn assignment(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     if matches!(expected, TypeRef::Platform(_)) || matches!(strip(&expected), TypeRef::TypeParam { .. }) {
         return;
     }
-    if let Some((rule, msg, _, convert)) = type_mismatch(e, &value, &expected, &shown(&expected)) {
-        let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ASSIGNMENT_TYPE_MISMATCH } else { rule };
-        out.report_fixes(rule, value.text_range(), msg, convert.into_iter().collect());
+    for value in super::expressions::branch_leaves(&value) {
+        if let Some((rule, msg, _, convert)) = type_mismatch(e, &value, &expected, &shown(&expected)) {
+            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ASSIGNMENT_TYPE_MISMATCH } else { rule };
+            out.report_fixes(rule, value.text_range(), msg, convert.into_iter().collect());
+        }
     }
 }
 

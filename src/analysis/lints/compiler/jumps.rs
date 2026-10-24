@@ -37,9 +37,11 @@ fn expression_body(e: &Engine, f: &SyntaxNode, out: &mut Sink) {
     if matches!(ty, TypeRef::Platform(_) | TypeRef::TypeParam { .. }) {
         return;
     }
-    if let Some((rule, msg, _, convert)) = type_mismatch(e, &v, &ty, &t.syntax().text().to_string()) {
-        let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
-        out.report_fixes(rule, v.text_range(), msg, convert.into_iter().collect());
+    for v in super::expressions::branch_leaves(&v) {
+        if let Some((rule, msg, _, convert)) = type_mismatch(e, &v, &ty, &t.syntax().text().to_string()) {
+            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
+            out.report_fixes(rule, v.text_range(), msg, convert.into_iter().collect());
+        }
     }
 }
 
@@ -86,9 +88,11 @@ fn return_value(e: &Engine, ret: &SyntaxNode, out: &mut Sink) {
                     if matches!(ty, TypeRef::Platform(_) | TypeRef::TypeParam { .. }) {
                         return;
                     }
-                    if let Some((rule, msg, _, convert)) = type_mismatch(e, &v, &ty, &t.syntax().text().to_string()) {
-                        let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
-                        out.report_fixes(rule, v.text_range(), msg, convert.into_iter().collect());
+                    for v in super::expressions::branch_leaves(&v) {
+                        if let Some((rule, msg, _, convert)) = type_mismatch(e, &v, &ty, &t.syntax().text().to_string()) {
+                            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
+                            out.report_fixes(rule, v.text_range(), msg, convert.into_iter().collect());
+                        }
                     }
                 }
                 // A value from a block-bodied function without a result type (Unit).

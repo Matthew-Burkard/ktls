@@ -3003,3 +3003,33 @@ fun g(s: String?, t: T3) {
     let out = fixed("package a\n\nfun g(s: String?) = s?.let { it.length }\n", "SimpleRedundantLet");
     assert!(out.contains("= s?.length"), "{out}");
 }
+
+#[test]
+fn mismatches_in_branches() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+fun f(c: Boolean, n: Int): Int {
+    val a: Int = if (c) 1 else "x"
+    val b: String = when (n) {
+        1 -> "one"
+        2 -> 2
+        else -> throw Error()
+    }
+    var v: Int = 0
+    v = if (c) 1 else "y"
+    println(a + b.length + v)
+    return if (c) "z" else 2
+}
+fun g(c: Boolean): String = if (c) "a" else 'b'
+"#,
+    );
+    let mismatches: Vec<_> = found.iter().filter(|f| f.contains("MISMATCH")).collect();
+    for expected in ["INITIALIZER_TYPE_MISMATCH: \"x\"", "INITIALIZER_TYPE_MISMATCH: 2", "ASSIGNMENT_TYPE_MISMATCH: \"y\"", "RETURN_TYPE_MISMATCH: \"z\"", "RETURN_TYPE_MISMATCH: 'b'"] {
+        assert!(mismatches.iter().any(|m| m.as_str() == expected), "missing {expected}: {mismatches:#?}");
+    }
+    assert!(!mismatches.iter().any(|m| m.ends_with(": 1") || m.ends_with("\"one\"") || m.ends_with("\"a\"")), "{mismatches:#?}");
+}

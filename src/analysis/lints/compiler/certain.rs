@@ -37,7 +37,7 @@ fn certain(e: &Engine, x: &SyntaxNode, smart: bool, depth: u32) -> Option<TypeRe
     }
     match x.kind() {
         SyntaxKind::PAREN_EXPR => certain(e, &x.children().last()?, smart, depth + 1),
-        SyntaxKind::THIS_EXPR if x.text() == "this" && !in_unknown_lambda(e, x) => e.type_of(x).and_then(finish),
+        SyntaxKind::THIS_EXPR if x.text() == "this" && !in_unknown_lambda(e, x) && !this_checked(x) => e.type_of(x).and_then(finish),
         SyntaxKind::NAME_REF => name(e, x, smart, depth),
         SyntaxKind::CALL_EXPR => {
             let (cands, projected) = call_candidates(e, x, smart, depth)?;
@@ -119,6 +119,17 @@ fn non_null(t: TypeRef) -> TypeRef {
         TypeRef::Platform(inner) => non_null(*inner),
         other => other,
     }
+}
+
+/// `this` may be smart cast (`when (this) { is T -> … }`, `if (this is T)`), which is not
+/// modelled: any `is` check of `this` in the enclosing function.
+fn this_checked(x: &SyntaxNode) -> bool {
+    let Some(f) = x.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::CLASS_BODY)) else { return false };
+    f.descendants().any(|d| match d.kind() {
+        SyntaxKind::IS_EXPR => d.first_child().is_some_and(|c| c.kind() == SyntaxKind::THIS_EXPR),
+        SyntaxKind::WHEN_SUBJECT => d.children().next().is_some_and(|c| c.kind() == SyntaxKind::THIS_EXPR),
+        _ => false,
+    })
 }
 
 pub(super) fn in_unknown_lambda(e: &Engine, at: &SyntaxNode) -> bool {

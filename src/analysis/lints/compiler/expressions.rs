@@ -1171,6 +1171,46 @@ fn receiver_text(value: &SyntaxNode, text: &str) -> String {
     if simple { text.to_string() } else { format!("({text})") }
 }
 
+/// The expressions that make up the value of `v`: the branch results of an `if` with
+/// `else`, a `when`, a `try` and its `catch`es (jumps left out), through parentheses.
+pub(super) fn branch_leaves(v: &SyntaxNode) -> Vec<SyntaxNode> {
+    let last = |b: &SyntaxNode| -> Option<SyntaxNode> {
+        let e = b.first_child()?;
+        if e.kind() == SyntaxKind::BLOCK { e.children().last() } else { Some(e) }
+    };
+    let block_last = |b: &SyntaxNode| b.children().find(|c| c.kind() == SyntaxKind::BLOCK).and_then(|blk| blk.children().last());
+    let mut out = Vec::new();
+    match v.kind() {
+        SyntaxKind::PAREN_EXPR => {
+            if let Some(i) = v.children().next() {
+                out.extend(branch_leaves(&i));
+            }
+        }
+        SyntaxKind::IF_EXPR => {
+            if !v.children().any(|c| c.kind() == SyntaxKind::ELSE_BRANCH) {
+                return out;
+            }
+            for b in v.children().filter(|c| matches!(c.kind(), SyntaxKind::THEN_BRANCH | SyntaxKind::ELSE_BRANCH)) {
+                out.extend(last(&b).map(|l| branch_leaves(&l)).unwrap_or_default());
+            }
+        }
+        SyntaxKind::WHEN_EXPR => {
+            for b in v.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY).filter_map(|en| en.children().find(|c| c.kind() == SyntaxKind::BODY)) {
+                out.extend(last(&b).map(|l| branch_leaves(&l)).unwrap_or_default());
+            }
+        }
+        SyntaxKind::TRY_EXPR => {
+            out.extend(block_last(v).map(|l| branch_leaves(&l)).unwrap_or_default());
+            for c in v.children().filter(|c| c.kind() == SyntaxKind::CATCH_CLAUSE) {
+                out.extend(block_last(&c).map(|l| branch_leaves(&l)).unwrap_or_default());
+            }
+        }
+        SyntaxKind::RETURN_EXPR | SyntaxKind::THROW_EXPR | SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR => {}
+        _ => out.push(v.clone()),
+    }
+    out
+}
+
 /// A value of the wrong type where `expected` is declared, with fixes changing the
 /// declared type (`what`: "type" / "return type") or converting the value.
 fn mismatch(e: &Engine, value: &SyntaxNode, expected: &ast::TypeRef, what: &str) -> Option<(&'static Rule, String, Vec<Fix>)> {
@@ -1187,8 +1227,10 @@ fn literal_initializer(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     }
     let Some(ty) = ast::child::<ast::TypeRef>(n) else { return };
     let Some(value) = initializer(n) else { return };
-    if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "type") {
-        out.report_fixes(rule, value.text_range(), msg, fixes);
+    for value in branch_leaves(&value) {
+        if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "type") {
+            out.report_fixes(rule, value.text_range(), msg, fixes);
+        }
     }
 }
 
@@ -1202,9 +1244,11 @@ fn literal_return(e: &Engine, ret: &SyntaxNode, out: &mut Sink) {
         return;
     }
     let Some(ty) = ast::FunDecl::cast(f).and_then(|d| d.return_type()) else { return };
-    if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "return type") {
-        let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
-        out.report_fixes(rule, value.text_range(), msg, fixes);
+    for value in branch_leaves(&value) {
+        if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "return type") {
+            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
+            out.report_fixes(rule, value.text_range(), msg, fixes);
+        }
     }
 }
 
@@ -1212,8 +1256,10 @@ fn literal_expression_body(e: &Engine, f: &SyntaxNode, out: &mut Sink) {
     let decl = ast::FunDecl::cast(f.clone()).unwrap();
     let (Some(ty), true) = (decl.return_type(), decl.has_expression_body()) else { return };
     let Some(value) = initializer(f) else { return };
-    if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "return type") {
-        let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
-        out.report_fixes(rule, value.text_range(), msg, fixes);
+    for value in branch_leaves(&value) {
+        if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "return type") {
+            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
+            out.report_fixes(rule, value.text_range(), msg, fixes);
+        }
     }
 }
