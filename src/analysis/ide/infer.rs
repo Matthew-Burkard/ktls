@@ -407,6 +407,15 @@ impl<'s> Engine<'s> {
         resolve_names(&lowered, &self.res, &scope)
     }
 
+    /// The classifier a dotted type name (`Map.Entry`, `java.util.UUID`) means at `at`.
+    pub fn classifier_named(&self, at: &SyntaxNode, segments: &[&str]) -> Option<String> {
+        let scope = scope_at(at, &self.package(), &mut self.locals_cache.borrow_mut());
+        match self.res.resolve_type_name(segments, &scope) {
+            Ok(Resolved::Classifier(c)) => Some(c.fq_name().to_string()),
+            _ => None,
+        }
+    }
+
     /// The type of a declaration's value (property type / function return type).
     pub fn symbol_type(&self, sym: &Symbol) -> Option<TypeRef> {
         let _g = Guard::enter()?;

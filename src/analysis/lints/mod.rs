@@ -280,6 +280,8 @@ rules! {
     REDUNDANT_STRING_TEMPLATE = "RemoveSingleExpressionStringTemplate", Redundancy, Info, false, [], "'\"$s\"' where 's' is already a String";
     REDUNDANT_LAMBDA_ARROW = "RedundantLambdaArrow", Redundancy, Warning, true, [], "'->' in a lambda without parameters, or 'it ->'";
     REDUNDANT_TYPE_ARGUMENTS = "RemoveExplicitTypeArguments", Redundancy, Warning, true, [], "Explicit type arguments that the arguments already determine";
+    REDUNDANT_EXPLICIT_TYPE = "RedundantExplicitType", Redundancy, Warning, true, [], "Local variable type that its initializer (literal or constructor call) states anyway";
+    REDUNDANT_QUALIFIER = "RemoveRedundantQualifierName", Redundancy, Warning, true, [], "Package or class qualifier of a name that resolves the same without it";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";

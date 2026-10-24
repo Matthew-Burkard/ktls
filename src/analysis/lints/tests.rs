@@ -2188,3 +2188,50 @@ fn missing_return_on_some_paths() {
     // Unit, Nothing, and expression bodies need no return.
     assert_eq!(missing("fun f(x: Int): Unit {\n    println(x)\n}\nfun g(): Nothing {\n    throw Exception()\n}\nfun h(x: Int): Int = x"), 0);
 }
+
+#[test]
+fn redundant_types_and_qualifiers() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = lint(
+        r#"package a
+
+import java.util.UUID
+
+class User(val name: String) {
+    class Id
+    fun id(): User.Id = User.Id()
+}
+
+fun f(u: java.util.UUID, l: kotlin.collections.List<Int>, m: java.util.Locale): String {
+    val n: Int = 1
+    val big: Long = 1
+    val s: String = "x"
+    val user: User = User("a")
+    val any: Any = User("a")
+    val maybe: User? = User("a")
+    val id = java.util.UUID.randomUUID()
+    val other = java.util.Locale.getDefault()
+    val boxed = java.lang.Integer::class.java
+    return n.toString() + big + s + user + any + maybe + id + other + boxed
+}
+
+class Entries : AbstractMap<String, Int>() {
+    override val entries: Set<Map.Entry<String, Int>> get() = emptySet()
+}
+"#,
+    );
+    has(&found, "RedundantExplicitType: Int");
+    has(&found, "RedundantExplicitType: String");
+    has(&found, "RedundantExplicitType: User");
+    has(&found, "RemoveRedundantQualifierName: java.util.");
+    has(&found, "RemoveRedundantQualifierName: kotlin.collections.");
+    has(&found, "RemoveRedundantQualifierName: User.");
+    let explicit: Vec<_> = found.iter().filter(|f| f.starts_with("RedundantExplicitType")).collect();
+    assert_eq!(explicit.len(), 3, "{explicit:#?}");
+    let qualifiers: Vec<_> = found.iter().filter(|f| f.starts_with("RemoveRedundantQualifierName")).collect();
+    // `java.util.UUID` twice, `kotlin.collections.List`, `User.Id` twice; not `java.util.Locale` (not imported).
+    assert_eq!(qualifiers.len(), 5, "{qualifiers:#?}");
+    assert!(fixed("package a\n\nfun f() {\n    val n: Int = 1\n    println(n)\n}\n", "RedundantExplicitType").contains("val n = 1"));
+}

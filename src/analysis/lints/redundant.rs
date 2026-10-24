@@ -32,7 +32,12 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                     SyntaxKind::STRING_TEMPLATE => string_template(cx, &n, out),
                     SyntaxKind::LAMBDA_EXPR => lambda_arrow(cx, &n, out),
                     SyntaxKind::TYPE_ARGUMENT_LIST => explicit_type_arguments(cx, &n, out),
-                    SyntaxKind::DOT_QUALIFIED_EXPR => useless_call_on_not_null(cx, &n, out),
+                    SyntaxKind::DOT_QUALIFIED_EXPR => {
+                        useless_call_on_not_null(cx, &n, out);
+                        expression_qualifier(cx, &n, out);
+                    }
+                    SyntaxKind::PROPERTY => explicit_type(cx, &n, out),
+                    SyntaxKind::USER_TYPE => type_qualifier(cx, &n, out),
                     _ => {}
                 }
             }
@@ -531,6 +536,200 @@ fn useless_call_on_not_null(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         Some(r) => {
             let fix = Fix::replace(format!("Replace with '{r}()'"), callee.text_range(), r);
             out.report(&USELESS_CALL_ON_NOT_NULL, callee.text_range(), format!("Call on a value that is never null can be replaced with '{r}()'"), Some(fix));
+        }
+    }
+}
+
+/// `val x: Int = 1`, `val u: User = User(…)`: a local's written type that the initializer
+/// states anyway.
+fn explicit_type(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&REDUNDANT_EXPLICIT_TYPE) || p.parent().is_none_or(|b| b.kind() != SyntaxKind::BLOCK) || has_comments(p) {
+        return;
+    }
+    let Some(decl) = ast::PropertyDecl::cast(p.clone()) else { return };
+    let Some(ty) = decl.type_ref() else { return };
+    if decl.is_destructuring() || decl.has_delegate() || ty.syntax().text().to_string().contains(['?', '<']) {
+        return;
+    }
+    let Some(eq) = ast::token(p, SyntaxKind::EQ) else { return };
+    let Some(init) = p.children().find(|c| c.text_range().start() >= eq.text_range().end()) else { return };
+    let Some(e) = cx.engine() else { return };
+    let declared = e.resolve_syntax_type(&ty);
+    let Some(fq) = crate::analysis::ide::infer::fq_of(&declared) else { return };
+    let stated = match init.kind() {
+        SyntaxKind::LITERAL => {
+            let Some(t) = init.first_token() else { return };
+            let text = t.text().to_ascii_lowercase();
+            match t.kind() {
+                SyntaxKind::TRUE_KW | SyntaxKind::FALSE_KW => "kotlin.Boolean",
+                SyntaxKind::CHAR_LITERAL => "kotlin.Char",
+                SyntaxKind::INT_LITERAL if text.contains('u') => return,
+                SyntaxKind::INT_LITERAL if text.ends_with('l') => "kotlin.Long",
+                SyntaxKind::INT_LITERAL => "kotlin.Int",
+                SyntaxKind::FLOAT_LITERAL if text.ends_with('f') => "kotlin.Float",
+                SyntaxKind::FLOAT_LITERAL => "kotlin.Double",
+                _ => return,
+            }
+        }
+        SyntaxKind::STRING_TEMPLATE => "kotlin.String",
+        SyntaxKind::CALL_EXPR => {
+            let Some(callee) = init.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+            if init.children().any(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) {
+                return;
+            }
+            let defs = e.resolve_name_ref(&callee);
+            let constructs = !defs.is_empty()
+                && defs.iter().all(|d| match d {
+                    crate::analysis::ide::infer::Def::Symbol { sym, .. } => match sym.kind {
+                        crate::symbols::SymbolKind::Constructor => sym.fq_name.rsplit_once('.').is_some_and(|(c, _)| c == fq),
+                        k => k.is_classifier() && sym.fq_name == fq,
+                    },
+                    _ => false,
+                });
+            if !constructs {
+                return;
+            }
+            fq
+        }
+        _ => return,
+    };
+    if stated != fq {
+        return;
+    }
+    let Some(colon) = ast::token(p, SyntaxKind::COLON) else { return };
+    let start = prev_significant(&colon).map_or(colon.text_range().start(), |t| t.text_range().end());
+    out.report(&REDUNDANT_EXPLICIT_TYPE, ty.syntax().text_range(), "Explicitly given type is redundant here", Some(Fix::delete("Remove explicit type specification", TextRange::new(start, ty.syntax().text_range().end()))));
+}
+
+fn report_qualifier(out: &mut Sink, range: TextRange) {
+    out.report(&REDUNDANT_QUALIFIER, range, "Redundant qualifier name", Some(Fix::delete("Remove redundant qualifier name", range)));
+}
+
+/// In a class header (annotations, constructor, supertypes): nested classes are not in
+/// scope there.
+fn in_class_header(n: &SyntaxNode) -> bool {
+    n.ancestors().find(|a| matches!(a.kind(), SyntaxKind::CLASS_BODY | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::OBJECT_LITERAL)).is_some_and(|a| a.kind() != SyntaxKind::CLASS_BODY)
+}
+
+/// Whether dropping `qualifier` (the names before the kept ones) is plain: it is a
+/// package, or a class around `at`. Not `java.lang` (its classes are mostly mapped to
+/// Kotlin types) and not a supertype's nested class (kept for readability).
+fn removable_qualifier(e: &crate::analysis::ide::infer::Engine, at: &SyntaxNode, qualifier: &[&str], full: &str) -> bool {
+    if full.starts_with("java.lang.") {
+        return false;
+    }
+    if e.classifier_named(at, qualifier).is_none() {
+        return true;
+    }
+    let Some(last) = qualifier.last() else { return false };
+    at.ancestors().filter(|a| matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION)).any(|a| name_token(&a).is_some_and(|t| ast::ident_text(&t) == *last))
+}
+
+/// `java.util.UUID` in a type where `UUID` means the same class.
+fn type_qualifier(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let segments: Vec<SyntaxNode> = n.children().filter(|c| c.kind() == SyntaxKind::USER_TYPE_SEGMENT).collect();
+    if segments.len() < 2 || !cx.on(&REDUNDANT_QUALIFIER) || segments[..segments.len() - 1].iter().any(|s| s.children().any(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST)) {
+        return;
+    }
+    if in_class_header(n) {
+        return;
+    }
+    let Some(names) = segments.iter().map(|s| ast::token(s, SyntaxKind::IDENT).map(|t| ast::ident_text(&t))).collect::<Option<Vec<_>>>() else { return };
+    let Some(e) = cx.engine() else { return };
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let Some(full) = e.classifier_named(n, &names) else { return };
+    for k in 1..names.len() {
+        if e.classifier_named(n, &names[k..]).as_deref() == Some(full.as_str()) && removable_qualifier(e, n, &names[..k], &full) {
+            report_qualifier(out, TextRange::new(segments[0].text_range().start(), segments[k].text_range().start()));
+            return;
+        }
+    }
+}
+
+/// The names of a chain of plain names (`a.b.C`): each prefix with its last name token.
+fn name_chain(n: &SyntaxNode) -> Option<Vec<(SyntaxNode, SyntaxToken)>> {
+    match n.kind() {
+        SyntaxKind::NAME_REF => Some(vec![(n.clone(), ast::token(n, SyntaxKind::IDENT)?)]),
+        SyntaxKind::DOT_QUALIFIED_EXPR => {
+            let mut parts = n.children();
+            let (Some(recv), Some(sel), None) = (parts.next(), parts.next(), parts.next()) else { return None };
+            if sel.kind() != SyntaxKind::NAME_REF || has_comments(n) {
+                return None;
+            }
+            let mut chain = name_chain(&recv)?;
+            chain.push((n.clone(), ast::token(&sel, SyntaxKind::IDENT)?));
+            Some(chain)
+        }
+        _ => None,
+    }
+}
+
+/// `a.B.C(…)`: the names of the chain and the called name, when the called name starts
+/// with an uppercase letter (a constructor call).
+fn constructor_chain(n: &SyntaxNode) -> Option<Vec<(SyntaxNode, SyntaxToken)>> {
+    if n.kind() != SyntaxKind::DOT_QUALIFIED_EXPR {
+        return None;
+    }
+    let mut parts = n.children();
+    let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return None };
+    let callee = call.first_child().filter(|c| call.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF)?;
+    let name = ast::token(&callee, SyntaxKind::IDENT)?;
+    if !name.text().starts_with(char::is_uppercase) || call.children().any(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) {
+        return None;
+    }
+    let mut chain = name_chain(&recv)?;
+    chain.push((n.clone(), name));
+    Some(chain)
+}
+
+/// `java.util.UUID.randomUUID()`, `a.Outer.Nested.X` in an expression: the qualifiers in
+/// front of a class that its shorter name already means.
+fn expression_qualifier(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    use crate::analysis::ide::infer::{Def, Qualifier};
+    // Only maximal chains of names.
+    if n.parent().is_some_and(|p| p.kind() == SyntaxKind::DOT_QUALIFIED_EXPR && (name_chain(&p).is_some() || constructor_chain(&p).is_some())) || !cx.on(&REDUNDANT_QUALIFIER) {
+        return;
+    }
+    if n.ancestors().any(|a| matches!(a.kind(), SyntaxKind::IMPORT_DIRECTIVE | SyntaxKind::PACKAGE_DIRECTIVE)) || in_class_header(n) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let (chain, j, full) = if let Some(chain) = constructor_chain(n) {
+        // `a.Outer.Nested()`: the whole chain names the class.
+        let names: Vec<String> = chain.iter().map(|(_, t)| ast::ident_text(t)).collect();
+        let Some(full) = e.classifier_named(n, &names.iter().map(String::as_str).collect::<Vec<_>>()) else { return };
+        let j = chain.len() - 1;
+        (chain, j, full)
+    } else {
+        let Some(chain) = name_chain(n) else { return };
+        // The longest prefix that is a class (the rest are its members).
+        let Some((j, full)) = chain.iter().enumerate().rev().find_map(|(j, (p, _))| match e.resolve_qualifier(p) {
+            Qualifier::Static(c) if j > 0 => Some((j, c.fq_name().to_string())),
+            _ => None,
+        }) else {
+            return;
+        };
+        (chain, j, full)
+    };
+    if chain.len() < 2 {
+        return;
+    }
+    let names: Vec<String> = chain.iter().map(|(_, t)| ast::ident_text(t)).collect();
+    for k in 1..=j {
+        // A value of that name would win in an expression.
+        if e.resolve_name_text(n, &names[k]).iter().any(|d| match d {
+            Def::Local(_) => true,
+            Def::Symbol { sym, .. } => !sym.kind.is_classifier(),
+            Def::Package(_) => false,
+        }) {
+            continue;
+        }
+        let suffix: Vec<&str> = names[k..=j].iter().map(String::as_str).collect();
+        let qualifier: Vec<&str> = names[..k].iter().map(String::as_str).collect();
+        if e.classifier_named(n, &suffix).as_deref() == Some(full.as_str()) && removable_qualifier(e, n, &qualifier, &full) {
+            let start = chain[0].0.text_range().start();
+            report_qualifier(out, TextRange::new(start, chain[k].1.text_range().start()));
+            return;
         }
     }
 }

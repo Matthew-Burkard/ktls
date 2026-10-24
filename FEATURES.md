@@ -206,8 +206,8 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 
 **Redundancy**
 - [x] [P1] `RedundantSemicolon`
-- [ ] [P1] `RemoveRedundantQualifierName`
-- [~] [P1] `RedundantExplicitType` / `RedundantUnitReturnType` — *partial: `RedundantUnitReturnType`*
+- [x] [P1] `RemoveRedundantQualifierName` (package and enclosing-class qualifiers in types, constructor calls and member accesses when the shorter name means the same class; not `java.lang`, inherited nested classes or class headers)
+- [x] [P1] `RedundantExplicitType` / `RedundantUnitReturnType` (locals initialized with a literal or a constructor call of the written type)
 - [x] [P1] `RedundantVisibilityModifier` (`public` default; off in explicit API mode)
 - [x] [P1] `RedundantModalityModifier` (`final` default, `open` in interface)
 - [x] [P1] `RedundantUnitExpression`
