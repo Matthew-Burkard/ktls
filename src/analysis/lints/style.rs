@@ -18,6 +18,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 operator_assignment(cx, &n, out);
                 boolean_constants(cx, &n, out);
                 ignore_case_equals(cx, &n, out);
+                string_template(cx, &n, out);
             }
             SyntaxKind::DOT_QUALIFIED_EXPR => {
                 operator_calls(cx, &n, out);
@@ -44,7 +45,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 if_to_elvis_or_safe_access(cx, &n, out);
                 cascade_if(cx, &n, out);
                 guard_clause(cx, &n, out);
+                lift_return_or_assignment(cx, &n, out);
             }
+            SyntaxKind::WHEN_EXPR => lift_return_or_assignment(cx, &n, out),
             SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR => empty_bodies(&n, out),
             SyntaxKind::BLOCK => {
                 fold_initializer(cx, &n, out);
@@ -1247,4 +1250,130 @@ fn join_declaration(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
         let fix = Fix::replace("Join declaration and assignment", TextRange::new(decl.text_range().end(), assign.text_range().end()), format!(" = {}", value.text()));
         out.report(&JOIN_DECLARATION_AND_ASSIGNMENT, name_tok.text_range(), "Can be joined with assignment", Some(fix));
     }
+}
+
+/// The operands of a left-nested `a + b + c` chain.
+fn plus_operands(n: &SyntaxNode, out: &mut Vec<SyntaxNode>) -> bool {
+    if n.kind() == SyntaxKind::BINARY_EXPR && binary_op(n).is_some_and(|o| o.kind() == SyntaxKind::PLUS) {
+        let Some((l, r)) = binary_operands(n) else { return false };
+        if !plus_operands(&l, out) {
+            return false;
+        }
+        out.push(r);
+        return true;
+    }
+    out.push(n.clone());
+    true
+}
+
+/// A plain `"…"` literal (not raw, no `$$` prefix): its content.
+fn plain_string(n: &SyntaxNode) -> Option<String> {
+    if n.kind() != SyntaxKind::STRING_TEMPLATE {
+        return None;
+    }
+    let open = n.first_token()?;
+    let close = n.last_token()?;
+    if open.text() != "\"" || close.kind() != SyntaxKind::STRING_CLOSE {
+        return None;
+    }
+    Some(n.text().to_string()[1..usize::from(n.text_range().len()) - 1].to_string())
+}
+
+/// `"a" + x + "b"` → `"a${x}b"` (left operand a string literal).
+fn string_template(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&STRING_TEMPLATE_CONCATENATION) || has_comments(n) || n.text().to_string().contains('\n') {
+        return;
+    }
+    // Only the whole chain.
+    if n.parent().is_some_and(|p| p.kind() == SyntaxKind::BINARY_EXPR && binary_op(&p).is_some_and(|o| o.kind() == SyntaxKind::PLUS) && p.first_child().as_ref() == Some(n)) {
+        return;
+    }
+    let mut operands = Vec::new();
+    if !plus_operands(n, &mut operands) || operands.len() < 2 || plain_string(&operands[0]).is_none() {
+        return;
+    }
+    if operands.iter().all(|o| plain_string(o).is_some()) {
+        return;
+    }
+    let mut text = String::from("\"");
+    for (i, o) in operands.iter().enumerate() {
+        if let Some(content) = plain_string(o) {
+            text.push_str(&content);
+            continue;
+        }
+        if o.kind() == SyntaxKind::STRING_TEMPLATE || o.kind() == SyntaxKind::LITERAL && o.first_token().is_some_and(|t| t.kind() == SyntaxKind::CHAR_LITERAL) {
+            return;
+        }
+        // `$x` unless a name character follows.
+        let next_starts_name = operands.get(i + 1).and_then(plain_string).and_then(|c| c.chars().next()).is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let simple = o.kind() == SyntaxKind::NAME_REF && !o.text().to_string().starts_with('`');
+        if simple && !next_starts_name {
+            text.push_str(&format!("${}", o.text()));
+        } else {
+            let inner = if o.kind() == SyntaxKind::PAREN_EXPR { o.children().next().map(|c| c.text().to_string()).unwrap_or_default() } else { o.text().to_string() };
+            text.push_str(&format!("${{{inner}}}"));
+        }
+    }
+    text.push('"');
+    out.report(&STRING_TEMPLATE_CONCATENATION, n.text_range(), "Convert concatenation to template", Some(Fix::replace("Convert concatenation to template", n.text_range(), text)));
+}
+
+/// The branch bodies of an `if` (with `else`, not `else if`) or a `when` with `else`.
+fn lift_branches(n: &SyntaxNode) -> Option<Vec<SyntaxNode>> {
+    match n.kind() {
+        SyntaxKind::IF_EXPR => {
+            let then = n.children().find(|c| c.kind() == SyntaxKind::THEN_BRANCH)?;
+            let els = n.children().find(|c| c.kind() == SyntaxKind::ELSE_BRANCH)?;
+            if els.first_child().is_some_and(|f| f.kind() == SyntaxKind::IF_EXPR) {
+                return None;
+            }
+            Some(vec![then, els])
+        }
+        SyntaxKind::WHEN_EXPR => {
+            let entries: Vec<SyntaxNode> = n.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY).collect();
+            if !entries.iter().any(|e| ast::token(e, SyntaxKind::ELSE_KW).is_some()) {
+                return None;
+            }
+            entries.iter().map(|e| e.children().find(|c| c.kind() == SyntaxKind::BODY)).collect()
+        }
+        _ => None,
+    }
+}
+
+/// `if (c) return a else return b` → `return if (c) a else b`, and the same for
+/// assignments to one variable and for `when`.
+fn lift_return_or_assignment(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&LIFT_RETURN_OR_ASSIGNMENT) || n.parent().is_none_or(|p| p.kind() != SyntaxKind::BLOCK) || has_comments(n) {
+        return;
+    }
+    let Some(branches) = lift_branches(n) else { return };
+    let values: Vec<SyntaxNode> = match branches.iter().map(branch_expr).collect::<Option<Vec<_>>>() {
+        Some(v) => v,
+        None => return,
+    };
+    // Every branch `return x` (unlabeled), or every branch `t = x` with the same `t`.
+    let returns = values.iter().all(|v| v.kind() == SyntaxKind::RETURN_EXPR && v.first_child().is_some() && !v.children().any(|c| c.kind() == SyntaxKind::LABEL_QUALIFIER));
+    let target = values.first().and_then(|v| assignment_op(v).filter(|o| o.kind() == SyntaxKind::EQ).and_then(|_| v.first_child())).map(|t| t.text().to_string());
+    let assigns = target.as_ref().is_some_and(|t| values.iter().all(|v| assignment_op(v).is_some_and(|o| o.kind() == SyntaxKind::EQ) && v.first_child().is_some_and(|f| f.text() == t.as_str())));
+    if !returns && !assigns {
+        return;
+    }
+    // Lifted values must not be jumps themselves.
+    let lifted: Vec<SyntaxNode> = values.iter().map(|v| if returns { v.first_child() } else { binary_operands(v).map(|(_, r)| r) }).collect::<Option<Vec<_>>>().unwrap_or_default();
+    if lifted.len() != values.len() || lifted.iter().any(|l| matches!(l.kind(), SyntaxKind::RETURN_EXPR | SyntaxKind::THROW_EXPR)) {
+        return;
+    }
+    let base = n.text_range().start();
+    let mut text = n.text().to_string();
+    for (v, l) in values.iter().zip(&lifted).rev() {
+        let r = v.text_range() - base;
+        text.replace_range(usize::from(r.start())..usize::from(r.end()), &l.text().to_string());
+    }
+    let (prefix, what) = if returns { ("return ".to_string(), "return") } else { (format!("{} = ", target.unwrap_or_default()), "assignment") };
+    let kw = n.first_token().map_or(n.text_range(), |t| t.text_range());
+    out.report(&LIFT_RETURN_OR_ASSIGNMENT, kw, format!("{} can be lifted out of '{}'", if returns { "Return" } else { "Assignment" }, kw_text(n)), Some(Fix::replace(format!("Lift {what} out of '{}'", kw_text(n)), n.text_range(), format!("{prefix}{text}"))));
+}
+
+fn kw_text(n: &SyntaxNode) -> String {
+    n.first_token().map(|t| t.text().to_string()).unwrap_or_default()
 }

@@ -2725,3 +2725,27 @@ fn idiom_folds_and_guards() {
     check("    println(listOf(y).associate { it to it.length })", "ReplaceAssociateFunction", "println(listOf(y).associateWith { it.length })");
     check("    println(listOf(y).associate { it.length to it })", "ReplaceAssociateFunction", "println(listOf(y).associateBy { it.length })");
 }
+
+#[test]
+fn templates_lifts_and_redundant_calls() {
+    let check = |body: &str, rule: &str, expected: &str| {
+        let text = format!("package a\n\nfun f(x: String, n: Int, xs: List<Int>): Any? {{\n{body}\n    return null\n}}\n");
+        let out = fixed(&text, rule);
+        assert!(out.contains(expected), "{rule}: {out}");
+    };
+    check("    println(\"a\" + x + \"b\" + n + \"_\" + (n + 1))", "ConvertToStringTemplate", "println(\"a${x}b${n}_${n + 1}\")");
+    check("    println(\"a\" + x + \" b\")", "ConvertToStringTemplate", "println(\"a$x b\")");
+    check("    if (n > 1) return 1 else return 2", "LiftReturnOrAssignment", "    return if (n > 1) 1 else 2");
+    check("    var v = 0\n    when (n) {\n        1 -> v = 1\n        else -> v = 2\n    }\n    println(v)", "LiftReturnOrAssignment", "    v = when (n) {\n        1 -> 1\n        else -> 2\n    }");
+    let found = lint("package a\n\nfun f(x: String) = \"a\" + \"b\"\nfun g(n: Int): Int {\n    if (n > 1) return 1 else println()\n    return 0\n}\n");
+    assert!(!found.iter().any(|f| f.starts_with("ConvertToStringTemplate") || f.starts_with("LiftReturnOrAssignment")), "{found:#?}");
+    if !Fixture::new().typed() {
+        return;
+    }
+    check("    requireNotNull(x)\n    println(x)", "RedundantRequireNotNullCall", "{\n    println(x)");
+    check("    println(xs.asSequence().toList())", "RedundantAsSequence", "println(xs.toList())");
+    check("    println(runCatching { n + 1 }.getOrThrow())", "RedundantRunCatching", "println(run { n + 1 })");
+    assert!(fixed("package a\n\nfun g(n: Int): String? {\n    if (n > 1) return \"a\"\n    return \"b\"\n}\n", "RedundantNullableReturnType").contains("fun g(n: Int): String {"));
+    let found = lint("package a\n\nfun g(n: Int): String? = if (n > 1) \"a\" else null\nopen class O { open fun h(): String? = \"a\" }\n");
+    assert!(!found.iter().any(|f| f.starts_with("RedundantNullableReturnType")), "{found:#?}");
+}

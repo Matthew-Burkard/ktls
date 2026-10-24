@@ -223,9 +223,9 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `RedundantCompanionReference`, `RedundantObjectTypeCheck` — *partial: `RedundantCompanionReference` (`C.Companion.member`)*
 - [x] [P1] `RedundantGetter` / `RedundantSetter`
 - [~] [P1] `RedundantInnerClassModifier`, `RedundantEmptyInitializerBlock` — *partial: `RedundantEmptyInitializerBlock`*
-- [ ] [P1] `RedundantNullableReturnType`, `RedundantRequireNotNullCall`
-- [ ] [P1] `RedundantWith`, `RedundantAsSequence`, `RedundantSamConstructor`
-- [~] [P1] `RedundantElvisReturnNull`, `RedundantRunCatching` — *partial: `RedundantElvisReturnNull`*
+- [x] [P1] `RedundantNullableReturnType`, `RedundantRequireNotNullCall` (final functions whose every result is certainly non-null; values of certain non-null type)
+- [~] [P1] `RedundantWith`, `RedundantAsSequence`, `RedundantSamConstructor` — *partial: `RedundantAsSequence` (iterables and arrays followed by a terminal operation)*
+- [x] [P1] `RedundantElvisReturnNull`, `RedundantRunCatching`
 - [x] [P1] `RedundantConstructorKeyword`, `RedundantEnumConstructorInvocation`
 - [ ] [P1] `RedundantLabelMigration`, `RedundantValueArgument` (arg equals default)
 - [~] [P1] `RedundantExplicitTypeArguments` (`listOf<Int>(1)`) — *partial: as `RemoveExplicitTypeArguments`, for calls with one candidate whose type parameters are whole parameter types bound by arguments of exactly that certain type*
@@ -236,8 +236,8 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `CanBeVal` (`var` never reassigned)
 - [x] [P1] `CanBeParameter` (constructor `val` used only in init): `private` constructor properties read only in initializers and `init` blocks
 - [ ] [P1] `CanBePrimaryConstructorProperty`
-- [ ] [P1] `ConvertToStringTemplate` (string concatenation)
-- [ ] [P1] `LiftReturnOrAssignment` (out of `if`/`when`/`try`)
+- [x] [P1] `ConvertToStringTemplate` (string concatenation starting with a plain literal, on one line)
+- [~] [P1] `LiftReturnOrAssignment` (out of `if`/`when`/`try`) — *partial: `if`/`else` and `when` with `else` whose branches are single returns or assignments to one target; not `try`*
 - [x] [P1] `CascadeIf` → `when`, `IntroduceWhenSubject` (three or more conditions; subjects via the intention)
 - [x] [P1] `ReplaceGetOrSet` (`a.get(i)` → `a[i]`), `ReplaceCallWithBinaryOperator` (`a.plus(b)` → `a + b`)
 - [~] [P1] `ReplaceRangeToWithUntil` / `ReplaceUntilWithRangeUntil` (`..<`) — *partial: `a..b - 1` (`ReplaceRangeToWithRangeUntil`)*
@@ -275,7 +275,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `ConvertCallChainIntoSequence` (long chains on large collections)
 - [~] [P1] `UselessCallOnCollection` / `UselessCallOnNotNull` (`orEmpty()` on non-null, `filterNotNull()` on non-null elements) — *partial: `UselessCallOnNotNull` (`orEmpty()`, `isNullOrEmpty()`, `isNullOrBlank()` on values of certain non-null type)*
 - [ ] [P1] `ReplaceManualForEachWithMap` / loop-to-stdlib suggestions (`for` loop → `map/filter/sum/any/all/count`)
-- [ ] [P1] `ReplaceWithCount`, `RedundantAsSequence`
+- [~] [P1] `ReplaceWithCount`, `RedundantAsSequence` — *partial: `RedundantAsSequence`; `filter { }.count()` via `SimplifiableCallChain`*
 - [ ] [P2] `JavaCollectionsStaticMethod`, `JavaMapForEach`
 
 **Naming & formatting conventions**
@@ -296,8 +296,8 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `WrapUnaryOperator` (`-1.inc()` precedence)
 - [x] [P1] `NestedLambdaShadowedImplicitParameter` (nested `it`) — *when the enclosing lambda's `it` is used too; not for `it.let`/`also`/`takeIf`/`takeUnless`*
 - [~] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `CopyWithoutNamedArguments` — *partial: `CopyWithoutNamedArguments` (and the compiler's `ARRAY_EQUALITY_OPERATOR_CAN_BE_REPLACED_WITH_EQUALS`)*
-- [ ] [P1] `UnusedResultOfAsync` / `DeferredResultUnused`, `SuspendFunctionOnCoroutineScope`, `RedundantRunBlocking`
-- [ ] [P1] `RunBlockingInSuspendFunction`, `BlockingMethodInNonBlockingContext` (`Thread.sleep` in coroutine)
+- [~] [P1] `UnusedResultOfAsync` / `DeferredResultUnused`, `SuspendFunctionOnCoroutineScope`, `RedundantRunBlocking` — *partial: `DeferredResultUnused` (with "Replace with 'launch'")*
+- [~] [P1] `RunBlockingInSuspendFunction`, `BlockingMethodInNonBlockingContext` (`Thread.sleep` in coroutine) — *partial: `RunBlockingInSuspendFunction`*
 - [~] [P1] `FlowCollectWithoutLaunch`, `GlobalCoroutineUsage` (`GlobalScope`) — *partial: `GlobalCoroutineUsage`*
 - [~] [P1] `WarningOnMainUnusedParameterMigration`, `MainFunctionReturnUnit` — *partial: `MainFunctionReturnUnit`*
 - [ ] [P1] `OverridingDeprecatedMember`, `DeprecatedCallableAddReplaceWith`

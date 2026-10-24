@@ -28,6 +28,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::CALL_EXPR => {
                 throwable_not_thrown(cx, &n, out);
                 unused_copy(cx, &n, out);
+                coroutine_calls(cx, &n, out);
             }
             SyntaxKind::DESTRUCTURING_DECLARATION => destructuring_names(cx, &n, out),
             SyntaxKind::FUN => {
@@ -539,5 +540,41 @@ fn destructuring_names(cx: &Cx, d: &SyntaxNode, out: &mut Sink) {
         if let Some(j) = components.iter().position(|c| *c == name) {
             out.report(&DESTRUCTURING_WRONG_NAME, tok.text_range(), format!("Variable name '{name}' matches the name of a different component (component{} is '{}')", j + 1, components.get(i).map_or("none", String::as_str)), None);
         }
+    }
+}
+
+
+/// `runBlocking` in a suspend function, and `async { }` whose `Deferred` is dropped.
+fn coroutine_calls(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let name = callee.text().to_string();
+    if !matches!(name.as_str(), "runBlocking" | "async") || !cx.on(&RUN_BLOCKING_IN_SUSPEND) && !cx.on(&DEFERRED_RESULT_UNUSED) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let defs = e.resolve_name_ref(&callee);
+    let [Def::Symbol { sym, .. }, ..] = defs.as_slice() else { return };
+    if !sym.fq_name.starts_with("kotlinx.coroutines.") {
+        return;
+    }
+    if name == "runBlocking" {
+        // Directly in a suspend function (not in a lambda, which may run elsewhere).
+        let owner = call.ancestors().skip(1).find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::LAMBDA_EXPR | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::CLASS_BODY));
+        if owner.is_some_and(|o| o.kind() == SyntaxKind::FUN && has_modifier(&o, "suspend")) && cx.on(&RUN_BLOCKING_IN_SUSPEND) {
+            out.report(&RUN_BLOCKING_IN_SUSPEND, callee.text_range(), "Blocking call 'runBlocking' in a suspend function: call the code directly or use 'withContext'", None);
+        }
+        return;
+    }
+    let expr = match call.parent() {
+        Some(p) if matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.last_child().as_ref() == Some(call) => p,
+        _ => call.clone(),
+    };
+    let Some(block) = expr.parent().filter(|b| b.kind() == SyntaxKind::BLOCK) else { return };
+    // The last statement of a lambda is its value.
+    if block.children().last().as_ref() == Some(&expr) && block.parent().is_some_and(|p| p.kind() == SyntaxKind::LAMBDA_EXPR) {
+        return;
+    }
+    if cx.on(&DEFERRED_RESULT_UNUSED) {
+        out.report(&DEFERRED_RESULT_UNUSED, callee.text_range(), "Deferred result is never used: use 'launch' or 'await' it", Some(Fix::replace("Replace with 'launch'", callee.text_range(), "launch")));
     }
 }

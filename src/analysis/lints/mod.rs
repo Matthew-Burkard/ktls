@@ -310,6 +310,10 @@ rules! {
     REDUNDANT_COMPANION_REFERENCE = "RedundantCompanionReference", Redundancy, Warning, true, [], "'Companion' in 'C.Companion.member' where 'C.member' means the same";
     REDUNDANT_ELVIS_RETURN_NULL = "RedundantElvisReturnNull", Redundancy, Warning, true, [], "'return x ?: return null'";
     REDUNDANT_OVERRIDE = "RedundantOverride", Redundancy, Warning, true, [], "Override that only calls the super implementation";
+    REDUNDANT_REQUIRE_NOT_NULL = "RedundantRequireNotNullCall", Redundancy, Warning, true, [], "'requireNotNull'/'checkNotNull' of a value that is never null";
+    REDUNDANT_AS_SEQUENCE = "RedundantAsSequence", Redundancy, Warning, true, [], "'asSequence()' followed right away by a terminal operation";
+    REDUNDANT_RUN_CATCHING = "RedundantRunCatching", Redundancy, Warning, true, [], "'runCatching { … }.getOrThrow()' instead of 'run { … }'";
+    REDUNDANT_NULLABLE_RETURN_TYPE = "RedundantNullableReturnType", Redundancy, Warning, true, [], "Nullable return type of a function that never returns null";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
@@ -343,6 +347,8 @@ rules! {
     SIMPLIFIABLE_CALL = "SimplifiableCall", Style, Info, false, [], "'filter { it is T }' instead of 'filterIsInstance<T>()', 'filter { it != null }' instead of 'filterNotNull()'";
     ASSOCIATE_FUNCTION = "ReplaceAssociateFunction", Style, Info, false, [], "'associate { it to v }' instead of 'associateWith { v }'";
     JOIN_DECLARATION_AND_ASSIGNMENT = "JoinDeclarationAndAssignment", Style, Info, false, [], "Local declared without a value and assigned right after";
+    STRING_TEMPLATE_CONCATENATION = "ConvertToStringTemplate", Style, Info, false, [], "String concatenation with '+' instead of a template";
+    LIFT_RETURN_OR_ASSIGNMENT = "LiftReturnOrAssignment", Style, Info, false, [], "'return' or assignment in every branch of an 'if'/'when'";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
@@ -356,6 +362,8 @@ rules! {
     LEAKING_THIS = "LeakingThis", Bugs, Warning, false, [], "Open member called, or 'this' passed, during construction of a non-final class";
     UNUSED_COPY_RESULT = "UnusedDataClassCopyResult", Bugs, Warning, false, [], "Data class 'copy' call whose result is unused";
     DESTRUCTURING_WRONG_NAME = "DestructuringWrongName", Bugs, Warning, false, [], "Destructured variable named like a different component of the data class";
+    RUN_BLOCKING_IN_SUSPEND = "RunBlockingInSuspendFunction", Bugs, Warning, false, [], "'runBlocking' inside a suspend function";
+    DEFERRED_RESULT_UNUSED = "DeferredResultUnused", Bugs, Warning, false, [], "'async { … }' whose Deferred result is never used";
     SELF_ASSIGNMENT = "SelfAssignment", Bugs, Warning, false, [], "Variable assigned to itself";
     EQUALS_OR_HASH_CODE = "EqualsOrHashCode", Bugs, Warning, false, [], "Class overrides only one of 'equals()' and 'hashCode()'";
     ARRAY_IN_DATA_CLASS = "ArrayInDataClass", Bugs, Warning, false, [], "Array property in a data class without custom 'equals()'/'hashCode()'";

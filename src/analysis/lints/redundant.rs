@@ -24,7 +24,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                         unit_return_type(&n, out);
                         redundant_suspend(cx, &n, out);
                         redundant_override(cx, &n, out);
+                        nullable_return_type(cx, &n, out);
                     }
+                    SyntaxKind::CALL_EXPR if n.first_child().is_some_and(|c| matches!(c.text().to_string().as_str(), "requireNotNull" | "checkNotNull")) => require_not_null(cx, &n, out),
                     SyntaxKind::RETURN_EXPR => elvis_return_null(cx, &n, out),
                     SyntaxKind::IF_EXPR => redundant_if(&n, out),
                     SyntaxKind::CLASS_BODY => empty_class_body(&n, out),
@@ -45,6 +47,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                         useless_call_on_not_null(cx, &n, out);
                         expression_qualifier(cx, &n, out);
                         companion_reference(cx, &n, out);
+                        as_sequence(cx, &n, out);
+                        run_catching(cx, &n, out);
                     }
                     SyntaxKind::PROPERTY => explicit_type(cx, &n, out),
                     SyntaxKind::USER_TYPE => type_qualifier(cx, &n, out),
@@ -922,4 +926,108 @@ fn redundant_override(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
         return;
     }
     out.report(&REDUNDANT_OVERRIDE, name.text_range(), "Redundant overriding method", Some(Fix::delete("Remove redundant overriding method", deletion_range(cx.text, f.text_range()))));
+}
+
+fn stdlib(cx: &Cx, callee: &SyntaxNode) -> bool {
+    use crate::analysis::ide::infer::Def;
+    let Some(e) = cx.engine() else { return false };
+    let defs = e.resolve_name_ref(callee);
+    !defs.is_empty() && defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if sym.fq_name.starts_with("kotlin.")))
+}
+
+fn non_null_value(cx: &Cx, x: &SyntaxNode) -> bool {
+    let Some(e) = cx.engine() else { return false };
+    matches!(crate::analysis::lints::certain_type(e, x, true), Some(crate::symbols::TypeRef::Named { nullable: false, ref fq, .. }) if fq.as_deref() != Some("kotlin.Nothing"))
+}
+
+/// `requireNotNull(x)` with `x` never null.
+fn require_not_null(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&REDUNDANT_REQUIRE_NOT_NULL) {
+        return;
+    }
+    let Some(callee) = call.first_child() else { return };
+    let Some(list) = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) else { return };
+    let args: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT).collect();
+    let [arg] = args.as_slice() else { return };
+    let Some(value) = arg.children().last() else { return };
+    if !stdlib(cx, &callee) || !non_null_value(cx, &value) {
+        return;
+    }
+    let statement = call.parent().is_some_and(|p| p.kind() == SyntaxKind::BLOCK);
+    let fix = if statement { Fix::delete(format!("Remove '{}' call", callee.text()), deletion_range(cx.text, call.text_range())) } else { Fix::replace(format!("Remove '{}' call", callee.text()), call.text_range(), value.text().to_string()) };
+    out.report(&REDUNDANT_REQUIRE_NOT_NULL, callee.text_range(), format!("Redundant '{}' call", callee.text()), Some(fix));
+}
+
+const SEQUENCE_TERMINALS: &[&str] = &["toList", "toSet", "toMutableList", "toMutableSet", "first", "firstOrNull", "last", "lastOrNull", "single", "singleOrNull", "count", "any", "all", "none", "forEach", "joinToString", "sum", "max", "min", "maxOrNull", "minOrNull"];
+
+/// `xs.asSequence().toList()`.
+fn as_sequence(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&REDUNDANT_AS_SEQUENCE) {
+        return;
+    }
+    let mut parts = n.children();
+    let (Some(inner), Some(terminal)) = (parts.next(), parts.next()) else { return };
+    let Some(t_callee) = terminal.first_child().filter(|c| terminal.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF) else { return };
+    if !SEQUENCE_TERMINALS.contains(&t_callee.text().to_string().as_str()) || inner.kind() != SyntaxKind::DOT_QUALIFIED_EXPR {
+        return;
+    }
+    let mut ip = inner.children();
+    let (Some(recv), Some(call)) = (ip.next(), ip.next()) else { return };
+    let Some(callee) = call.first_child().filter(|c| call.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF && c.text() == "asSequence") else { return };
+    if call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) || !stdlib(cx, &callee) {
+        return;
+    }
+    // Iterables and arrays have the same terminal operations.
+    let Some(e) = cx.engine() else { return };
+    let Some(t) = e.type_of(&recv) else { return };
+    let iterable = e.supertype_closure(&t).iter().filter_map(crate::analysis::ide::infer::fq_of).any(|f| f == "kotlin.collections.Iterable" || f == "kotlin.Array");
+    if !iterable {
+        return;
+    }
+    let range = TextRange::new(recv.text_range().end(), call.text_range().end());
+    out.report(&REDUNDANT_AS_SEQUENCE, callee.text_range(), "Redundant 'asSequence' call", Some(Fix::delete("Remove 'asSequence' call", range)));
+}
+
+/// `runCatching { … }.getOrThrow()` → `run { … }`.
+fn run_catching(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&REDUNDANT_RUN_CATCHING) {
+        return;
+    }
+    let mut parts = n.children();
+    let (Some(rc), Some(get)) = (parts.next(), parts.next()) else { return };
+    if get.kind() != SyntaxKind::CALL_EXPR || get.first_child().is_none_or(|c| c.text() != "getOrThrow") || get.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_some_and(|l| l.children().next().is_some()) {
+        return;
+    }
+    let Some(callee) = rc.first_child().filter(|c| rc.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF && c.text() == "runCatching") else { return };
+    let Some(lambda) = rc.children().find(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) else { return };
+    if rc.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_some_and(|l| l.children().next().is_some()) || !stdlib(cx, &callee) {
+        return;
+    }
+    out.report(&REDUNDANT_RUN_CATCHING, callee.text_range(), "Redundant 'runCatching' call", Some(Fix::replace("Replace with 'run'", n.text_range(), format!("run {}", lambda.text()))));
+}
+
+/// `fun f(): String? = "x"`: a final function whose every result is non-null.
+fn nullable_return_type(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&REDUNDANT_NULLABLE_RETURN_TYPE) || ["open", "abstract", "override", "expect", "actual", "external"].iter().any(|m| has_modifier(f, m)) {
+        return;
+    }
+    if f.parent().and_then(|b| b.parent()).is_some_and(|c| c.kind() == SyntaxKind::CLASS && ast::token(&c, SyntaxKind::INTERFACE_KW).is_some()) {
+        return;
+    }
+    let Some(decl) = ast::FunDecl::cast(f.clone()) else { return };
+    let Some(ret) = decl.return_type() else { return };
+    let Some(q) = ret.syntax().children().find(|c| c.kind() == SyntaxKind::NULLABLE_TYPE).and_then(|n| n.last_token()).filter(|t| t.kind() == SyntaxKind::QUESTION) else { return };
+    if ret.syntax().text().to_string().matches('?').count() != 1 || cx.engine().is_none() {
+        return;
+    }
+    let ok = match decl.body_block() {
+        Some(body) => {
+            let returns: Vec<SyntaxNode> = body.syntax().descendants().filter(|d| d.kind() == SyntaxKind::RETURN_EXPR && !d.children().any(|c| c.kind() == SyntaxKind::LABEL_QUALIFIER)).filter(|r| r.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::ANONYMOUS_FUNCTION)).as_ref() == Some(f)).collect();
+            !returns.is_empty() && returns.iter().all(|r| r.first_child().is_some_and(|v| non_null_value(cx, &v)))
+        }
+        None => initializer(f).is_some_and(|v| non_null_value(cx, &v)),
+    };
+    if ok {
+        out.report(&REDUNDANT_NULLABLE_RETURN_TYPE, q.text_range(), format!("'{}' is always non-null type", ret.syntax().text()), Some(Fix::delete("Make not-nullable", q.text_range())));
+    }
 }
