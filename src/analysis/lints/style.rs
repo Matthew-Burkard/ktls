@@ -26,6 +26,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 count_with_size(cx, &n, out);
                 java_static_method(cx, &n, out);
             }
+            SyntaxKind::CALL_EXPR => readln(cx, &n, out),
             SyntaxKind::PREFIX_EXPR => {
                 negated_is_empty(cx, &n, out);
                 negated_binary(cx, &n, out);
@@ -776,4 +777,22 @@ fn java_static_method(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     };
     edits.push(Edit { range: n.text_range(), text: replacement });
     out.report(&JAVA_STATIC_METHOD, n.text_range(), format!("Should be replaced with Kotlin function '{shown}'"), Some(Fix::new(format!("Replace with '{shown}'"), edits)));
+}
+
+/// `readLine()!!` → `readln()`, `readLine()` → `readlnOrNull()` (Kotlin 1.6+).
+fn readln(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && c.text() == "readLine") else { return };
+    if !cx.on(&READLN) || cx.language_version().is_some_and(|v| v < 106) || plain_arguments(call).is_none_or(|a| !a.is_empty()) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    if !matches!(e.resolve_name_ref(&callee).as_slice(), [Def::Symbol { sym, .. }] if sym.fq_name == "kotlin.io.readLine") {
+        return;
+    }
+    let asserted = call.parent().filter(|p| p.kind() == SyntaxKind::POSTFIX_EXPR && binary_op(p).is_some_and(|o| o.kind() == SyntaxKind::EXCL2));
+    let (range, text) = match &asserted {
+        Some(p) => (p.text_range(), "readln()"),
+        None => (call.text_range(), "readlnOrNull()"),
+    };
+    out.report(&READLN, range, format!("Replace with '{text}'"), Some(Fix::replace(format!("Replace with '{text}'"), range, text)));
 }

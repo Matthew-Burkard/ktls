@@ -20,7 +20,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 match n.kind() {
                     SyntaxKind::LONG_STRING_TEMPLATE_ENTRY => template_braces(cx, &n, out),
                     SyntaxKind::MODIFIER_LIST => modifier_list(cx, &n, out),
-                    SyntaxKind::FUN => unit_return_type(&n, out),
+                    SyntaxKind::FUN => {
+                        unit_return_type(&n, out);
+                        redundant_suspend(cx, &n, out);
+                    }
                     SyntaxKind::IF_EXPR => redundant_if(&n, out),
                     SyntaxKind::CLASS_BODY => empty_class_body(&n, out),
                     SyntaxKind::PRIMARY_CONSTRUCTOR => {
@@ -39,6 +42,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                     SyntaxKind::DOT_QUALIFIED_EXPR => {
                         useless_call_on_not_null(cx, &n, out);
                         expression_qualifier(cx, &n, out);
+                        companion_reference(cx, &n, out);
                     }
                     SyntaxKind::PROPERTY => explicit_type(cx, &n, out),
                     SyntaxKind::USER_TYPE => type_qualifier(cx, &n, out),
@@ -755,4 +759,111 @@ fn expression_qualifier(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
             return;
         }
     }
+}
+
+/// Whether anything in `body` may suspend: a call that is or may be `suspend` (unresolved,
+/// invoking a function-typed value, an infix call), or `coroutineContext`.
+fn may_suspend(e: &crate::analysis::ide::infer::Engine, body: &SyntaxNode) -> bool {
+    use crate::analysis::ide::infer::Def;
+    let suspends = |defs: &[Def]| {
+        defs.is_empty()
+            || defs.iter().any(|d| match d {
+                Def::Symbol { sym, .. } => sym.modifiers.has(crate::symbols::Modifiers::SUSPEND) || !matches!(sym.kind, crate::symbols::SymbolKind::Function | crate::symbols::SymbolKind::Constructor) && !sym.kind.is_classifier(),
+                // A function-typed local or parameter may be a suspend function.
+                Def::Local(_) => true,
+                Def::Package(_) => false,
+            })
+    };
+    for n in body.descendants() {
+        match n.kind() {
+            SyntaxKind::CALL_EXPR => {
+                let Some(callee) = n.first_child() else { return true };
+                if callee.kind() != SyntaxKind::NAME_REF || suspends(&e.resolve_name_ref(&callee)) {
+                    return true;
+                }
+            }
+            SyntaxKind::BINARY_EXPR if binary_op(&n).is_some_and(|o| o.kind() == SyntaxKind::IDENT) => {
+                let Some(op) = n.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE) else { return true };
+                if suspends(&e.resolve_infix(&op)) {
+                    return true;
+                }
+            }
+            SyntaxKind::NAME_REF if n.text() == "coroutineContext" => return true,
+            // `for` over a suspending iterator, delegated or overloaded operators: rare, but
+            // `super` calls and callable references are left alone too.
+            SyntaxKind::SUPER_EXPR | SyntaxKind::CALLABLE_REFERENCE => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// `suspend fun f() { … }` calling no suspend functions.
+fn redundant_suspend(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&REDUNDANT_SUSPEND) {
+        return;
+    }
+    let Some(m) = modifiers(f) else { return };
+    let Some(kw) = m.modifiers().find(|t| t.text() == "suspend") else { return };
+    if ["override", "open", "abstract", "actual", "expect", "external"].iter().any(|x| has_modifier(f, x)) || m.annotations().next().is_some() {
+        return;
+    }
+    // Interface members are open.
+    if f.parent().and_then(|b| b.parent()).is_some_and(|c| c.kind() == SyntaxKind::CLASS && ast::token(&c, SyntaxKind::INTERFACE_KW).is_some()) {
+        return;
+    }
+    let Some(decl) = ast::FunDecl::cast(f.clone()) else { return };
+    let body = match decl.body_block() {
+        Some(b) => b.syntax().clone(),
+        None if decl.has_expression_body() => f.clone(),
+        None => return,
+    };
+    let Some(e) = cx.engine() else { return };
+    if may_suspend(e, &body) {
+        return;
+    }
+    let end = kw.next_token().filter(|t| t.kind().is_trivia()).map_or(kw.text_range().end(), |t| t.text_range().end());
+    out.report(&REDUNDANT_SUSPEND, kw.text_range(), "Redundant 'suspend' modifier", Some(Fix::delete("Remove 'suspend' modifier", TextRange::new(kw.text_range().start(), end))));
+}
+
+/// `Config.Companion.load()` → `Config.load()`.
+fn companion_reference(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    use crate::analysis::ide::infer::Qualifier;
+    let mut parts = n.children();
+    let (Some(recv), Some(sel), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    if recv.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || !cx.on(&REDUNDANT_COMPANION_REFERENCE) || has_comments(&recv) {
+        return;
+    }
+    let mut inner = recv.children();
+    let (Some(class), Some(companion), None) = (inner.next(), inner.next(), inner.next()) else { return };
+    if companion.kind() != SyntaxKind::NAME_REF || companion.text() != "Companion" {
+        return;
+    }
+    let member = match sel.kind() {
+        SyntaxKind::NAME_REF => sel.clone(),
+        SyntaxKind::CALL_EXPR => match sel.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) {
+            Some(c) => c,
+            None => return,
+        },
+        _ => return,
+    };
+    let Some(e) = cx.engine() else { return };
+    let Qualifier::Static(c) = e.resolve_qualifier(&class) else { return };
+    let object = match e.resolve_qualifier(&recv) {
+        Qualifier::Static(obj) => obj.fq_name().to_string(),
+        Qualifier::Value(t) => match crate::analysis::ide::infer::fq_of(&t) {
+            Some(fq) => fq.to_string(),
+            None => return,
+        },
+        _ => return,
+    };
+    if object != format!("{}.Companion", c.fq_name()) {
+        return;
+    }
+    // A nested class of that name would win over the companion member.
+    if e.classifier(&format!("{}.{}", c.fq_name(), member.text())).is_some() {
+        return;
+    }
+    let range = TextRange::new(class.text_range().end(), companion.text_range().end());
+    out.report(&REDUNDANT_COMPANION_REFERENCE, companion.text_range(), "Redundant Companion reference", Some(Fix::delete("Remove redundant Companion reference", range)));
 }

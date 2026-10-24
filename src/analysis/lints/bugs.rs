@@ -24,6 +24,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 array_in_data_class(&n, out);
             }
             SyntaxKind::CALL_EXPR => throwable_not_thrown(cx, &n, out),
+            SyntaxKind::FUN => main_return_unit(cx, &n, out),
             SyntaxKind::PROPERTY_ACCESSOR => recursive_accessor(cx, &n, out),
             SyntaxKind::NAME_REF if n.text() == "it" => nested_it(cx, &n, out),
             _ => {}
@@ -266,4 +267,42 @@ fn nested_it(cx: &Cx, it: &SyntaxNode, out: &mut Sink) {
     if outer_used {
         out.report(&NESTED_IT, it.text_range(), "Implicit parameter 'it' of the enclosing lambda is shadowed", None);
     }
+}
+
+/// A top-level `fun main()` (or `main(args: Array<String>)`) whose result is not `Unit`,
+/// typically `fun main() = runBlocking { … }` ending in a value: it is no entry point.
+fn main_return_unit(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&MAIN_RETURN_UNIT) || f.parent().is_none_or(|p| p.kind() != SyntaxKind::KOTLIN_FILE) {
+        return;
+    }
+    let Some(name) = name_token(f).filter(|t| t.text() == "main") else { return };
+    let Some(decl) = ast::FunDecl::cast(f.clone()) else { return };
+    if decl.receiver().is_some() || !decl.type_parameters().is_empty() {
+        return;
+    }
+    let params = decl.parameters();
+    let entry_params = match params.as_slice() {
+        [] => true,
+        [p] => ast::child::<ast::TypeRef>(p.syntax()).is_some_and(|t| t.syntax().text().to_string().replace(' ', "") == "Array<String>"),
+        _ => false,
+    };
+    if !entry_params {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let result = match decl.return_type() {
+        Some(t) => e.resolve_syntax_type(&t),
+        None if decl.has_expression_body() => {
+            let Some(eq) = ast::token(f, SyntaxKind::EQ) else { return };
+            let Some(body) = f.children().find(|c| c.text_range().start() >= eq.text_range().end()) else { return };
+            let Some(t) = crate::analysis::lints::certain_type(e, &body, false) else { return };
+            t
+        }
+        None => return,
+    };
+    let Some(fq) = crate::analysis::ide::infer::fq_of(&result) else { return };
+    if fq == "kotlin.Unit" {
+        return;
+    }
+    out.report(&MAIN_RETURN_UNIT, name.text_range(), format!("'main' should return 'Unit' (it returns '{}'), or it is not an entry point", result.display()), None);
 }

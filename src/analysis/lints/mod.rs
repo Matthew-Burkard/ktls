@@ -288,6 +288,8 @@ rules! {
     REDUNDANT_QUALIFIER = "RemoveRedundantQualifierName", Redundancy, Warning, true, [], "Package or class qualifier of a name that resolves the same without it";
     REDUNDANT_CONSTRUCTOR_KEYWORD = "RedundantConstructorKeyword", Redundancy, Warning, true, [], "'constructor' keyword on a primary constructor without modifiers";
     REDUNDANT_ENUM_CONSTRUCTOR_INVOCATION = "RedundantEnumConstructorInvocation", Redundancy, Warning, true, [], "Empty '()' after an enum entry";
+    REDUNDANT_SUSPEND = "RedundantSuspendModifier", Redundancy, Warning, true, [], "'suspend' on a function that calls no suspend functions";
+    REDUNDANT_COMPANION_REFERENCE = "RedundantCompanionReference", Redundancy, Warning, true, [], "'Companion' in 'C.Companion.member' where 'C.member' means the same";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
@@ -307,9 +309,11 @@ rules! {
     COUNT_WITH_SIZE = "ReplaceCollectionCountWithSize", Style, Info, false, [], "'xs.count()' instead of 'xs.size'";
     IGNORE_CASE_EQUALS = "ReplaceWithIgnoreCaseEquals", Style, Info, false, [], "'a.lowercase() == b.lowercase()' instead of 'a.equals(b, ignoreCase = true)'";
     JAVA_STATIC_METHOD = "ReplaceJavaStaticMethodWithKotlinAnalog", Style, Info, false, [], "Java static method with a Kotlin counterpart ('Math.max', 'System.out.println', 'Arrays.asList')";
+    READLN = "ReplaceReadLineWithReadln", Style, Info, false, [], "'readLine()!!' instead of 'readln()', 'readLine()' instead of 'readlnOrNull()'";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
+    MAIN_RETURN_UNIT = "MainFunctionReturnUnit", Bugs, Warning, false, [], "'main' function that does not return 'Unit' (not an entry point)";
     SELF_ASSIGNMENT = "SelfAssignment", Bugs, Warning, false, [], "Variable assigned to itself";
     EQUALS_OR_HASH_CODE = "EqualsOrHashCode", Bugs, Warning, false, [], "Class overrides only one of 'equals()' and 'hashCode()'";
     ARRAY_IN_DATA_CLASS = "ArrayInDataClass", Bugs, Warning, false, [], "Array property in a data class without custom 'equals()'/'hashCode()'";

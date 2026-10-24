@@ -2363,3 +2363,53 @@ fun f(a: IntArray, s: String, c: Char, x: Double) {
     let out = fixed(&text.replace("Math.max(1, 2) + Math.abs(-1)", "1").replace("System.out.println(", "println("), "ReplaceJavaStaticMethodWithKotlinAnalog");
     assert!(out.contains("println(a.contentToString())"), "{out}");
 }
+
+#[test]
+fn suspend_companion_readln_and_main() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = lint(
+        r#"package a
+
+class Config {
+    companion object {
+        fun load() = Config()
+        val name = "c"
+    }
+}
+
+suspend fun pause() = kotlinx.coroutines.delay(1)
+suspend fun plain(x: Int): Int = x + 1
+suspend fun calls(): Int {
+    pause()
+    return 1
+}
+suspend fun invokes(block: suspend () -> Unit) = block()
+interface Repo { suspend fun get(): Int }
+open class Base { open suspend fun f() {} }
+
+fun g() {
+    println(Config.Companion.load())
+    println(Config.Companion.name + Config.name)
+    val a = readLine()!!
+    val b = readLine()
+    println(a + b)
+}
+"#,
+    );
+    let suspends: Vec<_> = found.iter().filter(|f| f.starts_with("RedundantSuspendModifier")).collect();
+    assert_eq!(suspends.len(), 1, "only 'plain': {found:#?}");
+    let companions: Vec<_> = found.iter().filter(|f| f.starts_with("RedundantCompanionReference")).collect();
+    assert_eq!(companions.len(), 2, "{found:#?}");
+    has(&found, "ReplaceReadLineWithReadln: readLine()!!");
+    has(&found, "ReplaceReadLineWithReadln: readLine()");
+    assert!(fixed("package a\n\nsuspend fun plain(x: Int): Int = x + 1\n", "RedundantSuspendModifier").contains("\nfun plain"));
+    assert!(fixed("package a\n\nclass C { companion object { fun f() = 1 } }\nfun g() = C.Companion.f()\n", "RedundantCompanionReference").contains("= C.f()"));
+    assert!(fixed("package a\n\nfun g() = readLine()!!.length\n", "ReplaceReadLineWithReadln").contains("= readln().length"));
+    // `main` returning a value is not an entry point.
+    let main = lint("package a\n\nfun main() = \"x\".length\n");
+    has(&main, "MainFunctionReturnUnit: main");
+    let ok = lint("package a\n\nfun main() = println(1)\nfun main(args: Array<String>) {}\n");
+    assert!(!ok.iter().any(|f| f.starts_with("MainFunctionReturnUnit")), "{ok:#?}");
+}

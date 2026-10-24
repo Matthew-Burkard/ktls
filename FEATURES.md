@@ -213,11 +213,11 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `RedundantUnitExpression`
 - [x] [P1] `RedundantIf` (`if (x) true else false`)
 - [~] [P1] `RedundantLambdaArrow`, `RedundantLambdaOrAnonymousFunction` — *partial: `RedundantLambdaArrow` (`{ -> … }`, `{ it -> … }`; as a call argument only when the call has one candidate)*
-- [ ] [P1] `RedundantSuspendModifier`
+- [x] [P1] `RedundantSuspendModifier` (final, non-override functions whose bodies call nothing that is or may be `suspend`)
 - [x] [P1] `RemoveRedundantBackticks`
 - [~] [P1] `RemoveEmptyParenthesesFromLambdaCall`, `RemoveEmptyClassBody`, `RemoveEmptyPrimaryConstructor`, `RemoveEmptySecondaryConstructorBody` — *partial: all but `RemoveEmptySecondaryConstructorBody`*
 - [x] [P1] `RemoveCurlyBracesFromTemplate` (`${x}` → `$x`), `RemoveSingleExpressionStringTemplate`
-- [ ] [P1] `RedundantCompanionReference`, `RedundantObjectTypeCheck`
+- [~] [P1] `RedundantCompanionReference`, `RedundantObjectTypeCheck` — *partial: `RedundantCompanionReference` (`C.Companion.member`)*
 - [x] [P1] `RedundantGetter` / `RedundantSetter`
 - [~] [P1] `RedundantInnerClassModifier`, `RedundantEmptyInitializerBlock` — *partial: `RedundantEmptyInitializerBlock`*
 - [ ] [P1] `RedundantNullableReturnType`, `RedundantRequireNotNullCall`
@@ -257,7 +257,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda` — *partial: `SelfAssignment` of local variables*
 - [ ] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`)
 - [~] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals` — *partial: `ReplaceWithIgnoreCaseEquals`*
-- [ ] [P1] `ReplaceStringFormatWithLiteral`, `ReplaceReadLineWithReadln`, `ReplacePrintlnWithLogging`
+- [~] [P1] `ReplaceStringFormatWithLiteral`, `ReplaceReadLineWithReadln`, `ReplacePrintlnWithLogging` — *partial: `ReplaceReadLineWithReadln`*
 - [ ] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet`
 - [~] [P1] `UnnecessaryVariable`, `UnnecessaryOptInAnnotation` — *partial: `UnnecessaryVariable` (`val x = e; return x`)*
 - [ ] [P1] `KotlinConstantConditions` (always true/false)
@@ -296,7 +296,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `UnusedResultOfAsync` / `DeferredResultUnused`, `SuspendFunctionOnCoroutineScope`, `RedundantRunBlocking`
 - [ ] [P1] `RunBlockingInSuspendFunction`, `BlockingMethodInNonBlockingContext` (`Thread.sleep` in coroutine)
 - [ ] [P1] `FlowCollectWithoutLaunch`, `GlobalCoroutineUsage` (`GlobalScope`)
-- [ ] [P1] `WarningOnMainUnusedParameterMigration`, `MainFunctionReturnUnit`
+- [~] [P1] `WarningOnMainUnusedParameterMigration`, `MainFunctionReturnUnit` — *partial: `MainFunctionReturnUnit`*
 - [ ] [P1] `OverridingDeprecatedMember`, `DeprecatedCallableAddReplaceWith`
 - [x] [P1] `ConvertNaNEquality` (`x == Double.NaN`)
 - [x] [P1] `ThrowableNotThrown` (`IllegalStateException()` without `throw`)
