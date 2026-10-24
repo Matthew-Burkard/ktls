@@ -70,10 +70,10 @@ fn checked(at: &SyntaxNode, name: &str) -> bool {
             SyntaxKind::FUN | SyntaxKind::CLASS_BODY | SyntaxKind::KOTLIN_FILE | SyntaxKind::LAMBDA_EXPR => return false,
             SyntaxKind::IF_EXPR => {
                 let cond = p.children().find(|c| c.kind() == SyntaxKind::CONDITION).and_then(|c| c.children().next());
-                if let Some(cond) = cond {
-                    if cur.kind() == SyntaxKind::THEN_BRANCH && compares_null(&cond, name, true) || cur.kind() == SyntaxKind::ELSE_BRANCH && compares_null(&cond, name, false) {
-                        return true;
-                    }
+                if let Some(cond) = cond
+                    && (cur.kind() == SyntaxKind::THEN_BRANCH && compares_null(&cond, name, true) || cur.kind() == SyntaxKind::ELSE_BRANCH && compares_null(&cond, name, false))
+                {
+                    return true;
                 }
             }
             SyntaxKind::BINARY_EXPR => {
