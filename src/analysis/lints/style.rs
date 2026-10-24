@@ -66,8 +66,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 fold_initializer(cx, &n, out);
                 join_declaration(cx, &n, out);
                 move_into_when(cx, &n, out);
+                try_finally_to_use(cx, &n, out);
             }
             SyntaxKind::DESTRUCTURING_DECLARATION => incomplete_destructuring(cx, &n, out),
+            SyntaxKind::OBJECT_LITERAL => object_to_lambda(cx, &n, out),
             SyntaxKind::IS_EXPR => object_type_check(cx, &n, out),
             SyntaxKind::WHEN_CONDITION if ast::token(&n, SyntaxKind::IS_KW).is_some() => object_type_check(cx, &n, out),
             SyntaxKind::ANNOTATION => array_of_in_annotation(&n, cx, out),
@@ -1822,4 +1824,113 @@ fn lambda_to_reference(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     // From the end of the callee: `map { … }` / `map() { … }` → `map(::f)`.
     let start = call.first_child().map_or(arg.text_range().start(), |c| c.text_range().end());
     out.report(&LAMBDA_TO_REFERENCE, lambda.text_range(), "Convert lambda to reference", Some(Fix::replace("Convert lambda to reference", TextRange::new(start, arg.text_range().end()), format!("(::{})", f.text()))));
+}
+
+pub(super) fn is_sam(e: &crate::analysis::ide::infer::Engine, fq: &str) -> bool {
+    single_abstract_method(e, fq).is_some()
+}
+
+/// Whether the interface `fq` has exactly one abstract method (a SAM).
+fn single_abstract_method(e: &crate::analysis::ide::infer::Engine, fq: &str) -> Option<crate::symbols::Symbol> {
+    let c = e.classifier(fq)?;
+    if c.symbol().kind != SymbolKind::Interface {
+        return None;
+    }
+    let java = matches!(e.res.find_classifier(fq), Some(crate::analysis::resolve::Classifier::Library(lc)) if !lc.is_kotlin);
+    if !java && !c.symbol().modifiers.has(Modifiers::FUN_INTERFACE) {
+        return None;
+    }
+    let fns: Vec<_> = e.declared_members(fq).into_iter().filter(|m| m.kind == SymbolKind::Function && !m.modifiers.has(Modifiers::STATIC)).collect();
+    let abstract_fns: Vec<_> = fns.iter().filter(|m| m.modifiers.has(Modifiers::ABSTRACT)).cloned().collect();
+    let candidates = if abstract_fns.is_empty() { fns } else { abstract_fns };
+    match candidates.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
+/// `object : Runnable { override fun run() { … } }` → `Runnable { … }`.
+fn object_to_lambda(cx: &Cx, o: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&OBJECT_LITERAL_TO_LAMBDA) || has_comments(o) {
+        return;
+    }
+    let entries: Vec<SyntaxNode> = o.children().filter(|c| c.kind() == SyntaxKind::SUPER_TYPE_LIST).flat_map(|l| l.children().collect::<Vec<_>>()).collect();
+    let [entry] = entries.as_slice() else { return };
+    if entry.kind() != SyntaxKind::SUPER_TYPE_ENTRY {
+        return;
+    }
+    let Some(tr) = entry.children().find_map(ast::TypeRef::cast) else { return };
+    let Some(body) = o.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY) else { return };
+    let members: Vec<SyntaxNode> = body.children().collect();
+    let [f] = members.as_slice() else { return };
+    if f.kind() != SyntaxKind::FUN || !has_modifier(f, "override") || modifiers(f).is_some_and(|m| m.modifiers().count() != 1 || m.annotations().next().is_some()) {
+        return;
+    }
+    let Some(decl) = ast::FunDecl::cast(f.clone()) else { return };
+    // `this` would change meaning; `return` would need a label.
+    if f.descendants().any(|d| matches!(d.kind(), SyntaxKind::THIS_EXPR | SyntaxKind::RETURN_EXPR | SyntaxKind::SUPER_EXPR)) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let t = e.resolve_syntax_type(&tr);
+    let Some(fq) = fq_of(&t) else { return };
+    let Some(sam) = single_abstract_method(e, fq) else { return };
+    if name_token(f).is_none_or(|n| n.text() != sam.name) {
+        return;
+    }
+    let params: Vec<String> = decl.parameters().iter().filter_map(|p| name_token(p.syntax()).map(|t| ast::ident_text(&t))).collect();
+    let body_text = match decl.body_block() {
+        Some(b) => {
+            let t = b.syntax().text().to_string();
+            t[1..t.len() - 1].trim().to_string()
+        }
+        None => match initializer(f) {
+            Some(v) => v.text().to_string(),
+            None => return,
+        },
+    };
+    let arrow = if params.is_empty() { String::new() } else { format!("{} -> ", params.join(", ")) };
+    let indent = indent_at(cx.text, o.text_range().start());
+    let text = if body_text.contains('\n') { format!("{} {{ {arrow}\n{indent}    {}\n{indent}}}", tr.syntax().text(), body_text) } else { format!("{} {{ {arrow}{} }}", tr.syntax().text(), body_text) };
+    let kw = o.first_token().map_or(o.text_range(), |t| t.text_range());
+    out.report(&OBJECT_LITERAL_TO_LAMBDA, kw, "Convert to lambda", Some(Fix::replace("Convert to lambda", o.text_range(), text)));
+}
+
+/// `val r = open()` then `try { … } finally { r.close() }` → `open().use { r -> … }`.
+fn try_finally_to_use(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&TRY_FINALLY_TO_USE) {
+        return;
+    }
+    let stmts: Vec<SyntaxNode> = block.children().collect();
+    for (i, w) in stmts.windows(2).enumerate() {
+        let (decl, t) = (&w[0], &w[1]);
+        if decl.kind() != SyntaxKind::PROPERTY || t.kind() != SyntaxKind::TRY_EXPR || t.children().any(|c| c.kind() == SyntaxKind::CATCH_CLAUSE) || has_comments(t) {
+            continue;
+        }
+        let (Some(name), Some(init)) = (name_token(decl).map(|n| ast::ident_text(&n)), initializer(decl)) else { continue };
+        if ast::PropertyDecl::cast(decl.clone()).is_none_or(|p| p.is_var() || p.type_ref().is_some()) {
+            continue;
+        }
+        let Some(finally) = t.children().find(|c| c.kind() == SyntaxKind::FINALLY_CLAUSE).and_then(|f| f.children().find(|c| c.kind() == SyntaxKind::BLOCK)) else { continue };
+        let Some(close) = only_statement(&finally) else { continue };
+        if close.text().to_string().replace(' ', "") != format!("{name}.close()") {
+            continue;
+        }
+        // Used after the `try`: `use` would scope it.
+        if stmts[i + 2..].iter().any(|s| s.descendants().any(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == name.as_str())) {
+            continue;
+        }
+        let Some(e) = cx.engine() else { continue };
+        let Some(ty) = e.type_of(&init) else { continue };
+        let closeable = e.supertype_closure(&ty).iter().filter_map(fq_of).any(|f| matches!(f, "java.io.Closeable" | "java.lang.AutoCloseable" | "kotlin.AutoCloseable"));
+        let Some(body) = t.children().find(|c| c.kind() == SyntaxKind::BLOCK) else { continue };
+        if !closeable || body.descendants().any(|d| d.kind() == SyntaxKind::RETURN_EXPR) {
+            continue;
+        }
+        let inner = body.text().to_string();
+        let inner = &inner[1..inner.len() - 1];
+        let receiver = if is_primary(&init) { init.text().to_string() } else { format!("({})", init.text()) };
+        let fix = Fix::replace("Convert to 'use' call", TextRange::new(decl.text_range().start(), t.text_range().end()), format!("{receiver}.use {{ {name} ->{inner}}}"));
+        out.report(&TRY_FINALLY_TO_USE, t.first_token().map_or(t.text_range(), |k| k.text_range()), "try-finally can be replaced with 'use()'", Some(fix));
+    }
 }

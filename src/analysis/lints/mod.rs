@@ -319,6 +319,7 @@ rules! {
     UNUSED_ANONYMOUS_PARAMETER = "UNUSED_ANONYMOUS_PARAMETER", Unused, Info, true, ["unused"], "Lambda parameter that is never used (can be '_')";
     UNUSED_SYMBOL = "UnusedSymbol", Unused, Warning, true, ["unused", "UnusedPrivateMember", "UnusedPrivateProperty", "UnusedPrivateClass"], "Private or local declaration that is never used";
     CAN_BE_PARAMETER = "CanBeParameter", Unused, Warning, false, [], "Private constructor property used only while constructing";
+    UNUSED_RECEIVER_PARAMETER = "UnusedReceiverParameter", Unused, Warning, true, [], "Extension function that never uses its receiver";
     CAN_BE_VAL = "CanBeVal", Unused, Warning, false, ["CAN_BE_VAL"], "Local 'var' that is never reassigned";
 
     REDUNDANT_SEMICOLON = "RedundantSemicolon", Redundancy, Warning, true, [], "Semicolon that is not needed";
@@ -359,6 +360,8 @@ rules! {
     USELESS_CALL_ON_COLLECTION = "UselessCallOnCollection", Redundancy, Warning, true, [], "'filterNotNull()' on a collection whose elements are never null";
     REDUNDANT_INNER = "RedundantInnerClassModifier", Redundancy, Warning, true, [], "'inner' on a class that never uses its outer instance";
     COMPLEX_REDUNDANT_LET = "ComplexRedundantLet", Redundancy, Info, false, [], "'x.let { f(it) }' instead of 'f(x)'";
+    REDUNDANT_WITH = "RedundantWith", Redundancy, Warning, true, [], "'with(x) { … }' whose block never uses 'x'";
+    REDUNDANT_SAM_CONSTRUCTOR = "RedundantSamConstructor", Redundancy, Warning, true, [], "'Runnable { … }' passed where a lambda converts anyway";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
@@ -410,6 +413,8 @@ rules! {
     ENUM_MAP = "ReplaceWithEnumMap", Style, Info, false, [], "'hashMapOf<Enum, V>()' instead of 'EnumMap'";
     MAP_INDEXED_TO_LIST = "ReplaceMapIndexedWithListGenerator", Style, Info, false, [], "'xs.mapIndexed { i, _ -> … }' instead of 'List(xs.size) { i -> … }'";
     LAMBDA_TO_REFERENCE = "ConvertLambdaToReference", Style, Action, false, [], "'xs.map { f(it) }' instead of 'xs.map(::f)'";
+    OBJECT_LITERAL_TO_LAMBDA = "ObjectLiteralToLambda", Style, Info, false, [], "'object : Runnable { override fun run() … }' instead of a lambda";
+    TRY_FINALLY_TO_USE = "ConvertTryFinallyToUseCall", Style, Info, false, [], "'try { … } finally { r.close() }' instead of 'use { }'";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
@@ -790,6 +795,75 @@ pub(crate) fn idents(n: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> + use<
 
 pub(crate) fn is_comment(k: SyntaxKind) -> bool {
     matches!(k, SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::KDOC)
+}
+
+/// Whether code in `scope` uses an implicit (or explicit `this`) receiver of type `t`:
+/// `this`, members and extensions of `t` called without a receiver. `None` when a name does
+/// not resolve (unsure).
+pub(crate) fn uses_receiver(e: &crate::analysis::ide::infer::Engine, scope: &SyntaxNode, t: &crate::symbols::TypeRef) -> Option<bool> {
+    use crate::analysis::ide::infer::{Def, fq_of};
+    let closure: Vec<String> = e.supertype_closure(t).iter().filter_map(fq_of).map(str::to_string).collect();
+    // Classes around `scope`: their members are reached through their own `this`.
+    let enclosing: Vec<String> = scope
+        .ancestors()
+        .filter(|a| matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION))
+        .filter_map(|a| name_token(&a).map(|t| ast::ident_text(&t)))
+        .collect();
+    let owner_of = |sym: &crate::symbols::Symbol| sym.fq_name.rsplit_once('.').map_or(String::new(), |(o, _)| o.to_string());
+    for n in scope.descendants() {
+        match n.kind() {
+            SyntaxKind::THIS_EXPR | SyntaxKind::SUPER_EXPR => return Some(true),
+            // Operators declared as member extensions of the receiver (`+"sql"` in a builder).
+            SyntaxKind::OPERATION_REFERENCE => {
+                let Some(tok) = n.first_token() else { continue };
+                for d in e.operator_defs(&tok).unwrap_or_default() {
+                    if let Def::Symbol { sym, .. } = d
+                        && sym.receiver.is_some()
+                        && e.classifier(&owner_of(&sym)).is_some()
+                    {
+                        return if closure.contains(&owner_of(&sym)) { Some(true) } else { None };
+                    }
+                }
+            }
+            SyntaxKind::CALLABLE_REFERENCE if n.first_child().is_none_or(|c| c.kind() == SyntaxKind::NAME_REF && n.children().count() == 1) => return None,
+            SyntaxKind::NAME_REF => {
+                // Selectors belong to their receiver.
+                let selector = |x: &SyntaxNode| x.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR | SyntaxKind::CALLABLE_REFERENCE) && p.first_child().as_ref() != Some(x));
+                if selector(&n) || n.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR).is_some_and(|c| selector(&c)) {
+                    // `x.ext()` where `ext` is a member extension: it needs its class's instance.
+                    for d in e.resolve_name_ref(&n) {
+                        if let Def::Symbol { sym, .. } = d
+                            && sym.receiver.is_some()
+                            && e.classifier(&owner_of(&sym)).is_some()
+                        {
+                            return if closure.contains(&owner_of(&sym)) { Some(true) } else { None };
+                        }
+                    }
+                    continue;
+                }
+                let defs = e.resolve_name_ref(&n);
+                if defs.is_empty() {
+                    return None;
+                }
+                for d in &defs {
+                    let Def::Symbol { sym, .. } = d else { continue };
+                    if sym.kind.is_classifier() || sym.kind == crate::symbols::SymbolKind::Constructor {
+                        continue;
+                    }
+                    let owner = owner_of(sym);
+                    if sym.receiver.is_some() || closure.contains(&owner) {
+                        return Some(true);
+                    }
+                    // A member of some other class: an enclosing one, or unsure (aliases).
+                    if e.classifier(&owner).is_some() && !enclosing.iter().any(|c| owner.ends_with(&format!(".{c}")) || owner == *c) {
+                        return None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(false)
 }
 
 pub(crate) fn has_comments(n: &SyntaxNode) -> bool {

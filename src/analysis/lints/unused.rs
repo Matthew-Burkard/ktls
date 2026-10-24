@@ -31,6 +31,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::FUN => {
                 unused_parameters(cx, &n, out);
                 unused_declaration(cx, &n, out);
+                if n.children().any(|c| c.kind() == SyntaxKind::RECEIVER_TYPE) {
+                    unused_receiver(cx, &n, out);
+                }
             }
             SyntaxKind::PRIMARY_CONSTRUCTOR | SyntaxKind::SECONDARY_CONSTRUCTOR => unused_constructor_parameters(cx, &n, out),
             SyntaxKind::LAMBDA_EXPR => unused_lambda_parameters(cx, &n, out),
@@ -490,5 +493,38 @@ pub(super) fn can_be_parameter(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
         let Some(name_tok) = name_token(&p) else { continue };
         let start = m.syntax().text_range().start();
         out.report(&CAN_BE_PARAMETER, kw.text_range(), format!("Constructor parameter '{name}' is never used as a property"), Some(Fix::delete("Remove 'val' or 'var' from parameter", TextRange::new(start, name_tok.text_range().start()))));
+    }
+}
+
+/// `fun String.f() = 1`: the receiver is never used.
+pub(super) fn unused_receiver(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&UNUSED_RECEIVER_PARAMETER) || ["override", "abstract", "open", "expect", "actual", "external", "operator", "infix"].iter().any(|m| has_modifier(f, m)) {
+        return;
+    }
+    let Some(recv) = f.children().find(|c| c.kind() == SyntaxKind::RECEIVER_TYPE) else { return };
+    let Some(decl) = ast::FunDecl::cast(f.clone()) else { return };
+    let body = match decl.body_block() {
+        Some(b) => b.syntax().clone(),
+        None => match initializer(f) {
+            Some(v) => v,
+            None => return,
+        },
+    };
+    // Annotated (`@Suppress`, test DSLs) or in an interface: the receiver is part of a contract.
+    if modifiers(f).is_some_and(|m| m.annotations().next().is_some()) || f.parent().and_then(|b| b.parent()).is_some_and(|c| c.kind() == SyntaxKind::CLASS && ast::token(&c, SyntaxKind::INTERFACE_KW).is_some()) {
+        return;
+    }
+    // Generic receivers (`T.f()`) select overloads by type.
+    if !decl.type_parameters().is_empty() {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let Some(tr) = recv.children().find_map(ast::TypeRef::cast) else { return };
+    let t = e.resolve_syntax_type(&tr);
+    if crate::analysis::ide::infer::fq_of(&t).is_none() {
+        return;
+    }
+    if uses_receiver(e, &body, &t) == Some(false) {
+        out.report(&UNUSED_RECEIVER_PARAMETER, recv.text_range(), "Receiver parameter is never used", None);
     }
 }

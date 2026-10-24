@@ -35,6 +35,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                         lambda_parens(&n, out);
                         value_argument(cx, &n, out);
                         invoked_lambda(cx, &n, out);
+                        redundant_with(cx, &n, out);
+                        sam_constructor(cx, &n, out);
                         if n.first_child().is_some_and(|c| matches!(c.text().to_string().as_str(), "requireNotNull" | "checkNotNull")) {
                             require_not_null(cx, &n, out);
                         }
@@ -1293,4 +1295,74 @@ fn complex_let(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     let r = it.text_range() - base;
     text.replace_range(usize::from(r.start())..usize::from(r.end()), &recv.text().to_string());
     out.report(&COMPLEX_REDUNDANT_LET, callee.text_range(), "Redundant 'let' call could be removed", Some(Fix::replace("Remove 'let' call", n.text_range(), text)));
+}
+
+/// `with(x) { … }` whose block never uses `x`.
+fn redundant_with(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && c.text() == "with") else { return };
+    if !cx.on(&REDUNDANT_WITH) {
+        return;
+    }
+    let Some(list) = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) else { return };
+    let args: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT).collect();
+    let [arg] = args.as_slice() else { return };
+    let Some(value) = arg.children().last() else { return };
+    let Some(lambda) = call.children().find(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT).and_then(|a| a.children().find(|c| c.kind() == SyntaxKind::LAMBDA_EXPR)) else { return };
+    let Some(body) = lambda.children().find(|c| c.kind() == SyntaxKind::BLOCK) else { return };
+    if !stdlib(cx, &callee) || body.descendants().any(|d| d.kind() == SyntaxKind::RETURN_EXPR && d.children().any(|c| c.kind() == SyntaxKind::LABEL_QUALIFIER)) {
+        return;
+    }
+    // The value may have effects (a call): keep `with` then.
+    if !matches!(value.kind(), SyntaxKind::NAME_REF | SyntaxKind::THIS_EXPR | SyntaxKind::LITERAL | SyntaxKind::STRING_TEMPLATE) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let Some(t) = e.type_of(&value) else { return };
+    if uses_receiver(e, &body, &t) != Some(false) {
+        return;
+    }
+    out.report(&REDUNDANT_WITH, callee.text_range(), "Redundant 'with' call", Some(Fix::replace("Remove redundant 'with' call", call.text_range(), format!("run {}", lambda.text()))));
+}
+
+/// `execute(Runnable { … })` where the parameter is a `Runnable` anyway.
+fn sam_constructor(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    use crate::analysis::ide::infer::Def;
+    if !cx.on(&REDUNDANT_SAM_CONSTRUCTOR) {
+        return;
+    }
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let Some(list) = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) else { return };
+    let args: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT).collect();
+    let Some(e) = cx.engine() else { return };
+    let mut cands: Option<Vec<(crate::symbols::Symbol, crate::analysis::ide::infer::Subst)>> = None;
+    for (i, a) in args.iter().enumerate() {
+        if a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME) {
+            return;
+        }
+        let Some(inner) = a.children().last().filter(|c| c.kind() == SyntaxKind::CALL_EXPR) else { continue };
+        let Some(sam) = inner.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { continue };
+        let Some(lambda) = inner.children().find(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT).and_then(|l| l.children().find(|c| c.kind() == SyntaxKind::LAMBDA_EXPR)) else { continue };
+        if inner.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_some_and(|l| l.children().next().is_some()) || inner.children().any(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) {
+            continue;
+        }
+        let sam_defs = e.resolve_name_ref(&sam);
+        let [Def::Symbol { sym: iface, .. }] = sam_defs.as_slice() else { continue };
+        if iface.kind != crate::symbols::SymbolKind::Interface || !crate::analysis::lints::style::is_sam(e, &iface.fq_name) {
+            continue;
+        }
+        // `Config { … }` may call a companion's `invoke` instead.
+        if e.classifier(&iface.fq_name).is_some_and(|c| e.all_static_members(&c).1.iter().any(|(m, _)| m.name == "invoke")) {
+            continue;
+        }
+        if cands.is_none() {
+            cands = e.call_candidates(&callee);
+        }
+        let Some([(f, subst)]) = cands.as_deref() else { return };
+        let Some(p) = f.params.get(i).filter(|p| !p.vararg) else { continue };
+        let pt = crate::analysis::ide::infer::substitute(&e.resolve_declared(f, &p.ty), subst);
+        if crate::analysis::ide::infer::fq_of(&pt) != Some(iface.fq_name.as_str()) {
+            continue;
+        }
+        out.report(&REDUNDANT_SAM_CONSTRUCTOR, sam.text_range(), "Redundant SAM constructor", Some(Fix::replace("Remove redundant SAM constructor", inner.text_range(), lambda.text().to_string())));
+    }
 }

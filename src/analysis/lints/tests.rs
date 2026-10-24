@@ -3192,3 +3192,47 @@ fun f(name: String, n: Int, xs: List<Int>) {
     check("xs.map { twice(it) }", "ConvertLambdaToReference", "println(xs.map(::twice))");
     check("name.let { println(it) }", "ComplexRedundantLet", "println(println(name))");
 }
+
+#[test]
+fn receivers_sam_and_use_inspections() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = lint(
+        r#"package a
+
+fun String.shout() = uppercase()
+fun String.ignore() = 1
+fun String.self() = this.length
+fun Int.twice(other: Int) = other * 2
+
+fun run(executor: java.util.concurrent.Executor, s: String) {
+    executor.execute(Runnable { println() })
+    val r = object : Runnable {
+        override fun run() {
+            println(s)
+        }
+    }
+    with(s) { println(1) }
+    with(s) { println(length) }
+    val reader = java.io.StringReader(s)
+    try {
+        println(reader.read())
+    } finally {
+        reader.close()
+    }
+    println(r)
+}
+"#,
+    );
+    let receivers: Vec<_> = found.iter().filter(|f| f.starts_with("UnusedReceiverParameter")).collect();
+    assert_eq!(receivers.len(), 2, "ignore, twice: {found:#?}");
+    has(&found, "RedundantSamConstructor: Runnable");
+    has(&found, "ObjectLiteralToLambda: object");
+    assert_eq!(found.iter().filter(|f| f.starts_with("RedundantWith")).count(), 1, "{found:#?}");
+    has(&found, "ConvertTryFinallyToUseCall: try");
+    let out = fixed("package a\n\nfun f(e: java.util.concurrent.Executor) = e.execute(Runnable { println() })\n", "RedundantSamConstructor");
+    assert!(out.contains("e.execute({ println() })"), "{out}");
+    let out = fixed("package a\n\nval r = object : Runnable {\n    override fun run() = println()\n}\n", "ObjectLiteralToLambda");
+    assert!(out.contains("val r = Runnable { println() }"), "{out}");
+}

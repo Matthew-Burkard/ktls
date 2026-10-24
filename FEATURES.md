@@ -226,12 +226,12 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `RedundantGetter` / `RedundantSetter`
 - [~] [P1] `RedundantInnerClassModifier`, `RedundantEmptyInitializerBlock` — *partial: `RedundantInnerClassModifier`; `RedundantEmptyInitializerBlock`*
 - [x] [P1] `RedundantNullableReturnType`, `RedundantRequireNotNullCall` (final functions whose every result is certainly non-null; values of certain non-null type)
-- [~] [P1] `RedundantWith`, `RedundantAsSequence`, `RedundantSamConstructor` — *partial: `RedundantAsSequence` (iterables and arrays followed by a terminal operation)*
+- [~] [P1] `RedundantWith`, `RedundantAsSequence`, `RedundantSamConstructor` — *partial: `RedundantWith` (blocks not using the receiver), `RedundantSamConstructor` (SAM interface arguments of single-candidate calls); `RedundantAsSequence` (iterables and arrays followed by a terminal operation)*
 - [x] [P1] `RedundantElvisReturnNull`, `RedundantRunCatching`
 - [x] [P1] `RedundantConstructorKeyword`, `RedundantEnumConstructorInvocation`
 - [~] [P1] `RedundantLabelMigration`, `RedundantValueArgument` (arg equals default) — *partial: `RedundantValueArgument` (project functions, literal or name defaults; named or trailing positional arguments)*
 - [~] [P1] `RedundantExplicitTypeArguments` (`listOf<Int>(1)`) — *partial: as `RemoveExplicitTypeArguments`, for calls with one candidate whose type parameters are whole parameter types bound by arguments of exactly that certain type*
-- [~] [P1] `UnusedImport`, `UnusedSymbol` (unused private/internal declarations), `UnusedReceiverParameter`, `UnusedLambdaExpressionBody`, `UnusedUnaryOperator` — *partial: `UnusedImport`, `UnusedSymbol` for private and local declarations*
+- [~] [P1] `UnusedImport`, `UnusedSymbol` (unused private/internal declarations), `UnusedReceiverParameter`, `UnusedLambdaExpressionBody`, `UnusedUnaryOperator` — *partial: `UnusedReceiverParameter`; `UnusedImport`, `UnusedSymbol` for private and local declarations*
 - [~] [P2] `RedundantOverride` (only calls super), `RedundantInterpolationPrefix` — *partial: `RedundantOverride` (functions forwarding their parameters; not in data/value/enum classes or with other modifiers)*
 
 **Idiomatic Kotlin / style**
@@ -257,7 +257,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `ReplaceAssociateFunction`, `ReplaceMapIndexedWithListGenerator` — *partial: `ReplaceMapIndexedWithListGenerator`; `ReplaceAssociateFunction` (`associateWith`, `associateBy`)*
 - [x] [P1] `JoinDeclarationAndAssignment`, `MoveVariableDeclarationIntoWhen` (assignment / `when` right after)
 - [x] [P1] `MayBeConstant` (`val` → `const val`)
-- [~] [P1] `ObjectLiteralToLambda`, `ConvertLambdaToReference`, `ConvertReferenceToLambda` — *partial: `ConvertLambdaToReference` (code action; trailing lambdas calling one top-level function)*
+- [~] [P1] `ObjectLiteralToLambda`, `ConvertLambdaToReference`, `ConvertReferenceToLambda` — *partial: `ObjectLiteralToLambda` (SAM interfaces, one override without `this`/`return`); `ConvertLambdaToReference` (code action; trailing lambdas calling one top-level function)*
 - [~] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate` — *partial: `RemoveToStringInStringTemplate`; `RemoveExplicitTypeArguments`*
 - [~] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda` — *partial: `SuspiciousCallableReferenceInLambda`; `SelfAssignment` of local variables*
 - [x] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`, `requireNotNull`/`checkNotNull`; `val x = y!!` in functions returning Unit or nullable)
@@ -266,7 +266,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet` — *partial: `ComplexRedundantLet` (`x.let { f(it) }`); `SimpleRedundantLet` (`x.let { it.f() }`, `x?.let { it.f() }`)*
 - [~] [P1] `UnnecessaryVariable`, `UnnecessaryOptInAnnotation` — *partial: `UnnecessaryVariable` (`val x = e; return x`)*
 - [~] [P1] `KotlinConstantConditions` (always true/false) — *partial: literal conditions (not `while (true)`) and comparisons of integer literals*
-- [ ] [P1] `ConvertSecondaryConstructorToPrimary`, `ConvertTryFinallyToUseCall`
+- [~] [P1] `ConvertSecondaryConstructorToPrimary`, `ConvertTryFinallyToUseCall` — *partial: `ConvertTryFinallyToUseCall` (`val r = …` then `try { } finally { r.close() }`)*
 - [~] [P1] `ControlFlowWithEmptyBody`, `EmptyRange` — *partial: `EmptyRange` (integer literals, with a `downTo` fix); `ControlFlowWithEmptyBody`*
 - [x] [P2] `DestructuringWrongName`, `UnusedDataClassCopyResult`
 - [~] [P2] `ReplaceCollectionCountWithSize`, `PlatformExtensionReceiverOfInline` — *partial: `ReplaceCollectionCountWithSize`*
