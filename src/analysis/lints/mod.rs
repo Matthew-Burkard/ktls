@@ -244,6 +244,7 @@ rules! {
     UNCHECKED_CAST = "UNCHECKED_CAST", Compiler, Warning, false, [], "Cast to a generic type or type parameter the runtime cannot check";
     EXTENSION_SHADOWED_BY_MEMBER = "EXTENSION_SHADOWED_BY_MEMBER", Compiler, Warning, false, [], "Extension with the signature of a member of its receiver";
     REDUNDANT_PROJECTION = "REDUNDANT_PROJECTION", Compiler, Warning, true, [], "'out' projection of an 'out' type parameter (or 'in' of an 'in' one)";
+    PLATFORM_CLASS_MAPPED_TO_KOTLIN = "PLATFORM_CLASS_MAPPED_TO_KOTLIN", Compiler, Warning, false, [], "Java class used where its Kotlin counterpart should be ('java.lang.Integer', 'java.util.List')";
     FINAL_UPPER_BOUND = "FINAL_UPPER_BOUND", Compiler, Warning, false, [], "Type parameter bounded by a final class";
     UNNECESSARY_SAFE_CALL = "UNNECESSARY_SAFE_CALL", Compiler, Warning, true, [], "'?.' on a non-null receiver";
     UNNECESSARY_NOT_NULL_ASSERTION = "UNNECESSARY_NOT_NULL_ASSERTION", Compiler, Warning, true, [], "'!!' on a non-null value";

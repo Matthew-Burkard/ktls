@@ -2263,3 +2263,18 @@ fun f(a: List<out String>, b: List<in String>, c: Box<in Int>, d: MutableList<ou
     assert_eq!(count("CONFLICTING_PROJECTION"), 2, "{found:#?}");
     assert!(fixed("package a\n\nfun f(a: List<out String>) = a\n", "REDUNDANT_PROJECTION").contains("List<String>"));
 }
+
+#[test]
+fn platform_classes_mapped_to_kotlin() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+fun f(a: java.lang.Integer, b: java.util.List<String>, c: String, d: List<Int>, e: Integer?, g: java.util.ArrayList<Int>, h: Any): java.lang.Object? = null
+"#,
+    );
+    let mapped: Vec<_> = found.iter().filter(|f| f.starts_with("PLATFORM_CLASS_MAPPED_TO_KOTLIN")).collect();
+    assert_eq!(mapped, vec!["PLATFORM_CLASS_MAPPED_TO_KOTLIN: java.lang.Integer", "PLATFORM_CLASS_MAPPED_TO_KOTLIN: java.util.List", "PLATFORM_CLASS_MAPPED_TO_KOTLIN: Integer", "PLATFORM_CLASS_MAPPED_TO_KOTLIN: java.lang.Object"]);
+}

@@ -196,7 +196,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `USELESS_CAST`, `USELESS_IS_CHECK`, `CAST_NEVER_SUCCEEDS`, `UNCHECKED_CAST` — *partial: all four, on literals and certain-typed values (smart casts applied); `CAST_NEVER_SUCCEEDS` between unrelated classes (not interfaces); `UNCHECKED_CAST` from non-generic types to generic ones and non-reified type parameters*
 - [x] [P1] `UNREACHABLE_CODE` (by control flow: after jumps, `if`/`when` whose branches all leave, `Nothing` calls, loops without `break`), `REDUNDANT_ELSE_IN_WHEN`, `DUPLICATE_LABEL_IN_WHEN` (as `DUPLICATE_BRANCH_CONDITION_IN_WHEN`: literals, enum entries, objects); also `ELSE_MISPLACED_IN_WHEN`
 - [x] [P1] `NAME_SHADOWING`, `VARIABLE_WITH_REDUNDANT_INITIALIZER`
-- [~] [P1] `PLATFORM_CLASS_MAPPED_TO_KOTLIN`, `EXTENSION_SHADOWED_BY_MEMBER` — *partial: `EXTENSION_SHADOWED_BY_MEMBER` (non-generic extensions)*
+- [~] [P1] `PLATFORM_CLASS_MAPPED_TO_KOTLIN`, `EXTENSION_SHADOWED_BY_MEMBER` — *partial: `PLATFORM_CLASS_MAPPED_TO_KOTLIN` in types (boxed primitives, `Object`, `String`, collection interfaces…); `EXTENSION_SHADOWED_BY_MEMBER` (non-generic extensions)*
 - [~] [P1] `NOTHING_TO_INLINE`, `REDUNDANT_PROJECTION`, `FINAL_UPPER_BOUND` — *partial: `NOTHING_TO_INLINE` (with a fix), `FINAL_UPPER_BOUND` (non-null, non-generic bounds), `REDUNDANT_PROJECTION` (with a fix; also `CONFLICTING_PROJECTION` and `PROJECTION_IN_IMMEDIATE_ARGUMENT_TO_SUPERTYPE` errors), plus `REDUNDANT_NULLABLE` (`T??`)*
 - [~] [P2] `-Werror` / `-Xsuppress-warning` / `@Suppress` awareness — *partial: `@Suppress`, `@file:Suppress` and `//noinspection` for lint rules*
 

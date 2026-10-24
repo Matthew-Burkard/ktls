@@ -11,11 +11,58 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             continue;
         }
         match n.kind() {
-            SyntaxKind::USER_TYPE => type_arguments(e, &n, out),
+            SyntaxKind::USER_TYPE => {
+                type_arguments(e, &n, out);
+                mapped_platform_class(e, &n, out);
+            }
             SyntaxKind::CALL_EXPR => call_type_arguments(e, &n, out),
             _ => {}
         }
     }
+}
+
+/// Java classes that Kotlin maps to its own types, with what to use instead.
+const MAPPED: &[(&str, &str)] = &[
+    ("java.lang.Object", "kotlin.Any"),
+    ("java.lang.String", "kotlin.String"),
+    ("java.lang.CharSequence", "kotlin.CharSequence"),
+    ("java.lang.Throwable", "kotlin.Throwable"),
+    ("java.lang.Cloneable", "kotlin.Cloneable"),
+    ("java.lang.Number", "kotlin.Number"),
+    ("java.lang.Comparable", "kotlin.Comparable"),
+    ("java.lang.Enum", "kotlin.Enum"),
+    ("java.lang.annotation.Annotation", "kotlin.Annotation"),
+    ("java.lang.Integer", "kotlin.Int"),
+    ("java.lang.Long", "kotlin.Long"),
+    ("java.lang.Short", "kotlin.Short"),
+    ("java.lang.Byte", "kotlin.Byte"),
+    ("java.lang.Character", "kotlin.Char"),
+    ("java.lang.Boolean", "kotlin.Boolean"),
+    ("java.lang.Float", "kotlin.Float"),
+    ("java.lang.Double", "kotlin.Double"),
+    ("java.lang.Iterable", "kotlin.collections.Iterable or kotlin.collections.MutableIterable"),
+    ("java.util.Iterator", "kotlin.collections.Iterator or kotlin.collections.MutableIterator"),
+    ("java.util.ListIterator", "kotlin.collections.ListIterator or kotlin.collections.MutableListIterator"),
+    ("java.util.Collection", "kotlin.collections.Collection or kotlin.collections.MutableCollection"),
+    ("java.util.List", "kotlin.collections.List or kotlin.collections.MutableList"),
+    ("java.util.Set", "kotlin.collections.Set or kotlin.collections.MutableSet"),
+    ("java.util.Map", "kotlin.collections.Map or kotlin.collections.MutableMap"),
+    ("java.util.Map.Entry", "kotlin.collections.Map.Entry or kotlin.collections.MutableMap.MutableEntry"),
+];
+
+/// `java.lang.Integer`, `java.util.List<T>` as types.
+fn mapped_platform_class(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    // The outermost user type of a qualified name only.
+    if n.parent().is_some_and(|p| p.kind() == SyntaxKind::USER_TYPE) {
+        return;
+    }
+    let Some(tr) = n.ancestors().find_map(ast::TypeRef::cast) else { return };
+    let t = e.resolve_syntax_type(&tr);
+    let Some(fq) = crate::analysis::ide::infer::fq_of(&t) else { return };
+    let Some((_, kotlin)) = MAPPED.iter().find(|(j, _)| *j == fq) else { return };
+    let last = n.children().filter(|c| c.kind() == SyntaxKind::USER_TYPE_SEGMENT).last();
+    let range = last.and_then(|l| ast::token(&l, SyntaxKind::IDENT)).map_or(n.text_range(), |t| TextRange::new(n.text_range().start(), t.text_range().end()));
+    out.report(&PLATFORM_CLASS_MAPPED_TO_KOTLIN, range, format!("This class shouldn't be used in Kotlin. Use {kotlin} instead."), None);
 }
 
 /// Explicit type arguments of a call (`foo<String>()`) against the function's bounds.
