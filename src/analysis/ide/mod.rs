@@ -443,6 +443,9 @@ pub fn references(snap: &Snapshot, path: &Path, offset: TextSize, include_declar
 /// Occurrences of the declaration at `offset` in its file, each marked as a write
 /// (declaration, assignment target, `++`/`--` operand) or a read.
 pub fn document_highlight(snap: &Snapshot, path: &Path, offset: TextSize) -> Option<Vec<(TextRange, bool)>> {
+    if let Some(found) = snap.file(path).and_then(|f| keyword_highlight(&f.parse().syntax(), offset)) {
+        return Some(found);
+    }
     let e = Engine::new(snap, path)?;
     let tok = token_at(&e.root, offset).filter(|t| t.kind() == SyntaxKind::IDENT)?;
     let (_, defs) = defs_of_token(&e, &tok)?;
@@ -470,6 +473,62 @@ pub fn document_highlight(snap: &Snapshot, path: &Path, offset: TextSize) -> Opt
         }
     }
     Some(out)
+}
+
+/// On `return`/`throw`/`fun`: the function's keyword and its exit points (its own
+/// `return`s, including non-local ones from lambdas, and `throw`s). On a loop keyword or
+/// `break`/`continue`: the loop's keyword and the jumps out of it.
+fn keyword_highlight(root: &SyntaxNode, offset: TextSize) -> Option<Vec<(TextRange, bool)>> {
+    use SyntaxKind as K;
+    let kw = |t: &SyntaxToken| matches!(t.kind(), K::RETURN_KW | K::THROW_KW | K::FUN_KW | K::BREAK_KW | K::CONTINUE_KW | K::FOR_KW | K::WHILE_KW | K::DO_KW);
+    let tok = root.token_at_offset(offset).find(kw)?;
+    let node = tok.parent()?;
+    let label = |n: &SyntaxNode| n.children().find(|c| c.kind() == K::LABEL_QUALIFIER).and_then(|q| ast::token(&q, K::IDENT)).map(|t| ast::ident_text(&t));
+    let keyword = |n: &SyntaxNode, k: K| ast::token(n, k).map(|t| (t.text_range(), false));
+    match tok.kind() {
+        K::RETURN_KW | K::THROW_KW | K::FUN_KW => {
+            let owner = |n: &SyntaxNode| n.ancestors().find(|a| matches!(a.kind(), K::FUN | K::ANONYMOUS_FUNCTION | K::PROPERTY_ACCESSOR | K::CLASS_BODY));
+            let f = if tok.kind() == K::FUN_KW { Some(node.clone()).filter(|n| matches!(n.kind(), K::FUN | K::ANONYMOUS_FUNCTION))? } else {
+                // `return@label` belongs to a lambda: not handled here.
+                if label(&node).is_some() {
+                    return None;
+                }
+                owner(&node).filter(|o| o.kind() != K::CLASS_BODY)?
+            };
+            let mut out: Vec<(TextRange, bool)> = keyword(&f, K::FUN_KW).into_iter().collect();
+            for x in f.descendants().filter(|d| matches!(d.kind(), K::RETURN_EXPR | K::THROW_EXPR)) {
+                if label(&x).is_none() && owner(&x).as_ref() == Some(&f) {
+                    out.extend(keyword(&x, if x.kind() == K::RETURN_EXPR { K::RETURN_KW } else { K::THROW_KW }));
+                }
+            }
+            Some(out)
+        }
+        _ => {
+            let is_loop = |n: &SyntaxNode| matches!(n.kind(), K::FOR_EXPR | K::WHILE_EXPR | K::DO_WHILE_EXPR);
+            let loop_label = |n: &SyntaxNode| {
+                let l = n.parent().filter(|p| p.kind() == K::LABELED_EXPR)?.children().find(|c| c.kind() == K::LABEL)?;
+                ast::token(&l, K::IDENT).map(|t| ast::ident_text(&t))
+            };
+            // The loop a jump leaves: the labeled one, or the innermost.
+            let target = |jump: &SyntaxNode| match label(jump) {
+                Some(l) => jump.ancestors().find(|a| is_loop(a) && loop_label(a).as_deref() == Some(l.as_str())),
+                None => jump.ancestors().skip(1).take_while(|a| !matches!(a.kind(), K::FUN | K::CLASS_BODY)).find(is_loop),
+            };
+            let lp = if matches!(tok.kind(), K::BREAK_KW | K::CONTINUE_KW) { target(&node)? } else { Some(node.clone()).filter(is_loop)? };
+            let mut out: Vec<(TextRange, bool)> = Vec::new();
+            out.extend(keyword(&lp, if lp.kind() == K::FOR_EXPR { K::FOR_KW } else { K::WHILE_KW }));
+            if lp.kind() == K::DO_WHILE_EXPR {
+                out.extend(keyword(&lp, K::DO_KW));
+            }
+            for j in lp.descendants().filter(|d| matches!(d.kind(), K::BREAK_EXPR | K::CONTINUE_EXPR)) {
+                if target(&j).as_ref() == Some(&lp) {
+                    out.extend(j.first_token().map(|t| (t.text_range(), false)));
+                }
+            }
+            out.sort_by_key(|(r, _)| r.start());
+            Some(out)
+        }
+    }
 }
 
 /// The token names a declaration or the target of an assignment or increment.

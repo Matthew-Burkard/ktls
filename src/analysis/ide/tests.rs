@@ -802,6 +802,23 @@ fn document_highlights() {
     assert_eq!(shown, vec!["1w", "3w", "4w", "4r", "5w", "5r"]);
 }
 
+#[test]
+fn keyword_highlights() {
+    let Some(mut fx) = fixture() else { return };
+    let shown = |fx: &mut Fx, text: &str| -> Vec<String> {
+        let (path, offset) = fx.open(text);
+        let snap = fx.host.snapshot();
+        let file = snap.file(&path).unwrap();
+        document_highlight(&snap, &path, offset).unwrap().iter().map(|(r, _)| file.text[usize::from(r.start())..usize::from(r.end())].to_string()).collect()
+    };
+    let f = "fun f(xs: List<Int>): Int {\n    if (xs.isEmpty()) re$0turn 0\n    xs.forEach { if (it < 0) return it }\n    val g = fun(): Int { return 1 }\n    if (xs.size > 9) throw Error()\n    return xs.first()\n}\n";
+    assert_eq!(shown(&mut fx, f), vec!["fun", "return", "return", "throw", "return"]);
+    assert_eq!(shown(&mut fx, &f.replace("re$0turn 0", "return 0").replacen("fun f", "f$0un f", 1)), vec!["fun", "return", "return", "throw", "return"]);
+    let l = "fun f() {\n    outer@ for (i in 0..9) {\n        while (true) {\n            if (i == 1) bre$0ak@outer\n            if (i == 2) break\n            continue@outer\n        }\n        if (i == 3) break\n    }\n}\n";
+    assert_eq!(shown(&mut fx, l), vec!["for", "break", "continue", "break"]);
+    assert_eq!(shown(&mut fx, &l.replace("bre$0ak", "break").replace("while (true)", "wh$0ile (true)")), vec!["while", "break"]);
+}
+
 impl Fx {
     fn names(&mut self, targets: Vec<NavTarget>) -> Vec<String> {
         let snap = self.host.snapshot();
