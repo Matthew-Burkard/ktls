@@ -16,7 +16,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::RETURN_EXPR => non_local_return(cx, e, &n, out),
             SyntaxKind::FUN if has_modifier(&n, "inline") => {
                 inline_parameters(cx, e, &n, out);
-                public_api(e, &n, out);
+                public_api(cx, e, &n, out);
             }
             SyntaxKind::CALL_EXPR => crossinline_suspension(cx, e, &n, out),
             _ => {}
@@ -115,7 +115,10 @@ fn non_local_return(cx: &Cx, e: &Engine, ret: &SyntaxNode, out: &mut Sink) {
                     None if a.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::PROPERTY | SyntaxKind::BLOCK)) => {}
                     None => return,
                 }
-                out.report(&RETURN_NOT_ALLOWED, kw.text_range(), "'return' is not allowed here.", None);
+                // `return@label`: the lambda's own label, or the function it is passed to.
+                let label = a.parent().filter(|p| p.kind() == SyntaxKind::LABELED_EXPR).and_then(|l| l.children().find(|c| c.kind() == SyntaxKind::LABEL)).and_then(|l| ast::token(&l, SyntaxKind::IDENT)).map(|t| t.text().to_string()).or_else(|| lambda_call(&a).map(|(_, callee)| callee.text().to_string()));
+                let fix = label.map(|l| Fix::replace(format!("Change to 'return@{l}'"), kw.text_range(), format!("return@{l}")));
+                out.report(&RETURN_NOT_ALLOWED, kw.text_range(), "'return' is not allowed here.", fix);
                 return;
             }
             SyntaxKind::FUN | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::CLASS_BODY | SyntaxKind::KOTLIN_FILE => return,
@@ -217,7 +220,7 @@ fn is_public_api(f: &SyntaxNode) -> bool {
 
 /// A public inline function's body is copied into callers: it may only use public API
 /// (internal declarations need `@PublishedApi`).
-fn public_api(e: &Engine, f: &SyntaxNode, out: &mut Sink) {
+fn public_api(cx: &Cx, e: &Engine, f: &SyntaxNode, out: &mut Sink) {
     if !is_public_api(f) {
         return;
     }
@@ -238,7 +241,18 @@ fn public_api(e: &Engine, f: &SyntaxNode, out: &mut Sink) {
             Visibility::Internal if !published => "internal",
             _ => continue,
         };
-        out.report(&NON_PUBLIC_CALL_FROM_PUBLIC_INLINE, nr.text_range(), format!("Public-API inline function cannot access non-public-API {what} declaration '{}'.", nr.text()), None);
+        // Internal declarations of this file: "Add '@PublishedApi'".
+        let fix = match (&sym.origin, sym.visibility) {
+            (Origin::Source { file, range, .. }, Visibility::Internal) if *file == cx.path => {
+                node_at(&cx.root, *range, &[SyntaxKind::FUN, SyntaxKind::PROPERTY, SyntaxKind::CLASS, SyntaxKind::OBJECT_DECLARATION]).map(|d| {
+                    let indent = node_indent(&d);
+                    let at = d.children_with_tokens().find(|t| !t.kind().is_trivia()).map_or(d.text_range().start(), |t| t.text_range().start());
+                    Fix::replace("Add '@PublishedApi' annotation", TextRange::empty(at), format!("@PublishedApi\n{indent}"))
+                })
+            }
+            _ => None,
+        };
+        out.report(&NON_PUBLIC_CALL_FROM_PUBLIC_INLINE, nr.text_range(), format!("Public-API inline function cannot access non-public-API {what} declaration '{}'.", nr.text()), fix);
     }
 }
 

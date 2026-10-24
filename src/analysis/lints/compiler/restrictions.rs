@@ -52,7 +52,8 @@ fn tailrec(f: &SyntaxNode, out: &mut Sink) {
     let interface_member = f.parent().and_then(|b| b.parent()).is_some_and(|c| c.kind() == SyntaxKind::CLASS && ast::token(&c, SyntaxKind::INTERFACE_KW).is_some());
     let overridable = has_modifier(f, "open") || has_modifier(f, "abstract") || interface_member || has_modifier(f, "override") && !has_modifier(f, "final") && f.ancestors().find(|a| matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::OBJECT_LITERAL)).is_some_and(|c| c.kind() == SyntaxKind::CLASS && (has_modifier(&c, "open") || has_modifier(&c, "abstract") || has_modifier(&c, "sealed")));
     if overridable {
-        out.report(&TAILREC_ON_VIRTUAL_MEMBER_ERROR, kw.text_range(), "Tailrec is not allowed on open members.", None);
+        let end = kw.next_token().filter(|t| t.kind().is_trivia()).map_or(kw.text_range().end(), |t| t.text_range().end());
+        out.report(&TAILREC_ON_VIRTUAL_MEMBER_ERROR, kw.text_range(), "Tailrec is not allowed on open members.", Some(Fix::delete("Remove 'tailrec' modifier", TextRange::new(kw.text_range().start(), end))));
         return;
     }
     let Some(decl) = ast::FunDecl::cast(f.clone()) else { return };

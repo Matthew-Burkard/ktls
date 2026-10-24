@@ -878,6 +878,50 @@ pub(crate) fn node_at(root: &SyntaxNode, range: TextRange, kinds: &[SyntaxKind])
     root.covering_element(range).ancestors().find(|a| a.text_range() == range && kinds.contains(&a.kind()))
 }
 
+/// The indentation of the line `n` starts on (from the whitespace before it).
+pub(crate) fn node_indent(n: &SyntaxNode) -> String {
+    let mut t = n.first_token().and_then(|t| t.prev_token());
+    while let Some(tok) = t {
+        let text = tok.text();
+        if let Some(i) = text.rfind('\n') {
+            return text[i + 1..].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+        }
+        if !tok.kind().is_trivia() {
+            return String::new();
+        }
+        t = tok.prev_token();
+    }
+    String::new()
+}
+
+/// A fix that edits the source declaration of `sym` (in this file or another).
+pub(crate) fn declaration_fix(cx: &Cx, sym: &crate::symbols::Symbol, title: impl Into<String>, edit: impl FnOnce(&SyntaxNode) -> Option<Edit>) -> Option<Fix> {
+    let crate::symbols::Origin::Source { file, range, .. } = &sym.origin else { return None };
+    let root = if file.as_path() == cx.path { cx.root.clone() } else { cx.snap.file(file)?.parse().syntax() };
+    let kinds = [SyntaxKind::FUN, SyntaxKind::PROPERTY, SyntaxKind::CLASS, SyntaxKind::OBJECT_DECLARATION, SyntaxKind::VALUE_PARAMETER, SyntaxKind::TYPEALIAS, SyntaxKind::SECONDARY_CONSTRUCTOR];
+    let decl = node_at(&root, *range, &kinds)?;
+    let edit = edit(&decl)?;
+    let mut fix = Fix::new(title, Vec::new());
+    if file.as_path() == cx.path {
+        fix.edits.push(edit);
+    } else {
+        fix.elsewhere.push((file.to_path_buf(), edit));
+    }
+    Some(fix)
+}
+
+/// The edit removing a modifier keyword and the space after it.
+pub(crate) fn modifier_removal(t: &SyntaxToken) -> Edit {
+    let end = t.next_token().filter(|n| n.kind().is_trivia()).map_or(t.text_range().end(), |n| n.text_range().end());
+    Edit { range: TextRange::new(t.text_range().start(), end), text: String::new() }
+}
+
+/// "Add function body": ` { TODO() }` after the signature of `f`.
+pub(crate) fn add_body_fix(f: &SyntaxNode) -> Fix {
+    let indent = node_indent(f);
+    Fix::replace("Add function body", TextRange::empty(f.text_range().end()), format!(" {{\n{indent}    TODO(\"Not yet implemented\")\n{indent}}}"))
+}
+
 pub(crate) fn has_comments(n: &SyntaxNode) -> bool {
     tokens(n).any(|t| is_comment(t.kind()))
 }

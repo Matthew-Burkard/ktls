@@ -3293,3 +3293,28 @@ fun f(dogs: List<Dog>, animals: MutableList<Animal>, names: List<String?>, cmp: 
     let hits: Vec<_> = found.iter().filter(|f| f.starts_with("INITIALIZER_TYPE_MISMATCH")).cloned().collect();
     assert_eq!(hits, vec!["INITIALIZER_TYPE_MISMATCH: dogs", "INITIALIZER_TYPE_MISMATCH: animals", "INITIALIZER_TYPE_MISMATCH: names"], "{found:#?}");
 }
+
+#[test]
+fn compiler_quick_fixes() {
+    let check = |text: &str, rule: &str, expected: &str| {
+        let out = fixed(text, rule);
+        assert!(out.contains(expected), "{rule}: {out}");
+    };
+    check("package a\n\nfun f() {\n    val x: Int\n    x = 1\n    x = 2\n    println(x)\n}\n", "VAL_REASSIGNMENT", "var x: Int");
+    check("package a\n\nfun f(): Int {\n    return 1\n    println()\n}\n", "UNREACHABLE_CODE", "return 1\n}");
+    check("package a\n\nfun f() {\n    var x: Int = 1\n    x = 2\n    println(x)\n}\n", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "var x: Int\n");
+    check("package a\n\nfun g()\n", "NON_MEMBER_FUNCTION_NO_BODY", "fun g() {\n    TODO(\"Not yet implemented\")\n}");
+    check("package a\n\nabstract class A { abstract fun f() = 1 }\n", "ABSTRACT_FUNCTION_WITH_BODY", "{ fun f() = 1 }");
+    check("package a\n\nopen class A { open tailrec fun f(n: Int): Int = if (n == 0) 0 else f(n - 1) }\n", "TAILREC_ON_VIRTUAL_MEMBER_ERROR", "open fun f(");
+    if !Fixture::new().typed() {
+        return;
+    }
+    check("package a\n\nfun later(f: () -> Unit) = f()\nfun h() {\n    later { return }\n}\n", "RETURN_NOT_ALLOWED", "later { return@later }");
+    check("package a\n\nfun g(n: Int?) = -n\n", "UNSAFE_OPERATOR_CALL", "-n!!");
+    check("package a\n\nclass Base\nclass Sub : Base()\n", "FINAL_SUPERTYPE", "open class Base");
+    check("package a\n\nclass V { fun plus(o: V) = this }\nfun f(a: V, b: V) = a + b\n", "OPERATOR_MODIFIER_REQUIRED", "operator fun plus");
+    check("package a\n\nclass C { private fun secret() = 1 }\nfun f(c: C) = c.secret()\n", "INVISIBLE_REFERENCE", "{ fun secret() = 1 }");
+    check("package a\n\nval b = 2\nconst val C = b\n", "CONST_VAL_WITH_NON_CONST_INITIALIZER", "\nval C = b");
+    check("package a\n\nenum class E { A }\nfun f(x: Any) = x is E.A\n", "IS_ENUM_ENTRY", "x == E.A");
+    check("package a\n\ninternal fun helper() = 1\ninline fun api() = helper()\n", "NON_PUBLIC_CALL_FROM_PUBLIC_INLINE", "@PublishedApi\ninternal fun helper()");
+}

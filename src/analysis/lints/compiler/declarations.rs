@@ -114,14 +114,22 @@ fn function(f: &SyntaxNode, plugins: bool, out: &mut Sink) {
     let owner = owner(f);
     let abstract_ = has_modifier(f, "abstract");
     if abstract_ && has_body(f) {
-        out.report(&ABSTRACT_FUNCTION_WITH_BODY, name.text_range(), format!("Function '{}' with body cannot be abstract.", name.text()), None);
+        let fix = modifiers(f).and_then(|m| m.modifiers().find(|t| t.text() == "abstract")).map(|t| Fix::delete("Remove 'abstract' modifier", remove_modifier(&t)));
+        out.report(&ABSTRACT_FUNCTION_WITH_BODY, name.text_range(), format!("Function '{}' with body cannot be abstract.", name.text()), fix);
     }
     if !has_body(f) && !abstract_ && !["expect", "external", "actual"].iter().any(|m| has_modifier(f, m)) && !in_bodyless_container(f) {
         match &owner {
             Some(o) if is_interface(o) => {}
-            Some(_) => out.report(&NON_ABSTRACT_FUNCTION_WITH_NO_BODY, name.text_range(), format!("Function '{}' without a body must be abstract.", name.text()), None),
+            Some(o) => {
+                let mut fixes = vec![add_body_fix(f)];
+                if has_modifier(o, "abstract") || has_modifier(o, "sealed") {
+                    let at = override_position(f);
+                    fixes.push(Fix::replace("Make 'abstract'", TextRange::empty(at), "abstract "));
+                }
+                out.report_fixes(&NON_ABSTRACT_FUNCTION_WITH_NO_BODY, name.text_range(), format!("Function '{}' without a body must be abstract.", name.text()), fixes);
+            }
             None if f.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::KOTLIN_FILE | SyntaxKind::BLOCK)) => {
-                out.report(&NON_MEMBER_FUNCTION_NO_BODY, name.text_range(), format!("Function '{}' must have a body.", name.text()), None);
+                out.report(&NON_MEMBER_FUNCTION_NO_BODY, name.text_range(), format!("Function '{}' must have a body.", name.text()), Some(add_body_fix(f)));
             }
             None => {}
         }
@@ -357,7 +365,14 @@ fn supertypes(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
                 let open = sym.modifiers.has(Modifiers::OPEN) || sym.modifiers.has(Modifiers::ABSTRACT) || sym.modifiers.has(Modifiers::SEALED);
                 let source = matches!(sym.origin, crate::symbols::Origin::Source { .. });
                 if !open && !(source && plugins) && entry.kind() != SyntaxKind::DELEGATED_SUPER_TYPE_ENTRY {
-                    out.report(&FINAL_SUPERTYPE, range, format!("This type is final, so it cannot be extended: '{}'.", sym.name), None);
+                    let fix = declaration_fix(cx, sym, format!("Make '{}' open", sym.name), |d| {
+                        if d.kind() != SyntaxKind::CLASS || ["data", "value", "inline", "enum", "annotation"].iter().any(|m| has_modifier(d, m)) {
+                            return None;
+                        }
+                        let kw = d.children_with_tokens().filter_map(|t| t.into_token()).find(|t| t.kind() == SyntaxKind::CLASS_KW)?;
+                        Some(Edit { range: TextRange::empty(kw.text_range().start()), text: "open ".into() })
+                    });
+                    out.report(&FINAL_SUPERTYPE, range, format!("This type is final, so it cannot be extended: '{}'.", sym.name), fix);
                 }
                 // `: Base` without `()` needs a constructor call when there is a primary
                 // constructor (or none at all and no secondary ones).

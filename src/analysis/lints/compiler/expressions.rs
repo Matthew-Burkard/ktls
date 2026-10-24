@@ -582,7 +582,8 @@ fn nullable_operations(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
             if accepts_null(&t, name, n) {
                 return;
             }
-            out.report(&UNSAFE_OPERATOR_CALL, op.text_range(), format!("Operator '{}' is not allowed on a nullable receiver of type '{shown}'.", op.text()), None);
+            let fix = is_primary(&recv).then(|| Fix::replace("Add non-null asserted (!!) call", TextRange::empty(recv.text_range().end()), "!!"));
+            out.report(&UNSAFE_OPERATOR_CALL, op.text_range(), format!("Operator '{}' is not allowed on a nullable receiver of type '{shown}'.", op.text()), fix);
         }
         SyntaxKind::PREFIX_EXPR => {
             let Some(op) = binary_op(n) else { return };
@@ -595,7 +596,8 @@ fn nullable_operations(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
             let Some(operand) = n.children().find(|c| c.kind() != SyntaxKind::OPERATION_REFERENCE) else { return };
             let Some((shown, t)) = nullable_operand(e, &operand) else { return };
             if !accepts_null(&t, name, n) {
-                out.report(&UNSAFE_OPERATOR_CALL, op.text_range(), format!("Operator '{}' is not allowed on a nullable receiver of type '{shown}'.", op.text()), None);
+                let fix = is_primary(&operand).then(|| Fix::replace("Add non-null asserted (!!) call", TextRange::empty(operand.text_range().end()), "!!"));
+                out.report(&UNSAFE_OPERATOR_CALL, op.text_range(), format!("Operator '{}' is not allowed on a nullable receiver of type '{shown}'.", op.text()), fix);
             }
         }
         SyntaxKind::INDEX_EXPR => {

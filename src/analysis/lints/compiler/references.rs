@@ -171,7 +171,11 @@ fn const_initializer(e: &Engine, p: &SyntaxNode, out: &mut Sink) {
         _ => false,
     };
     if non_const {
-        out.report(&CONST_VAL_WITH_NON_CONST_INITIALIZER, init.text_range(), "Const 'val' initializer should be a constant value.", None);
+        let fix = modifiers(p).and_then(|m| m.modifiers().find(|t| t.text() == "const")).map(|kw| {
+            let end = kw.next_token().filter(|t| t.kind().is_trivia()).map_or(kw.text_range().end(), |t| t.text_range().end());
+            Fix::delete("Remove 'const' modifier", TextRange::new(kw.text_range().start(), end))
+        });
+        out.report(&CONST_VAL_WITH_NON_CONST_INITIALIZER, init.text_range(), "Const 'val' initializer should be a constant value.", fix);
     }
 }
 
@@ -212,7 +216,18 @@ fn enum_entry_type(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     }
     let is_check = n.ancestors().skip(1).take_while(|a| !matches!(a.kind(), SyntaxKind::BLOCK | SyntaxKind::FUN | SyntaxKind::CLASS_BODY)).any(|a| a.kind() == SyntaxKind::IS_EXPR || a.kind() == SyntaxKind::WHEN_CONDITION && ast::token(&a, SyntaxKind::IS_KW).is_some());
     if is_check {
-        out.report(&IS_ENUM_ENTRY, n.text_range(), "'is' over enum entry is prohibited, use comparison instead.", None);
+        // `x is E.A` → `x == E.A`; in a `when` branch `is E.A ->` → `E.A ->`.
+        let is_node = n.ancestors().find(|a| a.kind() == SyntaxKind::IS_EXPR || a.kind() == SyntaxKind::WHEN_CONDITION);
+        let kw = is_node.as_ref().and_then(|a| a.descendants_with_tokens().filter_map(|t| t.into_token()).find(|t| t.kind() == SyntaxKind::IS_KW));
+        let fix = kw.zip(is_node).map(|(kw, a)| {
+            if a.kind() == SyntaxKind::IS_EXPR {
+                Fix::replace("Replace 'is' with '=='", kw.text_range(), "==")
+            } else {
+                let end = kw.next_token().filter(|t| t.kind().is_trivia()).map_or(kw.text_range().end(), |t| t.text_range().end());
+                Fix::delete("Remove 'is'", TextRange::new(kw.text_range().start(), end))
+            }
+        });
+        out.report(&IS_ENUM_ENTRY, n.text_range(), "'is' over enum entry is prohibited, use comparison instead.", fix);
     } else {
         out.report(&ENUM_ENTRY_AS_TYPE, n.text_range(), "Use of enum entry names as types is prohibited, use enum type instead.", None);
     }

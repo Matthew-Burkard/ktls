@@ -39,7 +39,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         for b in &body {
             st = a.walk(b, st);
         }
-        a.finish(out);
+        a.finish(cx, out);
         // The end of a block body that must produce a value is reachable.
         if let (Some(ty), [block]) = (result, body.as_slice())
             && block.kind() == SyntaxKind::BLOCK
@@ -182,7 +182,8 @@ struct Analysis<'e, 'a> {
     tries: Vec<Vec<usize>>,
     /// Reads of unassigned locals: (range, local).
     uninitialized: HashMap<TextRange, usize>,
-    reassigned: HashSet<TextRange>,
+    /// Second assignments of `val`s, with the variable.
+    reassigned: HashMap<TextRange, usize>,
     unreachable: Vec<TextRange>,
     depth: u32,
 }
@@ -221,7 +222,7 @@ impl<'e, 'a> Analysis<'e, 'a> {
                 refs.insert(r.text_range(), i);
             }
         }
-        Analysis { e, vars, refs, defs: Vec::new(), stores: HashMap::new(), loops: Vec::new(), tries: Vec::new(), uninitialized: HashMap::new(), reassigned: HashSet::new(), unreachable: Vec::new(), depth: 0 }
+        Analysis { e, vars, refs, defs: Vec::new(), stores: HashMap::new(), loops: Vec::new(), tries: Vec::new(), uninitialized: HashMap::new(), reassigned: HashMap::new(), unreachable: Vec::new(), depth: 0 }
     }
 
     fn initial(&self) -> State {
@@ -264,7 +265,7 @@ impl<'e, 'a> Analysis<'e, 'a> {
         self.vars[var].assigned = true;
         // A `val` initialized later may be assigned once.
         if self.vars[var].val && !self.vars[var].initialized && matches!(st.init[var], Init::Assigned | Init::Maybe) {
-            self.reassigned.insert(target.text_range());
+            self.reassigned.insert(target.text_range(), var);
         }
         self.store(var, node, false, st);
     }
@@ -625,15 +626,16 @@ impl<'e, 'a> Analysis<'e, 'a> {
         result
     }
 
-    fn finish(self, out: &mut Sink) {
+    fn finish(self, cx: &Cx, out: &mut Sink) {
         for (r, v) in &self.uninitialized {
             out.report(&UNINITIALIZED_VARIABLE, *r, format!("Variable '{}' must be initialized.", self.vars[*v].name), None);
         }
-        for r in &self.reassigned {
-            out.report(&VAL_REASSIGNMENT, *r, "'val' cannot be reassigned.", None);
+        for (r, v) in &self.reassigned {
+            let fix = ast::token(&self.vars[*v].decl, SyntaxKind::VAL_KW).map(|k| Fix::replace("Change to 'var'", k.text_range(), "var"));
+            out.report(&VAL_REASSIGNMENT, *r, "'val' cannot be reassigned.", fix);
         }
         for r in &self.unreachable {
-            out.report(&UNREACHABLE_CODE, *r, "Unreachable code.", None);
+            out.report(&UNREACHABLE_CODE, *r, "Unreachable code.", Some(Fix::delete("Remove unreachable code", deletion_range(cx.text, *r))));
         }
         for (i, v) in self.vars.iter().enumerate() {
             if v.captured || v.name == "_" {
@@ -651,7 +653,12 @@ impl<'e, 'a> Analysis<'e, 'a> {
             }
             for d in self.defs.iter().filter(|d| d.var == i && !d.used) {
                 if d.initializer {
-                    out.report(&VARIABLE_WITH_REDUNDANT_INITIALIZER, d.node.text_range(), format!("Initializer of variable '{}' is redundant: its value is never read.", v.name), None);
+                    // Without a written type the declaration would need one.
+                    let fix = (ast::child::<ast::TypeRef>(&v.decl).is_some()).then(|| ast::token(&v.decl, SyntaxKind::EQ)).flatten().map(|eq| {
+                        let start = prev_significant(&eq).map_or(eq.text_range().start(), |t| t.text_range().end());
+                        Fix::delete("Remove redundant initializer", TextRange::new(start, d.node.text_range().end()))
+                    });
+                    out.report(&VARIABLE_WITH_REDUNDANT_INITIALIZER, d.node.text_range(), format!("Initializer of variable '{}' is redundant: its value is never read.", v.name), fix);
                 } else {
                     out.report(&UNUSED_VALUE, d.node.text_range(), format!("The value assigned to '{}' is never read.", v.name), None);
                 }

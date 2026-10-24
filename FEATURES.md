@@ -342,9 +342,9 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 - [x] [P0] **Add missing return** / **add `return` with expression** (a default value for the return type)
 - [~] [P1] **Add/remove argument**, **add named argument**, **change function signature** to match call, **add parameter to function** — *partial: add parameter(s) to a project function from extra positional or unknown named arguments (typed from the arguments, also in another file)*
 - [ ] [P1] **Add type arguments**, **specify type explicitly**
-- [ ] [P1] **Make visible** (change visibility of referenced declaration), **make `public`/`internal`/`private`/`protected`**
-- [ ] [P1] **Add `open`** to class/member, **remove `final`**
-- [ ] [P1] **Add `operator`/`infix`/`inline`/`reified`/`crossinline`/`noinline`/`tailrec`/`data`/`const` modifier**
+- [~] [P1] **Make visible** (change visibility of referenced declaration), **make `public`/`internal`/`private`/`protected`** — *partial: "Make 'x' public" for `INVISIBLE_REFERENCE` (project declarations, any file); "Add '@PublishedApi'" for internal declarations used by public inline functions*
+- [x] [P1] **Add `open`** to class/member, **remove `final`** (`FINAL_SUPERTYPE`, `OVERRIDING_FINAL_MEMBER`; in other files too)
+- [~] [P1] **Add `operator`/`infix`/`inline`/`reified`/`crossinline`/`noinline`/`tailrec`/`data`/`const` modifier** — *partial: `operator` (`OPERATOR_MODIFIER_REQUIRED`), `inline` (`REIFIED_TYPE_PARAMETER_NO_INLINE`), `crossinline`/`noinline`, `suspend`; removals of misplaced `abstract`, `tailrec`, `const`, `inner`, `val`/`var`*
 - [~] [P1] **Remove incompatible / redundant modifier** — *partial: redundant `public`/`final`/`open`/`abstract`*
 - [ ] [P1] **Opt-in**: add `@OptIn(X::class)` to statement/function/class/file, or propagate `@X` marker, or add compiler arg
 - [ ] [P1] **Replace deprecated usage** (`@Deprecated(replaceWith = ReplaceWith(...))`) — single and whole project

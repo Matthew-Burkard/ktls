@@ -22,10 +22,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         }
         match n.kind() {
             SyntaxKind::CALL_EXPR => instantiation(e, &n, out),
-            SyntaxKind::NAME_REF => visibility(e, &n, out),
+            SyntaxKind::NAME_REF => visibility(cx, e, &n, out),
             SyntaxKind::OPERATION_REFERENCE => {
                 infix(e, &n, out);
-                operator(e, &n, out);
+                operator(cx, e, &n, out);
             }
             _ => {}
         }
@@ -82,7 +82,7 @@ fn instantiation(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
 /// A name that only resolves to declarations not visible here (private members of other
 /// classes, private declarations of other files, protected members outside subclasses,
 /// internal library declarations).
-fn visibility(e: &Engine, nr: &SyntaxNode, out: &mut Sink) {
+fn visibility(cx: &Cx, e: &Engine, nr: &SyntaxNode, out: &mut Sink) {
     let Some(tok) = nr.first_token().filter(|t| t.kind() == SyntaxKind::IDENT) else { return };
     if nr.ancestors().any(|a| matches!(a.kind(), SyntaxKind::IMPORT_DIRECTIVE | SyntaxKind::PACKAGE_DIRECTIVE | SyntaxKind::KDOC)) {
         return;
@@ -100,6 +100,13 @@ fn visibility(e: &Engine, nr: &SyntaxNode, out: &mut Sink) {
         }
     }
     let Some(reason) = why else { return };
+    // "Make 'x' public": drop the visibility modifier of a single project declaration.
+    let make_visible = || -> Option<Fix> {
+        let [s] = syms.as_slice() else { return None };
+        declaration_fix(cx, s, format!("Make '{}' public", s.name), |d| {
+            modifiers(d).and_then(|m| m.modifiers().find(|t| matches!(t.text(), "private" | "protected" | "internal"))).map(|t| modifier_removal(&t))
+        })
+    };
     // `receiver.name`, or a bare name of private top-level declarations of other files (a
     // bare member name may come from an outer scope once invisible members are skipped).
     // And only when no member or extension of that name is visible.
@@ -110,7 +117,7 @@ fn visibility(e: &Engine, nr: &SyntaxNode, out: &mut Sink) {
         let top_level = syms.iter().all(|s| s.fq_name.rsplit_once('.').is_none_or(|(c, _)| e.classifier(c).is_none()) && s.visibility == Visibility::Private);
         let in_scope = e.top_level_named(&name).iter().any(|s| hidden(e, s, nr).is_none());
         if top_level && !in_scope && nr.parent().is_none_or(|p| p.kind() != SyntaxKind::CALLABLE_REFERENCE) {
-            out.report(&INVISIBLE_REFERENCE, tok.text_range(), format!("Cannot access '{name}': it is {reason}."), None);
+            out.report(&INVISIBLE_REFERENCE, tok.text_range(), format!("Cannot access '{name}': it is {reason}."), make_visible());
         }
         return;
     };
@@ -118,7 +125,7 @@ fn visibility(e: &Engine, nr: &SyntaxNode, out: &mut Sink) {
     if !e.extensions(&t, &name).is_empty() || e.members_named(&t, &name).iter().any(|(m, _)| hidden(e, m, nr).is_none()) {
         return;
     }
-    out.report(&INVISIBLE_REFERENCE, tok.text_range(), format!("Cannot access '{name}': it is {reason}."), None);
+    out.report(&INVISIBLE_REFERENCE, tok.text_range(), format!("Cannot access '{name}': it is {reason}."), make_visible());
 }
 
 /// Why `s` is not visible at `at`; `None` if it is (or that is not certain).
@@ -196,7 +203,7 @@ fn infix(e: &Engine, op: &SyntaxNode, out: &mut Sink) {
 
 /// `a + b` (also `-`, `*`, `/`, `%`, `..`, `..<` and compound assignments) where no
 /// candidate function of the convention's name is declared `operator`.
-fn operator(e: &Engine, op: &SyntaxNode, out: &mut Sink) {
+fn operator(cx: &Cx, e: &Engine, op: &SyntaxNode, out: &mut Sink) {
     let Some(tok) = op.first_token() else { return };
     let names: &[&str] = match tok.kind() {
         SyntaxKind::PLUS => &["plus"],
@@ -228,7 +235,14 @@ fn operator(e: &Engine, op: &SyntaxNode, out: &mut Sink) {
         return;
     }
     let name = names[0];
-    out.report(&OPERATOR_MODIFIER_REQUIRED, tok.text_range(), format!("'operator' modifier is required on '{name}' in '{}'.", left.display()), None);
+    let fix = match funs.as_slice() {
+        [f] => declaration_fix(cx, f, format!("Add 'operator' modifier to '{name}'"), |d| {
+            let kw = d.children_with_tokens().filter_map(|t| t.into_token()).find(|t| t.kind() == SyntaxKind::FUN_KW)?;
+            Some(Edit { range: TextRange::empty(kw.text_range().start()), text: "operator ".into() })
+        }),
+        _ => None,
+    };
+    out.report(&OPERATOR_MODIFIER_REQUIRED, tok.text_range(), format!("'operator' modifier is required on '{name}' in '{}'.", left.display()), fix);
 }
 
 /// `f() = 1`, `"a" = b`: the left side of `=` is not a variable.

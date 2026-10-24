@@ -147,7 +147,7 @@ fn function(f: &SyntaxNode, out: &mut Sink) {
         out.report(&EXPECTED_DECLARATION_WITH_BODY, name.text_range(), "Expected declaration must not have a body.", None);
     }
     if owner(f).as_ref().is_some_and(is_interface) && !body && has_modifier(f, "private") {
-        out.report(&PRIVATE_FUNCTION_WITH_NO_BODY, name.text_range(), format!("Function '{}' without body cannot be private.", name.text()), None);
+        out.report(&PRIVATE_FUNCTION_WITH_NO_BODY, name.text_range(), format!("Function '{}' without body cannot be private.", name.text()), Some(add_body_fix(f)));
     }
 }
 
