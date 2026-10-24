@@ -231,6 +231,15 @@ rules! {
     JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION = "JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION", Compiler, Error, false, [], "'@JvmStatic' on a member of a class or at top level";
     FORBIDDEN_IDENTITY_EQUALS = "FORBIDDEN_IDENTITY_EQUALS", Compiler, Error, false, [], "'===' or '!==' between primitive values (Kotlin 2)";
     ANNOTATION_ARGUMENT_MUST_BE_CONST = "ANNOTATION_ARGUMENT_MUST_BE_CONST", Compiler, Error, false, [], "Annotation argument that is not a compile-time constant";
+    VAL_OR_VAR_ON_FUN_PARAMETER = "VAL_OR_VAR_ON_FUN_PARAMETER", Compiler, Error, false, [], "'val'/'var' on a function parameter";
+    VAL_OR_VAR_ON_SECONDARY_CONSTRUCTOR_PARAMETER = "VAL_OR_VAR_ON_SECONDARY_CONSTRUCTOR_PARAMETER", Compiler, Error, false, [], "'val'/'var' on a secondary constructor parameter";
+    VAL_OR_VAR_ON_LOOP_PARAMETER = "VAL_OR_VAR_ON_LOOP_PARAMETER", Compiler, Error, false, [], "'val'/'var' on a 'for' loop parameter";
+    VAL_OR_VAR_ON_CATCH_PARAMETER = "VAL_OR_VAR_ON_CATCH_PARAMETER", Compiler, Error, false, [], "'val'/'var' on a 'catch' parameter";
+    FUNCTION_CALL_EXPECTED = "FUNCTION_CALL_EXPECTED", Compiler, Error, false, [], "Function name used as a value without '()'";
+    NO_COMPANION_OBJECT = "NO_COMPANION_OBJECT", Compiler, Error, false, [], "Class without a companion object used as a value";
+    ABSTRACT_SUPER_CALL = "ABSTRACT_SUPER_CALL", Compiler, Error, false, [], "'super.f()' of an abstract member";
+    CONST_VAL_WITH_NON_CONST_INITIALIZER = "CONST_VAL_WITH_NON_CONST_INITIALIZER", Compiler, Error, false, [], "'const val' initialized with a call or a non-const property";
+    COMPONENT_FUNCTION_MISSING = "COMPONENT_FUNCTION_MISSING", Compiler, Error, false, [], "Destructuring a value whose type has no 'componentN()'";
     SMARTCAST_IMPOSSIBLE = "SMARTCAST_IMPOSSIBLE", Compiler, Error, false, [], "Member of a nullable 'var', open, delegated or custom-getter property used after a null check";
     CANNOT_CHECK_FOR_ERASED = "CANNOT_CHECK_FOR_ERASED", Compiler, Error, false, [], "'is' check against type arguments erased at run time";
     TYPE_VARIANCE_CONFLICT = "TYPE_VARIANCE_CONFLICT", Compiler, Error, false, [], "'out' type parameter in an 'in' position (or the reverse) of a member";

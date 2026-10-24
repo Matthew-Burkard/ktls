@@ -2749,3 +2749,53 @@ fn templates_lifts_and_redundant_calls() {
     let found = lint("package a\n\nfun g(n: Int): String? = if (n > 1) \"a\" else null\nopen class O { open fun h(): String? = \"a\" }\n");
     assert!(!found.iter().any(|f| f.starts_with("RedundantNullableReturnType")), "{found:#?}");
 }
+
+#[test]
+fn reference_compiler_checks() {
+    let found = compiler("package a\n\nclass C {\n    constructor(val x: Int)\n}\nfun f(val x: Int) {\n    for (val i in 0..1) {}\n    try {} catch (var e: Exception) {}\n}\n");
+    for code in ["VAL_OR_VAR_ON_FUN_PARAMETER", "VAL_OR_VAR_ON_SECONDARY_CONSTRUCTOR_PARAMETER", "VAL_OR_VAR_ON_LOOP_PARAMETER", "VAL_OR_VAR_ON_CATCH_PARAMETER"] {
+        assert!(found.iter().any(|f| f.starts_with(code)), "{code}: {found:#?}");
+    }
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+class Plain
+class WithCompanion { companion object }
+object Single
+abstract class Base { abstract fun f(): Int; open fun g() = 1 }
+class Impl : Base() {
+    override fun f() = super.f()
+    override fun g() = super.g()
+}
+class NotData(val a: Int)
+data class Pair2(val a: Int, val b: Int)
+fun compute() = 1
+const val A = 1
+val b = 2
+const val C = A
+const val D = b
+const val E = compute()
+
+fun use(file: java.io.File) {
+    val x = Plain
+    val y = WithCompanion
+    val z = Single
+    val g = compute
+    val h = ::compute
+    val n = file.name
+    val (p, q) = NotData(1)
+    val (r, s) = Pair2(1, 2)
+    println(listOf(x, y, z, g, h, n, p, q, r, s))
+}
+"#,
+    );
+    let codes = |c: &str| found.iter().filter(|f| f.starts_with(c)).cloned().collect::<Vec<_>>();
+    assert_eq!(codes("NO_COMPANION_OBJECT"), vec!["NO_COMPANION_OBJECT: Plain"], "{found:#?}");
+    assert_eq!(codes("FUNCTION_CALL_EXPECTED"), vec!["FUNCTION_CALL_EXPECTED: compute"], "{found:#?}");
+    assert_eq!(codes("ABSTRACT_SUPER_CALL"), vec!["ABSTRACT_SUPER_CALL: f"], "{found:#?}");
+    assert_eq!(codes("CONST_VAL_WITH_NON_CONST_INITIALIZER"), vec!["CONST_VAL_WITH_NON_CONST_INITIALIZER: b", "CONST_VAL_WITH_NON_CONST_INITIALIZER: compute()"], "{found:#?}");
+    assert_eq!(codes("COMPONENT_FUNCTION_MISSING"), vec!["COMPONENT_FUNCTION_MISSING: p", "COMPONENT_FUNCTION_MISSING: q"], "{found:#?}");
+}

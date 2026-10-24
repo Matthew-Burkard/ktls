@@ -121,7 +121,7 @@ fn non_null(t: TypeRef) -> TypeRef {
     }
 }
 
-fn in_unknown_lambda(e: &Engine, at: &SyntaxNode) -> bool {
+pub(super) fn in_unknown_lambda(e: &Engine, at: &SyntaxNode) -> bool {
     at.ancestors().any(|a| a.kind() == SyntaxKind::LAMBDA_EXPR && e.lambda_signature(&a).is_none())
 }
 
