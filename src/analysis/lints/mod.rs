@@ -221,6 +221,8 @@ rules! {
     NON_LOCAL_SUSPENSION_POINT = "NON_LOCAL_SUSPENSION_POINT", Compiler, Error, false, [], "Suspend call in a lambda passed to a 'crossinline' parameter";
     UNRESOLVED_LABEL = "UNRESOLVED_LABEL", Compiler, Error, false, [], "Label that names nothing around it";
     NOT_A_LOOP_LABEL = "NOT_A_LOOP_LABEL", Compiler, Error, false, [], "'break' or 'continue' with a label that is not on a loop";
+    CONFLICTING_PROJECTION = "CONFLICTING_PROJECTION", Compiler, Error, false, [], "'in' projection of an 'out' type parameter, or the reverse";
+    PROJECTION_IN_IMMEDIATE_ARGUMENT_TO_SUPERTYPE = "PROJECTION_IN_IMMEDIATE_ARGUMENT_TO_SUPERTYPE", Compiler, Error, false, [], "'in', 'out' or '*' type argument of a supertype";
     TYPE_VARIANCE_CONFLICT = "TYPE_VARIANCE_CONFLICT", Compiler, Error, false, [], "'out' type parameter in an 'in' position (or the reverse) of a member";
     ARGUMENT_TYPE_MISMATCH = "ARGUMENT_TYPE_MISMATCH", Compiler, Error, false, [], "Argument of the wrong type (literal, typed local/parameter, constructor call) for a function without overloads";
     NULL_FOR_NONNULL_TYPE = "NULL_FOR_NONNULL_TYPE", Compiler, Error, false, [], "'null' for a non-null type";
@@ -241,6 +243,7 @@ rules! {
     OPT_IN_USAGE = "OPT_IN_USAGE", Compiler, Warning, false, [], "Use of a declaration that requires opt-in (marker with level WARNING) without opting in";
     UNCHECKED_CAST = "UNCHECKED_CAST", Compiler, Warning, false, [], "Cast to a generic type or type parameter the runtime cannot check";
     EXTENSION_SHADOWED_BY_MEMBER = "EXTENSION_SHADOWED_BY_MEMBER", Compiler, Warning, false, [], "Extension with the signature of a member of its receiver";
+    REDUNDANT_PROJECTION = "REDUNDANT_PROJECTION", Compiler, Warning, true, [], "'out' projection of an 'out' type parameter (or 'in' of an 'in' one)";
     FINAL_UPPER_BOUND = "FINAL_UPPER_BOUND", Compiler, Warning, false, [], "Type parameter bounded by a final class";
     UNNECESSARY_SAFE_CALL = "UNNECESSARY_SAFE_CALL", Compiler, Warning, true, [], "'?.' on a non-null receiver";
     UNNECESSARY_NOT_NULL_ASSERTION = "UNNECESSARY_NOT_NULL_ASSERTION", Compiler, Warning, true, [], "'!!' on a non-null value";

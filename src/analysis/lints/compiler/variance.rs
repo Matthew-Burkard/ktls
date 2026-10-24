@@ -9,9 +9,69 @@ use crate::symbols::Variance;
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
-    for c in cx.root.descendants().filter(|n| n.kind() == SyntaxKind::CLASS) {
-        if !in_error(&c) {
-            class(e, &c, out);
+    for n in cx.root.descendants() {
+        if in_error(&n) {
+            continue;
+        }
+        match n.kind() {
+            SyntaxKind::CLASS => class(e, &n, out),
+            SyntaxKind::USER_TYPE => projections(e, &n, out),
+            _ => {}
+        }
+    }
+}
+
+/// Use-site projections against the declared variance (`List<out T>`, `Comparable<out T>`)
+/// and projections of a supertype's immediate arguments.
+fn projections(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    let Some(last) = n.children().filter(|c| c.kind() == SyntaxKind::USER_TYPE_SEGMENT).last() else { return };
+    let Some(args) = last.children().find(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) else { return };
+    let supertype = n.parent().filter(|p| p.kind() == SyntaxKind::TYPE_REFERENCE).and_then(|t| t.parent()).is_some_and(|p| matches!(p.kind(), SyntaxKind::SUPER_TYPE_ENTRY | SyntaxKind::SUPER_TYPE_CALL_ENTRY | SyntaxKind::DELEGATED_SUPER_TYPE_ENTRY));
+    let elements: Vec<_> = args.children_with_tokens().filter(|t| !t.kind().is_trivia() && !matches!(t.kind(), SyntaxKind::LT | SyntaxKind::GT | SyntaxKind::COMMA)).collect();
+    let mut variances: Option<Vec<Variance>> = None;
+    for (i, el) in elements.iter().enumerate() {
+        let star = el.as_token().is_some_and(|t| t.kind() == SyntaxKind::STAR) || el.as_node().is_some_and(|p| p.text().to_string().trim_start().starts_with('*'));
+        let Some(proj) = el.as_node().filter(|p| p.kind() == SyntaxKind::TYPE_PROJECTION) else {
+            if star && supertype {
+                out.report(&PROJECTION_IN_IMMEDIATE_ARGUMENT_TO_SUPERTYPE, el.text_range(), "Projections are not allowed for immediate arguments of a supertype.", None);
+            }
+            continue;
+        };
+        let Some(mods) = modifiers(proj) else {
+            if star && supertype {
+                out.report(&PROJECTION_IN_IMMEDIATE_ARGUMENT_TO_SUPERTYPE, proj.text_range(), "Projections are not allowed for immediate arguments of a supertype.", None);
+            }
+            continue;
+        };
+        let kw = mods.syntax().descendants_with_tokens().filter_map(|t| t.into_token()).find(|t| matches!(t.text(), "in" | "out"));
+        let Some(kw) = kw else { continue };
+        if supertype {
+            out.report(&PROJECTION_IN_IMMEDIATE_ARGUMENT_TO_SUPERTYPE, proj.text_range(), "Projections are not allowed for immediate arguments of a supertype.", None);
+            continue;
+        }
+        if variances.is_none() {
+            let Some(tr) = n.ancestors().find_map(ast::TypeRef::cast) else { return };
+            let t = e.resolve_syntax_type(&tr);
+            let Some(cls) = fq_of(&t).and_then(|fq| e.classifier(fq)) else { return };
+            // Type aliases and Java classes (all invariant) are left out.
+            if cls.symbol().kind == crate::symbols::SymbolKind::TypeAlias {
+                return;
+            }
+            variances = Some(cls.symbol().type_params.iter().map(|p| p.variance).collect());
+        }
+        let Some(declared) = variances.as_ref().and_then(|v| v.get(i)) else { return };
+        let used = if kw.text() == "out" { Variance::Out } else { Variance::In };
+        let shown = n.text().to_string();
+        match (declared, used) {
+            (Variance::Out, Variance::Out) | (Variance::In, Variance::In) => {
+                // The keyword and the space after it.
+                let end = kw.next_token().filter(|t| t.kind().is_trivia()).map_or(kw.text_range().end(), |t| t.text_range().end());
+                out.report(&REDUNDANT_PROJECTION, kw.text_range(), format!("Redundant projection: the corresponding type parameter of {shown} has the same variance."), Some(Fix::delete("Remove redundant projection", TextRange::new(kw.text_range().start(), end))));
+            }
+            (Variance::Out, Variance::In) | (Variance::In, Variance::Out) => {
+                out.report(&CONFLICTING_PROJECTION, kw.text_range(), format!("Projection is conflicting with the variance of the corresponding type parameter of {shown}. Remove the projection or replace it with '*'."), None);
+            }
+            _ => {}
         }
     }
 }

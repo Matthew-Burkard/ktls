@@ -2235,3 +2235,31 @@ class Entries : AbstractMap<String, Int>() {
     assert_eq!(qualifiers.len(), 5, "{qualifiers:#?}");
     assert!(fixed("package a\n\nfun f() {\n    val n: Int = 1\n    println(n)\n}\n", "RedundantExplicitType").contains("val n = 1"));
 }
+
+#[test]
+fn projection_compiler_checks() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+class Box<in T>
+abstract class Base<T>
+abstract class Impl : Base<out String>(), Comparable<*>
+
+fun f(a: List<out String>, b: List<in String>, c: Box<in Int>, d: MutableList<out String>, e: Box<out Int>, g: Comparable<in Int>) {}
+"#,
+    );
+    has(&found, "REDUNDANT_PROJECTION: out");
+    has(&found, "REDUNDANT_PROJECTION: in");
+    has(&found, "CONFLICTING_PROJECTION: in");
+    has(&found, "CONFLICTING_PROJECTION: out");
+    has(&found, "PROJECTION_IN_IMMEDIATE_ARGUMENT_TO_SUPERTYPE: out String");
+    has(&found, "PROJECTION_IN_IMMEDIATE_ARGUMENT_TO_SUPERTYPE: *");
+    let count = |id: &str| found.iter().filter(|f| f.starts_with(id)).count();
+    // `List<out>` and `Box<in>` redundant (Comparable's `in` too); `List<in>`, `Box<out>` conflicting; `MutableList<out>` fine.
+    assert_eq!(count("REDUNDANT_PROJECTION"), 3, "{found:#?}");
+    assert_eq!(count("CONFLICTING_PROJECTION"), 2, "{found:#?}");
+    assert!(fixed("package a\n\nfun f(a: List<out String>) = a\n", "REDUNDANT_PROJECTION").contains("List<String>"));
+}
