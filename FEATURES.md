@@ -238,12 +238,12 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `CanBePrimaryConstructorProperty`
 - [ ] [P1] `ConvertToStringTemplate` (string concatenation)
 - [ ] [P1] `LiftReturnOrAssignment` (out of `if`/`when`/`try`)
-- [ ] [P1] `CascadeIf` → `when`, `IntroduceWhenSubject`
+- [x] [P1] `CascadeIf` → `when`, `IntroduceWhenSubject` (three or more conditions; subjects via the intention)
 - [x] [P1] `ReplaceGetOrSet` (`a.get(i)` → `a[i]`), `ReplaceCallWithBinaryOperator` (`a.plus(b)` → `a + b`)
 - [~] [P1] `ReplaceRangeToWithUntil` / `ReplaceUntilWithRangeUntil` (`..<`) — *partial: `a..b - 1` (`ReplaceRangeToWithRangeUntil`)*
 - [~] [P1] `ReplaceSizeCheckWithIsNotEmpty`, `ReplaceSizeZeroCheckWithIsEmpty`, `ReplaceIsEmptyWithIfEmpty` — *partial: the size/length checks*
 - [x] [P1] `UseExpressionBody` (single `return` block body; a cursor action by default)
-- [ ] [P1] `IfThenToSafeAccess`, `IfThenToElvis`, `FoldInitializerAndIfToElvis`
+- [x] [P1] `IfThenToSafeAccess`, `IfThenToElvis`, `FoldInitializerAndIfToElvis`
 - [x] [P1] `ReplaceNegatedIsEmptyWithIsNotEmpty`, `SimplifyNegatedBinaryExpression`, `SimplifyBooleanWithConstants` (stdlib `isEmpty`/`isBlank` pairs; `==`, `===`, `in`, `is`; `&& true`, `|| false`, `== true/false` on non-null Booleans)
 - [~] [P1] `ConvertTwoComparisonsToRangeCheck`, `ConvertNaNEquality` — *partial: `ConvertNaNEquality`*
 - [x] [P1] `ReplaceJavaStaticMethodWithKotlinAnalog` (`Math.max`, `System.out.println`, `Arrays.asList`…): `Math` functions (adding `kotlin.math` imports), `Arrays` content functions, `parseInt`-style parsing, `Character` tests, `System.out.print(ln)`
@@ -252,13 +252,13 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `ReplaceWithOperatorAssignment` (`x = x + 1` → `x += 1`) — *numbers, chars and strings (other types may have `plusAssign`); names and `this.x`/`a.b` chains only*
 - [ ] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `ReplaceArrayOfWithLiteral` (annotations)
 - [x] [P1] `ReplacePutWithAssignment` (`map.put(k, v)` → `map[k] = v`) — *on `MutableMap`s, when the result is not used*
-- [ ] [P1] `ReplaceAssociateFunction`, `ReplaceMapIndexedWithListGenerator`
-- [ ] [P1] `JoinDeclarationAndAssignment`, `MoveVariableDeclarationIntoWhen`
+- [~] [P1] `ReplaceAssociateFunction`, `ReplaceMapIndexedWithListGenerator` — *partial: `ReplaceAssociateFunction` (`associateWith`, `associateBy`)*
+- [~] [P1] `JoinDeclarationAndAssignment`, `MoveVariableDeclarationIntoWhen` — *partial: `JoinDeclarationAndAssignment` (assignment right after)*
 - [x] [P1] `MayBeConstant` (`val` → `const val`)
 - [ ] [P1] `ObjectLiteralToLambda`, `ConvertLambdaToReference`, `ConvertReferenceToLambda`
 - [~] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate` — *partial: `RemoveExplicitTypeArguments`*
 - [~] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda` — *partial: `SelfAssignment` of local variables*
-- [ ] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`)
+- [~] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`) — *partial: `ReplaceGuardClauseWithFunctionCall` (`require`, `check`, `requireNotNull`, `checkNotNull`)*
 - [~] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals` — *partial: `ReplaceWithIgnoreCaseEquals`*
 - [~] [P1] `ReplaceStringFormatWithLiteral`, `ReplaceReadLineWithReadln`, `ReplacePrintlnWithLogging` — *partial: `ReplaceReadLineWithReadln`*
 - [ ] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet`
@@ -271,7 +271,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 
 **Collections & sequences**
 - [~] [P1] `SimplifiableCallChain` (`filter{}.first()` → `first{}`, `map{}.filterNotNull()` → `mapNotNull{}`, `sortedBy{}.first()` → `minBy{}`…) — *partial: `filter{}` + `first`/`firstOrNull`/`last`/`lastOrNull`/`single`/`singleOrNull`/`count`/`size`/`any`/`none`/`isEmpty`/`isNotEmpty`, `map{}` + `filterNotNull`/`joinToString`, `sortedBy{}`/`sortedByDescending{}` + `first`/`firstOrNull` on iterables, arrays and sequences*
-- [ ] [P1] `SimplifiableCall` (`filter { it is T }` → `filterIsInstance<T>()`)
+- [x] [P1] `SimplifiableCall` (`filter { it is T }` → `filterIsInstance<T>()`, `filter { it != null }` → `filterNotNull()`)
 - [ ] [P1] `ConvertCallChainIntoSequence` (long chains on large collections)
 - [~] [P1] `UselessCallOnCollection` / `UselessCallOnNotNull` (`orEmpty()` on non-null, `filterNotNull()` on non-null elements) — *partial: `UselessCallOnNotNull` (`orEmpty()`, `isNullOrEmpty()`, `isNullOrBlank()` on values of certain non-null type)*
 - [ ] [P1] `ReplaceManualForEachWithMap` / loop-to-stdlib suggestions (`for` loop → `map/filter/sum/any/all/count`)

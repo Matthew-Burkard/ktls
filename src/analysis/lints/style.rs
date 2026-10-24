@@ -27,6 +27,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 java_static_method(cx, &n, out);
                 copy_without_names(cx, &n, out);
                 substring(cx, &n, out);
+                simplifiable_call(cx, &n, out);
+                associate_function(cx, &n, out);
             }
             SyntaxKind::MODIFIER_LIST => protected_in_final(cx, &n, out),
             SyntaxKind::CALL_EXPR => {
@@ -37,7 +39,17 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 negated_is_empty(cx, &n, out);
                 negated_binary(cx, &n, out);
             }
-            SyntaxKind::IF_EXPR | SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR => empty_bodies(&n, out),
+            SyntaxKind::IF_EXPR => {
+                empty_bodies(&n, out);
+                if_to_elvis_or_safe_access(cx, &n, out);
+                cascade_if(cx, &n, out);
+                guard_clause(cx, &n, out);
+            }
+            SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR => empty_bodies(&n, out),
+            SyntaxKind::BLOCK => {
+                fold_initializer(cx, &n, out);
+                join_declaration(cx, &n, out);
+            }
             _ => {}
         }
     }
@@ -929,4 +941,309 @@ fn property_access(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
         return;
     }
     out.report(&PROPERTY_ACCESS_SYNTAX, callee.text_range(), format!("Use of getter method instead of property access syntax ('{property}')"), Some(Fix::replace("Use property access syntax", call.text_range(), property)));
+}
+
+/// The single expression of an `if` branch (`x` or `{ x }`).
+fn branch_expr(b: &SyntaxNode) -> Option<SyntaxNode> {
+    let e = b.first_child()?;
+    if e.kind() == SyntaxKind::BLOCK { only_statement(&e) } else { Some(e) }
+}
+
+fn is_null_literal(n: &SyntaxNode) -> bool {
+    n.kind() == SyntaxKind::LITERAL && n.first_token().is_some_and(|t| t.kind() == SyntaxKind::NULL_KW)
+}
+
+/// `x == null` / `x != null` with a plain name `x`: (x, whether it is `!=`).
+fn null_comparison(c: &SyntaxNode) -> Option<(SyntaxNode, bool)> {
+    let op = binary_op(c)?;
+    let not = match op.kind() {
+        SyntaxKind::EQ2 => false,
+        SyntaxKind::NOT_EQ => true,
+        _ => return None,
+    };
+    let (l, r) = binary_operands(c)?;
+    let x = if is_null_literal(&r) { l } else if is_null_literal(&l) { r } else { return None };
+    (x.kind() == SyntaxKind::NAME_REF).then_some((x, not))
+}
+
+fn condition_of(i: &SyntaxNode) -> Option<SyntaxNode> {
+    i.children().find(|c| c.kind() == SyntaxKind::CONDITION)?.children().next()
+}
+
+/// `if (x != null) x else y` → `x ?: y`; `if (x != null) x.f() else null` → `x?.f()`.
+fn if_to_elvis_or_safe_access(cx: &Cx, i: &SyntaxNode, out: &mut Sink) {
+    if (!cx.on(&IF_THEN_TO_ELVIS) && !cx.on(&IF_THEN_TO_SAFE_ACCESS)) || has_comments(i) {
+        return;
+    }
+    let Some((x, not_null)) = condition_of(i).and_then(|c| null_comparison(&c)) else { return };
+    let then = i.children().find(|c| c.kind() == SyntaxKind::THEN_BRANCH).and_then(|b| branch_expr(&b));
+    let els = i.children().find(|c| c.kind() == SyntaxKind::ELSE_BRANCH).and_then(|b| branch_expr(&b));
+    let has_else = i.children().any(|c| c.kind() == SyntaxKind::ELSE_BRANCH);
+    let (value, other) = if not_null { (then, els) } else { (els, then) };
+    let Some(value) = value else { return };
+    let name = x.text().to_string();
+    if value.text() == name.as_str() {
+        // `x ?: y` (not `x ?: null`).
+        let Some(other) = other.filter(|o| !is_null_literal(o)) else { return };
+        if !cx.on(&IF_THEN_TO_ELVIS) || other.kind() == SyntaxKind::IF_EXPR {
+            return;
+        }
+        out.report(&IF_THEN_TO_ELVIS, i.first_token().map_or(i.text_range(), |t| t.text_range()), "If-Then foldable to '?:'", Some(Fix::replace("Replace 'if' expression with elvis expression", i.text_range(), format!("{name} ?: {}", other.text()))));
+        return;
+    }
+    // `x.f()` with `null` (or nothing, as a statement) otherwise.
+    let receiver_is_x = value.kind() == SyntaxKind::DOT_QUALIFIED_EXPR && value.first_child().is_some_and(|f| f.text() == name.as_str());
+    let otherwise_null = match &other {
+        Some(o) => is_null_literal(o),
+        None => !has_else && not_null && i.parent().is_some_and(|p| p.kind() == SyntaxKind::BLOCK),
+    };
+    if !receiver_is_x || !otherwise_null || !cx.on(&IF_THEN_TO_SAFE_ACCESS) {
+        return;
+    }
+    let text = value.text().to_string();
+    let rest = &text[name.len()..];
+    let Some(rest) = rest.strip_prefix('.') else { return };
+    out.report(&IF_THEN_TO_SAFE_ACCESS, i.first_token().map_or(i.text_range(), |t| t.text_range()), "Foldable if-then", Some(Fix::replace("Replace 'if' expression with safe access expression", i.text_range(), format!("{name}?.{rest}"))));
+}
+
+/// `val x = f()` then `if (x == null) return` → `val x = f() ?: return`.
+fn fold_initializer(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&FOLD_INITIALIZER_TO_ELVIS) {
+        return;
+    }
+    let stmts: Vec<SyntaxNode> = block.children().collect();
+    for w in stmts.windows(2) {
+        let (decl, i) = (&w[0], &w[1]);
+        if decl.kind() != SyntaxKind::PROPERTY || i.kind() != SyntaxKind::IF_EXPR || i.children().any(|c| c.kind() == SyntaxKind::ELSE_BRANCH) || has_comments(i) {
+            continue;
+        }
+        let Some(p) = ast::PropertyDecl::cast(decl.clone()) else { continue };
+        let Some(init) = initializer(decl) else { continue };
+        if p.type_ref().is_some() || p.is_destructuring() || p.has_delegate() {
+            continue;
+        }
+        let Some(name) = name_token(decl).map(|t| ast::ident_text(&t)) else { continue };
+        let Some((x, false)) = condition_of(i).and_then(|c| null_comparison(&c)) else { continue };
+        if x.text() != name.as_str() {
+            continue;
+        }
+        let Some(jump) = i.children().find(|c| c.kind() == SyntaxKind::THEN_BRANCH).and_then(|b| branch_expr(&b)) else { continue };
+        if !matches!(jump.kind(), SyntaxKind::RETURN_EXPR | SyntaxKind::THROW_EXPR | SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR) {
+            continue;
+        }
+        // `a ?: b` binds tighter than most operators: parenthesize those.
+        let init_text = if is_primary(&init) { init.text().to_string() } else { format!("({})", init.text()) };
+        let edits = vec![
+            Edit { range: init.text_range(), text: format!("{init_text} ?: {}", jump.text()) },
+            Edit { range: TextRange::new(decl.text_range().end(), i.text_range().end()), text: String::new() },
+        ];
+        out.report(&FOLD_INITIALIZER_TO_ELVIS, i.first_token().map_or(i.text_range(), |t| t.text_range()), "If-Null return/break/... foldable to '?:'", Some(Fix::new("Replace 'if' with elvis operator", edits)));
+    }
+}
+
+/// `if (a) … else if (b) … else …` with three or more branches → `when { … }`.
+fn cascade_if(cx: &Cx, i: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&CASCADE_IF) || i.parent().is_some_and(|p| p.kind() == SyntaxKind::ELSE_BRANCH) || has_comments(i) {
+        return;
+    }
+    let mut branches: Vec<(Option<String>, String)> = Vec::new();
+    let mut cur = i.clone();
+    loop {
+        let (Some(cond), Some(then)) = (condition_of(&cur), cur.children().find(|c| c.kind() == SyntaxKind::THEN_BRANCH)) else { return };
+        branches.push((Some(cond.text().to_string()), then.text().to_string()));
+        match cur.children().find(|c| c.kind() == SyntaxKind::ELSE_BRANCH).and_then(|e| e.first_child()) {
+            Some(next) if next.kind() == SyntaxKind::IF_EXPR => cur = next,
+            Some(last) => {
+                branches.push((None, last.text().to_string()));
+                break;
+            }
+            None => break,
+        }
+    }
+    if branches.iter().filter(|(c, _)| c.is_some()).count() < 3 {
+        return;
+    }
+    let indent = indent_at(cx.text, i.text_range().start());
+    let shift = |t: &str| t.replace('\n', "\n    ");
+    let mut text = String::from("when {");
+    for (c, b) in &branches {
+        text.push_str(&format!("\n{indent}    {} -> {}", c.as_deref().unwrap_or("else"), shift(b)));
+    }
+    text.push_str(&format!("\n{indent}}}"));
+    out.report(&CASCADE_IF, i.first_token().map_or(i.text_range(), |t| t.text_range()), "Cascade 'if' should be replaced with 'when'", Some(Fix::replace("Replace 'if' with 'when'", i.text_range(), text)));
+}
+
+/// `!c` for a condition `c`, simplified for `!x`, comparisons and `is`.
+fn negated_text(c: &SyntaxNode) -> String {
+    if c.kind() == SyntaxKind::PREFIX_EXPR && binary_op(c).is_some_and(|o| o.kind() == SyntaxKind::EXCL) {
+        if let Some(inner) = c.children().find(|x| x.kind() != SyntaxKind::OPERATION_REFERENCE) {
+            let inner = if inner.kind() == SyntaxKind::PAREN_EXPR { inner.children().next().unwrap_or(inner) } else { inner };
+            return inner.text().to_string();
+        }
+    }
+    if c.kind() == SyntaxKind::BINARY_EXPR
+        && let Some(op) = binary_op(c)
+    {
+        let flipped = match op.kind() {
+            SyntaxKind::EQ2 => Some("!="),
+            SyntaxKind::NOT_EQ => Some("=="),
+            SyntaxKind::LT => Some(">="),
+            SyntaxKind::GT => Some("<="),
+            SyntaxKind::LT_EQ => Some(">"),
+            SyntaxKind::GT_EQ => Some("<"),
+            _ => None,
+        };
+        if let Some(f) = flipped {
+            let text = c.text().to_string();
+            let r = op.text_range() - c.text_range().start();
+            return format!("{}{f}{}", &text[..usize::from(r.start())], &text[usize::from(r.end())..]);
+        }
+    }
+    if is_primary(c) { format!("!{}", c.text()) } else { format!("!({})", c.text()) }
+}
+
+/// `if (x == null) throw IllegalArgumentException(m)` → `requireNotNull(x) { m }`,
+/// `if (!ok) throw IllegalStateException(m)` → `check(ok) { m }`.
+fn guard_clause(cx: &Cx, i: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&GUARD_CLAUSE) || i.children().any(|c| c.kind() == SyntaxKind::ELSE_BRANCH) || i.parent().is_none_or(|p| p.kind() != SyntaxKind::BLOCK) || has_comments(i) {
+        return;
+    }
+    let Some(cond) = condition_of(i) else { return };
+    let Some(throw) = i.children().find(|c| c.kind() == SyntaxKind::THEN_BRANCH).and_then(|b| branch_expr(&b)).filter(|t| t.kind() == SyntaxKind::THROW_EXPR) else { return };
+    let Some(call) = throw.children().next().filter(|c| c.kind() == SyntaxKind::CALL_EXPR) else { return };
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let Some(args) = plain_arguments(&call) else { return };
+    let (plain, not_null) = match callee.text().to_string().as_str() {
+        "IllegalArgumentException" => ("require", "requireNotNull"),
+        "IllegalStateException" => ("check", "checkNotNull"),
+        _ => return,
+    };
+    let Some(e) = cx.engine() else { return };
+    if !matches!(e.resolve_name_ref(&callee).as_slice(), [Def::Symbol { sym, .. }, ..] if sym.fq_name.starts_with("kotlin.") || sym.fq_name.starts_with("java.lang.")) {
+        return;
+    }
+    let message = match args.as_slice() {
+        [] => String::new(),
+        [m] => format!(" {{ {} }}", m.text()),
+        _ => return,
+    };
+    let text = match null_comparison(&cond) {
+        Some((x, false)) => format!("{not_null}({}){message}", x.text()),
+        _ => format!("{plain}({}){message}", negated_text(&cond)),
+    };
+    let f = text.split('(').next().unwrap_or(plain).to_string();
+    out.report(&GUARD_CLAUSE, i.first_token().map_or(i.text_range(), |t| t.text_range()), format!("Replace guard clause with Kotlin's function call ('{f}')"), Some(Fix::replace(format!("Replace with '{f}()' call"), i.text_range(), text)));
+}
+
+/// The parameter name of a lambda with one parameter (`it` when implicit) and its body.
+fn single_param_lambda(l: &SyntaxNode) -> Option<(String, SyntaxNode)> {
+    let body = l.children().find(|c| c.kind() == SyntaxKind::BLOCK).and_then(|b| only_statement(&b))?;
+    let name = match l.children().find(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) {
+        None => "it".to_string(),
+        Some(list) => {
+            let params: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER).collect();
+            let [p] = params.as_slice() else { return None };
+            if p.children().any(|c| c.kind() == SyntaxKind::TYPE_REFERENCE || c.kind() == SyntaxKind::DESTRUCTURING_DECLARATION) {
+                return None;
+            }
+            name_token(p).map(|t| ast::ident_text(&t))?
+        }
+    };
+    Some((name, body))
+}
+
+/// The only argument of `recv.f { … }`: (callee, lambda).
+fn lambda_only_call(n: &SyntaxNode) -> Option<(SyntaxNode, SyntaxNode, SyntaxNode)> {
+    let mut parts = n.children();
+    let (recv, call) = (parts.next()?, parts.next()?);
+    if call.kind() != SyntaxKind::CALL_EXPR || call.children().any(|c| matches!(c.kind(), SyntaxKind::TYPE_ARGUMENT_LIST)) {
+        return None;
+    }
+    if call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_some_and(|l| l.children().next().is_some()) {
+        return None;
+    }
+    let lambda = call.children().find(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT)?.children().find(|c| c.kind() == SyntaxKind::LAMBDA_EXPR)?;
+    Some((recv, call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF)?, lambda))
+}
+
+/// `filter { it is T }` → `filterIsInstance<T>()`, `filter { it != null }` → `filterNotNull()`.
+fn simplifiable_call(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&SIMPLIFIABLE_CALL) {
+        return;
+    }
+    let Some((recv, callee, lambda)) = lambda_only_call(n) else { return };
+    if callee.text() != "filter" || has_comments(&lambda) {
+        return;
+    }
+    let Some((param, body)) = single_param_lambda(&lambda) else { return };
+    let replacement = if body.kind() == SyntaxKind::IS_EXPR && body.first_child().is_some_and(|f| f.text() == param.as_str()) && binary_op(&body).is_some_and(|o| o.kind() == SyntaxKind::IS_KW) {
+        let Some(ty) = body.children().find(|c| c.kind() == SyntaxKind::TYPE_REFERENCE) else { return };
+        format!("filterIsInstance<{}>()", ty.text())
+    } else if null_comparison(&body).is_some_and(|(x, not)| not && x.text() == param.as_str()) {
+        "filterNotNull()".to_string()
+    } else {
+        return;
+    };
+    if !stdlib_call(cx, &callee) {
+        return;
+    }
+    let name = replacement.split(['<', '(']).next().unwrap_or("").to_string();
+    out.report(&SIMPLIFIABLE_CALL, callee.text_range(), format!("Filter call could be simplified to '{name}'"), Some(Fix::replace(format!("Replace with '{name}'"), n.text_range(), format!("{}.{replacement}", recv.text()))));
+}
+
+/// `associate { it to v }` → `associateWith { v }`, `associate { k to it }` → `associateBy { k }`.
+fn associate_function(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&ASSOCIATE_FUNCTION) {
+        return;
+    }
+    let Some((recv, callee, lambda)) = lambda_only_call(n) else { return };
+    if callee.text() != "associate" || has_comments(&lambda) {
+        return;
+    }
+    let Some((param, body)) = single_param_lambda(&lambda) else { return };
+    if binary_op(&body).is_none_or(|o| o.kind() != SyntaxKind::IDENT || o.text() != "to") {
+        return;
+    }
+    let Some((k, v)) = binary_operands(&body) else { return };
+    let (f, kept) = if k.text() == param.as_str() && v.text() != param.as_str() {
+        ("associateWith", v)
+    } else if v.text() == param.as_str() && k.text() != param.as_str() {
+        ("associateBy", k)
+    } else {
+        return;
+    };
+    if !stdlib_call(cx, &callee) {
+        return;
+    }
+    let params = lambda.children().find(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST).map(|l| format!("{} -> ", l.text())).unwrap_or_default();
+    out.report(&ASSOCIATE_FUNCTION, callee.text_range(), format!("Replace 'associate' with '{f}'"), Some(Fix::replace(format!("Replace with '{f}'"), n.text_range(), format!("{}.{f} {{ {params}{} }}", recv.text(), kept.text()))));
+}
+
+/// `val x: T` and on the next line `x = v` → `val x: T = v`.
+fn join_declaration(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&JOIN_DECLARATION_AND_ASSIGNMENT) {
+        return;
+    }
+    let stmts: Vec<SyntaxNode> = block.children().collect();
+    for w in stmts.windows(2) {
+        let (decl, assign) = (&w[0], &w[1]);
+        if decl.kind() != SyntaxKind::PROPERTY || ast::token(decl, SyntaxKind::EQ).is_some() || has_comments(assign) || modifiers(decl).is_some() {
+            continue;
+        }
+        let Some(p) = ast::PropertyDecl::cast(decl.clone()) else { continue };
+        if p.type_ref().is_none() || p.has_delegate() || p.is_destructuring() {
+            continue;
+        }
+        if assignment_op(assign).is_none_or(|o| o.kind() != SyntaxKind::EQ) {
+            continue;
+        }
+        let Some((target, value)) = binary_operands(assign) else { continue };
+        let Some(name) = name_token(decl).map(|t| ast::ident_text(&t)) else { continue };
+        if target.kind() != SyntaxKind::NAME_REF || target.text() != name.as_str() || value.descendants().any(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == name.as_str()) {
+            continue;
+        }
+        let Some(name_tok) = name_token(decl) else { continue };
+        let fix = Fix::replace("Join declaration and assignment", TextRange::new(decl.text_range().end(), assign.text_range().end()), format!(" = {}", value.text()));
+        out.report(&JOIN_DECLARATION_AND_ASSIGNMENT, name_tok.text_range(), "Can be joined with assignment", Some(fix));
+    }
 }

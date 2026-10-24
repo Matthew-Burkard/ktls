@@ -335,6 +335,14 @@ rules! {
     SUBSTRING_WITH_DROP_LAST = "ReplaceSubstringWithDropLast", Style, Info, false, [], "'s.substring(0, s.length - n)' instead of 's.dropLast(n)'";
     PROTECTED_IN_FINAL = "ProtectedInFinal", Style, Info, false, [], "'protected' member of a final class (effectively 'private')";
     PROPERTY_ACCESS_SYNTAX = "UsePropertyAccessSyntax", Style, Info, false, [], "Java getter called as 'getFoo()' instead of the property 'foo'";
+    IF_THEN_TO_ELVIS = "IfThenToElvis", Style, Info, false, [], "'if (x != null) x else y' instead of 'x ?: y'";
+    IF_THEN_TO_SAFE_ACCESS = "IfThenToSafeAccess", Style, Info, false, [], "'if (x != null) x.f() else null' instead of 'x?.f()'";
+    FOLD_INITIALIZER_TO_ELVIS = "FoldInitializerAndIfToElvis", Style, Info, false, [], "'val x = f()' followed by 'if (x == null) return'";
+    CASCADE_IF = "CascadeIf", Style, Info, false, [], "'if'-'else if' chain of three or more branches instead of 'when'";
+    GUARD_CLAUSE = "ReplaceGuardClauseWithFunctionCall", Style, Info, false, [], "'if (…) throw IllegalArgumentException(…)' instead of 'require'/'check'";
+    SIMPLIFIABLE_CALL = "SimplifiableCall", Style, Info, false, [], "'filter { it is T }' instead of 'filterIsInstance<T>()', 'filter { it != null }' instead of 'filterNotNull()'";
+    ASSOCIATE_FUNCTION = "ReplaceAssociateFunction", Style, Info, false, [], "'associate { it to v }' instead of 'associateWith { v }'";
+    JOIN_DECLARATION_AND_ASSIGNMENT = "JoinDeclarationAndAssignment", Style, Info, false, [], "Local declared without a value and assigned right after";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";

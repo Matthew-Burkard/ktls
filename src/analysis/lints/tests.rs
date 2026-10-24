@@ -2697,3 +2697,31 @@ fun f(p: Person, file: java.io.File, xs: java.util.ArrayList<Int>, n: java.util.
     assert_eq!(found.iter().filter(|f| f.starts_with("UsePropertyAccessSyntax")).count(), 2, "{found:#?}");
     assert!(fixed("package a\n\nfun f(file: java.io.File) = file.getName()\n", "UsePropertyAccessSyntax").contains("= file.name"));
 }
+
+#[test]
+fn idiom_folds_and_guards() {
+    let check = |body: &str, rule: &str, expected: &str| {
+        let text = format!("package a\n\nfun f(x: String?, y: String, xs: List<Any?>, n: Int): Any? {{\n{body}\n    return null\n}}\n");
+        let out = fixed(&text, rule);
+        assert!(out.contains(expected), "{rule}: {out}");
+    };
+    check("    val a = if (x != null) x else y", "IfThenToElvis", "val a = x ?: y");
+    check("    val a = if (x == null) y else x", "IfThenToElvis", "val a = x ?: y");
+    check("    val a = if (x != null) x.length else null", "IfThenToSafeAccess", "val a = x?.length");
+    check("    if (x != null) x.trim()", "IfThenToSafeAccess", "    x?.trim()");
+    check("    val a = x?.trim()\n    if (a == null) return null\n    println(a)", "FoldInitializerAndIfToElvis", "val a = x?.trim() ?: return null\n    println(a)");
+    check("    val s = if (n == 1) \"a\" else if (n == 2) \"b\" else if (n == 3) \"c\" else \"d\"", "CascadeIf", "val s = when {\n        n == 1 -> \"a\"\n        n == 2 -> \"b\"\n        n == 3 -> \"c\"\n        else -> \"d\"\n    }");
+    check("    val v: Int\n    v = n + 1\n    println(v)", "JoinDeclarationAndAssignment", "val v: Int = n + 1\n    println(v)");
+    let found = lint("package a\n\nfun f(x: String?) = if (x != null) x else null\nfun g(n: Int) = if (n == 1) 1 else if (n == 2) 2 else 3\n");
+    assert!(!found.iter().any(|f| f.starts_with("IfThenToElvis") || f.starts_with("CascadeIf")), "{found:#?}");
+    if !Fixture::new().typed() {
+        return;
+    }
+    check("    if (x == null) throw IllegalArgumentException(\"no x\")", "ReplaceGuardClauseWithFunctionCall", "    requireNotNull(x) { \"no x\" }");
+    check("    if (n < 0) throw IllegalStateException()", "ReplaceGuardClauseWithFunctionCall", "    check(n >= 0)");
+    check("    if (!y.isEmpty()) throw IllegalArgumentException(y)", "ReplaceGuardClauseWithFunctionCall", "    require(y.isEmpty()) { y }");
+    check("    println(xs.filter { it is String })", "SimplifiableCall", "println(xs.filterIsInstance<String>())");
+    check("    println(xs.filter { v -> v != null })", "SimplifiableCall", "println(xs.filterNotNull())");
+    check("    println(listOf(y).associate { it to it.length })", "ReplaceAssociateFunction", "println(listOf(y).associateWith { it.length })");
+    check("    println(listOf(y).associate { it.length to it })", "ReplaceAssociateFunction", "println(listOf(y).associateBy { it.length })");
+}
