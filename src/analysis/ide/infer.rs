@@ -679,11 +679,10 @@ impl<'s> Engine<'s> {
             // Java getters as Kotlin properties: `name` → getName()/isName().
             if let Classifier::Library(lc) = &c
                 && !lc.is_kotlin && !name.is_empty() {
-                    let cap: String = name[..1].to_uppercase() + &name[1..];
                     let getters: Vec<(Symbol, Subst)> = lc
                         .members
                         .iter()
-                        .filter(|m| m.kind == SymbolKind::Function && m.params.is_empty() && (m.name == format!("get{cap}") || m.name == format!("is{cap}") || m.name == format!("is{}", cap)))
+                        .filter(|m| m.kind == SymbolKind::Function && m.params.is_empty() && java_property_name(&m.name).as_deref() == Some(name))
                         .map(|m| (m.clone(), s.clone()))
                         .collect();
                     if !getters.is_empty() && name.chars().next().is_some_and(|c| c.is_lowercase()) {
@@ -2533,14 +2532,25 @@ impl<'s> Engine<'s> {
 }
 
 /// `getName` → `name`, `isEnabled` → `isEnabled` (Kotlin's synthetic Java properties).
-fn java_property_name(method: &str) -> Option<String> {
+pub fn java_property_name(method: &str) -> Option<String> {
     let rest = method.strip_prefix("get").filter(|r| r.chars().next().is_some_and(char::is_uppercase));
     if let Some(r) = rest {
-        let mut c = r.chars();
-        let first = c.next()?;
-        return Some(first.to_lowercase().chain(c).collect());
+        return Some(decapitalize_smart(r));
     }
     method.strip_prefix("is").filter(|r| r.chars().next().is_some_and(char::is_uppercase)).map(|_| method.to_string())
+}
+
+/// Kotlin's property names for Java getters: `Name` → `name`, `ID` → `id`,
+/// `URLConnection` → `urlConnection` (a leading run of capitals is lowered, except the
+/// last one when a lowercase letter follows).
+fn decapitalize_smart(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let run = chars.iter().take_while(|c| c.is_ascii_uppercase()).count();
+    if run <= 1 {
+        return chars.iter().enumerate().map(|(i, c)| if i == 0 { c.to_ascii_lowercase() } else { *c }).collect();
+    }
+    let lower_until = if run < chars.len() && chars[run].is_lowercase() { run - 1 } else { run };
+    chars.iter().enumerate().map(|(i, c)| if i < lower_until { c.to_ascii_lowercase() } else { *c }).collect()
 }
 
 /// Members the compiler generates for a source class: `copy`/`componentN` of data

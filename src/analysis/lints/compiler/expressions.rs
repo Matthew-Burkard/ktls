@@ -203,7 +203,7 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
         if inherited.contains(&name) || e.all_members(&t).iter().any(|(m, _)| m.name == name) {
             return;
         }
-        out.report(&UNRESOLVED_REFERENCE_EXPR, tok.text_range(), format!("Unresolved reference '{name}'."), None);
+        out.report(&UNRESOLVED_REFERENCE_EXPR, tok.text_range(), format!("Unresolved reference '{name}' for a receiver of type '{}'.", super::certain::shown(&t)), None);
         return;
     }
     if callable_ref && outer.first_child().as_ref() != Some(nr) {
@@ -258,8 +258,20 @@ fn jvm_members(e: &Engine, t: &TypeRef) -> Option<HashSet<String>> {
         }
         if let Some((_, java)) = MAPPED.iter().find(|(k, _)| *k == fq) {
             let c = e.classifier(java)?;
+            // Read-only types hide the Java mutators (`List.add`): the members their mutable
+            // counterpart adds.
+            let mutable = fq.rsplit_once('.').map(|(p, n)| format!("{p}.Mutable{n}")).filter(|m| !fq.contains(".Mutable") && e.classifier(m).is_some());
+            let hidden: HashSet<String> = match &mutable {
+                Some(m) => {
+                    let own: HashSet<String> = e.all_members(&TypeRef::named(fq)).into_iter().map(|(m, _)| m.name).collect();
+                    e.all_members(&TypeRef::named(m)).into_iter().map(|(m, _)| m.name).filter(|n| !own.contains(n)).collect()
+                }
+                None => HashSet::new(),
+            };
             for (m, _) in e.all_members(&crate::analysis::ide::infer::class_type(c.symbol())) {
-                out.insert(m.name);
+                if !hidden.contains(&m.name) {
+                    out.insert(m.name);
+                }
             }
         }
     }

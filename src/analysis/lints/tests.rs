@@ -3322,3 +3322,4 @@ fn compiler_quick_fixes() {
     check("package a\n\nenum class E { A }\nfun f(x: Any) = x is E.A\n", "IS_ENUM_ENTRY", "x == E.A");
     check("package a\n\ninternal fun helper() = 1\ninline fun api() = helper()\n", "NON_PUBLIC_CALL_FROM_PUBLIC_INLINE", "@PublishedApi\ninternal fun helper()");
 }
+

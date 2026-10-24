@@ -938,20 +938,9 @@ fn protected_in_final(cx: &Cx, m: &SyntaxNode, out: &mut Sink) {
 fn property_access(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
     let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
     let name = callee.text().to_string();
-    let property = if let Some(r) = name.strip_prefix("get").filter(|r| r.starts_with(char::is_uppercase)) {
-        let mut c = r.chars();
-        match c.next() {
-            Some(f) => f.to_lowercase().chain(c).collect::<String>(),
-            None => return,
-        }
-    } else if name.strip_prefix("is").is_some_and(|r| r.starts_with(char::is_uppercase)) {
-        name.clone()
-    } else {
-        return;
-    };
-    // `getURL()`: the property would be `url`... no, `uRL`; leave all-caps names alone.
+    let Some(property) = crate::analysis::ide::infer::java_property_name(&name) else { return };
     // `getAndIncrement()` reads as an action, not a property.
-    if property.chars().nth(1).is_some_and(char::is_uppercase) || name.starts_with("getAnd") || !cx.on(&PROPERTY_ACCESS_SYNTAX) || plain_arguments(call).is_none_or(|a| !a.is_empty()) {
+    if name.starts_with("getAnd") || !cx.on(&PROPERTY_ACCESS_SYNTAX) || plain_arguments(call).is_none_or(|a| !a.is_empty()) {
         return;
     }
     // Not `super.getX()` (that is not a property access).
