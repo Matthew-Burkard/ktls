@@ -3306,11 +3306,15 @@ fn compiler_quick_fixes() {
     check("package a\n\nfun g()\n", "NON_MEMBER_FUNCTION_NO_BODY", "fun g() {\n    TODO(\"Not yet implemented\")\n}");
     check("package a\n\nabstract class A { abstract fun f() = 1 }\n", "ABSTRACT_FUNCTION_WITH_BODY", "{ fun f() = 1 }");
     check("package a\n\nopen class A { open tailrec fun f(n: Int): Int = if (n == 0) 0 else f(n - 1) }\n", "TAILREC_ON_VIRTUAL_MEMBER_ERROR", "open fun f(");
+    check("package a\n\nabstract class A { abstract val x: Int = 1 }\n", "ABSTRACT_PROPERTY_WITH_INITIALIZER", "abstract val x: Int }");
+    check("package a\n\ninterface I { val x: Int = 1 }\n", "PROPERTY_INITIALIZER_IN_INTERFACE", "val x: Int get() = 1");
     if !Fixture::new().typed() {
         return;
     }
     check("package a\n\nfun later(f: () -> Unit) = f()\nfun h() {\n    later { return }\n}\n", "RETURN_NOT_ALLOWED", "later { return@later }");
     check("package a\n\nfun g(n: Int?) = -n\n", "UNSAFE_OPERATOR_CALL", "-n!!");
+    check("package a\n\nfun t(a: Int, b: Int) = a + b\nval v = t(1)\n", "NO_VALUE_FOR_PARAMETER", "t(1, b = TODO())");
+    check("package a\n\nfun f(c: Boolean): Int {\n    val x = if (c) 1\n    return x\n}\n", "INVALID_IF_AS_EXPRESSION", "if (c) 1 else TODO()");
     check("package a\n\nclass Base\nclass Sub : Base()\n", "FINAL_SUPERTYPE", "open class Base");
     check("package a\n\nclass V { fun plus(o: V) = this }\nfun f(a: V, b: V) = a + b\n", "OPERATOR_MODIFIER_REQUIRED", "operator fun plus");
     check("package a\n\nclass C { private fun secret() = 1 }\nfun f(c: C) = c.secret()\n", "INVISIBLE_REFERENCE", "{ fun secret() = 1 }");

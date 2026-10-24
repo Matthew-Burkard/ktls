@@ -214,8 +214,17 @@ fn property(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
         }
     }
     let abstract_ = has_modifier(p, "abstract");
+    // The initializer and the space before it.
+    let initializer_range = || {
+        let eq = ast::token(p, SyntaxKind::EQ)?;
+        let value = initializer(p)?;
+        let start = prev_significant(&eq).map_or(eq.text_range().start(), |t| t.text_range().end());
+        Some(TextRange::new(start, value.text_range().end()))
+    };
     if abstract_ && init {
-        out.report(&ABSTRACT_PROPERTY_WITH_INITIALIZER, name.text_range(), format!("Abstract property '{n}' cannot have an initializer."), None);
+        let mut fixes: Vec<Fix> = initializer_range().filter(|_| decl.type_ref().is_some()).map(|r| Fix::delete("Remove initializer", r)).into_iter().collect();
+        fixes.extend(modifiers(p).and_then(|m| m.modifiers().find(|t| t.text() == "abstract")).map(|t| Fix::delete("Remove 'abstract' modifier", remove_modifier(&t))));
+        out.report_fixes(&ABSTRACT_PROPERTY_WITH_INITIALIZER, name.text_range(), format!("Abstract property '{n}' cannot have an initializer."), fixes);
     }
     if abstract_ && getter_body {
         out.report(&ABSTRACT_PROPERTY_WITH_GETTER, name.text_range(), format!("Abstract property '{n}' cannot have a getter body."), None);
@@ -227,7 +236,9 @@ fn property(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
         && is_interface(o)
         && init
     {
-        out.report(&PROPERTY_INITIALIZER_IN_INTERFACE, name.text_range(), "Property initializers are not allowed in interfaces.", None);
+        // `val x = 1` → `val x get() = 1` (a `var` would need a setter too).
+        let fix = (!decl.is_var()).then(|| ast::token(p, SyntaxKind::EQ)).flatten().map(|eq| Fix::replace("Convert to getter", eq.text_range(), "get() ="));
+        out.report(&PROPERTY_INITIALIZER_IN_INTERFACE, name.text_range(), "Property initializers are not allowed in interfaces.", fix);
     }
     open_member(p, owner.as_ref(), all_open(cx), out);
     // Initialization of non-local properties.

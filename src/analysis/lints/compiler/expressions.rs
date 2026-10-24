@@ -952,7 +952,12 @@ fn call_arguments(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
             }
             Mismatch::Missing(p) => {
                 let at = list.as_ref().and_then(|l| l.last_token()).map(|t| t.text_range()).unwrap_or(callee.text_range());
-                out.report(&NO_VALUE_FOR_PARAMETER, at, format!("No value passed for parameter '{p}'."), None);
+                // "Add 'p = TODO()'" before `)` (not with a trailing lambda in the way).
+                let fix = list.as_ref().and_then(|l| l.last_token().filter(|t| t.kind() == SyntaxKind::R_PAREN).map(|close| (l, close))).map(|(l, close)| {
+                    let sep = if l.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT) { ", " } else { "" };
+                    Fix::replace(format!("Add '{p} = TODO()'"), TextRange::empty(close.text_range().start()), format!("{sep}{p} = TODO()"))
+                });
+                out.report(&NO_VALUE_FOR_PARAMETER, at, format!("No value passed for parameter '{p}'."), fix);
             }
         }
         return;

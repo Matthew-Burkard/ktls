@@ -238,7 +238,8 @@ fn if_as_expression(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         _ => false,
     };
     if used && let Some(kw) = ast::token(n, SyntaxKind::IF_KW) {
-        out.report(&INVALID_IF_AS_EXPRESSION, kw.text_range(), "'if' must have both main and 'else' branches if used as an expression.", None);
+        let fix = Fix::replace("Add 'else' branch", TextRange::empty(n.text_range().end()), " else TODO()");
+        out.report(&INVALID_IF_AS_EXPRESSION, kw.text_range(), "'if' must have both main and 'else' branches if used as an expression.", Some(fix));
     }
 }
 
