@@ -148,7 +148,7 @@ rules! {
     VARIABLE_EXPECTED = "VARIABLE_EXPECTED", Compiler, Error, false, [], "Assignment to something that is not a variable";
     RETURN_NOT_ALLOWED = "RETURN_NOT_ALLOWED", Compiler, Error, false, [], "'return' in an initializer block, or a value returned from a constructor";
     BREAK_OR_CONTINUE_OUTSIDE_A_LOOP = "BREAK_OR_CONTINUE_OUTSIDE_A_LOOP", Compiler, Error, false, [], "'break' or 'continue' outside a loop";
-    UNINITIALIZED_VARIABLE = "UNINITIALIZED_VARIABLE", Compiler, Error, false, [], "Local variable read before it is assigned";
+    UNINITIALIZED_VARIABLE = "UNINITIALIZED_VARIABLE", Compiler, Error, false, [], "Local variable read before it is assigned, or a property read by an initializer before its own";
     WRONG_NUMBER_OF_TYPE_ARGUMENTS = "WRONG_NUMBER_OF_TYPE_ARGUMENTS", Compiler, Error, false, [], "Type with the wrong number of type arguments";
     VAR_OVERRIDDEN_BY_VAL = "VAR_OVERRIDDEN_BY_VAL", Compiler, Error, false, [], "'val' overriding a 'var'";
     CANNOT_WEAKEN_ACCESS_PRIVILEGE = "CANNOT_WEAKEN_ACCESS_PRIVILEGE", Compiler, Error, false, [], "Override with less visibility than the overridden member";

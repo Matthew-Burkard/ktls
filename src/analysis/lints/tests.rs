@@ -2917,3 +2917,27 @@ fun g(arr: IntArray, s: StringBuilder) {
     assert_eq!(found.iter().filter(|f| f.starts_with("NON_VARARG_SPREAD")).count(), 1, "{found:#?}");
     has(&found, "NAMED_ARGUMENTS_NOT_ALLOWED: pathname");
 }
+
+#[test]
+fn property_initialization_order() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+class C {
+    val a = b + 1
+    val c = lazyB()
+    val d: () -> Int = { b }
+    val e get() = b
+    init { println(this.b) }
+    val b = 2
+    val f = b
+    fun lazyB() = b
+}
+"#,
+    );
+    let hits: Vec<_> = found.iter().filter(|f| f.starts_with("UNINITIALIZED_VARIABLE")).collect();
+    assert_eq!(hits, vec!["UNINITIALIZED_VARIABLE: b", "UNINITIALIZED_VARIABLE: b"], "{found:#?}");
+}

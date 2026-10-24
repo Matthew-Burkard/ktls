@@ -23,6 +23,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::NAME_REF => value_reference(e, &n, out),
             SyntaxKind::DOT_QUALIFIED_EXPR => abstract_super_call(e, &n, out),
             SyntaxKind::USER_TYPE => enum_entry_type(e, &n, out),
+            SyntaxKind::CLASS_BODY => initialization_order(e, &n, out),
             SyntaxKind::PROPERTY => {
                 const_initializer(e, &n, out);
                 components(e, &n, out);
@@ -214,5 +215,55 @@ fn enum_entry_type(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         out.report(&IS_ENUM_ENTRY, n.text_range(), "'is' over enum entry is prohibited, use comparison instead.", None);
     } else {
         out.report(&ENUM_ENTRY_AS_TYPE, n.text_range(), "Use of enum entry names as types is prohibited, use enum type instead.", None);
+    }
+}
+
+/// `val a = b + 1` before `val b = 2`: initializers and `init` blocks run in order, so `b`
+/// is read before it is set.
+fn initialization_order(e: &Engine, body: &SyntaxNode, out: &mut Sink) {
+    let members: Vec<SyntaxNode> = body.children().collect();
+    // Properties with a backing field set by their initializer.
+    let stored = |p: &SyntaxNode| {
+        ast::PropertyDecl::cast(p.clone()).is_some_and(|d| d.has_initializer() && !d.has_delegate() && d.receiver().is_none() && !has_modifier(p, "const") && !has_modifier(p, "lateinit"))
+            && !p.children().filter(|c| c.kind() == SyntaxKind::PROPERTY_ACCESSOR).any(|a| ast::token(&a, SyntaxKind::IDENT).is_some_and(|t| t.text() == "get"))
+    };
+    for (i, m) in members.iter().enumerate() {
+        let region = match m.kind() {
+            SyntaxKind::PROPERTY => initializer(m),
+            SyntaxKind::CLASS_INITIALIZER => Some(m.clone()),
+            _ => None,
+        };
+        let Some(region) = region else { continue };
+        for r in region.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF) {
+            // Lambdas, objects and local functions may run later.
+            let deferred = |a: &SyntaxNode| matches!(a.kind(), SyntaxKind::LAMBDA_EXPR | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::OBJECT_LITERAL | SyntaxKind::FUN | SyntaxKind::CLASS);
+            if r.ancestors().take_while(|a| *a != region).any(|a| deferred(&a)) || deferred(&region) {
+                continue;
+            }
+            // A bare name or `this.name`.
+            if let Some(p) = r.parent().filter(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR))
+                && p.first_child().as_ref() != Some(&r)
+                && p.first_child().is_none_or(|f| f.kind() != SyntaxKind::THIS_EXPR || f.text() != "this")
+            {
+                continue;
+            }
+            // Assigned rather than read (`b = 1` in an init block).
+            if r.parent().is_some_and(|p| assignment_op(&p).is_some_and(|o| o.kind() == SyntaxKind::EQ) && p.first_child().as_ref() == Some(&r)) {
+                continue;
+            }
+            let defs = e.resolve_name_ref(&r);
+            let [Def::Symbol { sym, .. }] = defs.as_slice() else { continue };
+            if sym.kind != SymbolKind::Property {
+                continue;
+            }
+            let Origin::Source { range, file, .. } = &sym.origin else { continue };
+            if *file != e.path {
+                continue;
+            }
+            let Some(later) = members[i + 1..].iter().find(|l| l.kind() == SyntaxKind::PROPERTY && l.text_range() == *range) else { continue };
+            if stored(later) {
+                out.report(&UNINITIALIZED_VARIABLE, r.text_range(), format!("Variable '{}' must be initialized.", r.text()), None);
+            }
+        }
     }
 }
