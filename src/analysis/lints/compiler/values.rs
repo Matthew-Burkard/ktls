@@ -9,12 +9,14 @@ use crate::symbols::{TypeArg, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
+    // Kotlin 2 rejects what Kotlin 1 deprecated.
+    let k2 = cx.language_version().is_none_or(|v| v >= 200);
     for n in cx.root.descendants() {
         if in_error(&n) {
             continue;
         }
         match n.kind() {
-            SyntaxKind::BINARY_EXPR => binary(e, &n, out),
+            SyntaxKind::BINARY_EXPR => binary(e, k2, &n, out),
             SyntaxKind::WHEN_EXPR => null_in_when(e, &n, out),
             SyntaxKind::IS_EXPR => erased_check(e, &n, out),
             _ => {}
@@ -23,6 +25,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
 }
 
 const INTEGRAL: &[&str] = &["kotlin.Int", "kotlin.Long", "kotlin.Short", "kotlin.Byte"];
+const PRIMITIVES: &[&str] = &["kotlin.Int", "kotlin.Long", "kotlin.Short", "kotlin.Byte", "kotlin.Char", "kotlin.Boolean", "kotlin.Float", "kotlin.Double"];
 
 fn is_zero(n: &SyntaxNode) -> bool {
     n.kind() == SyntaxKind::LITERAL && n.first_token().is_some_and(|t| t.kind() == SyntaxKind::INT_LITERAL && matches!(t.text().to_ascii_lowercase().as_str(), "0" | "0l" | "0x0" | "0b0"))
@@ -43,12 +46,25 @@ fn is_array(fq: &str) -> bool {
     fq == "kotlin.Array" || fq.starts_with("kotlin.") && fq.ends_with("Array") && !fq[7..].contains('.')
 }
 
-fn binary(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+fn binary(e: &Engine, k2: bool, n: &SyntaxNode, out: &mut Sink) {
     let (Some(op), Some((l, r))) = (binary_op(n).or_else(|| assignment_op(n)), binary_operands(n)) else { return };
     match op.kind() {
         SyntaxKind::SLASH | SyntaxKind::PERCENT | SyntaxKind::SLASH_EQ | SyntaxKind::PERCENT_EQ if is_zero(&r) => {
             if certain_type(e, &l, true).as_ref().and_then(non_null_class).is_some_and(|fq| INTEGRAL.contains(&fq)) {
                 out.report(&DIVISION_BY_ZERO, r.text_range(), "Division by zero.", None);
+            }
+        }
+        SyntaxKind::EQ3 | SyntaxKind::NOT_EQ2 => {
+            let primitive = |x: &SyntaxNode| certain_type(e, x, true).as_ref().and_then(non_null_class).filter(|fq| PRIMITIVES.contains(fq)).map(str::to_string);
+            if let (Some(a), Some(b)) = (primitive(&l), primitive(&r)) {
+                let short = |fq: &str| fq.trim_start_matches("kotlin.").to_string();
+                let eq = if op.kind() == SyntaxKind::EQ3 { "==" } else { "!=" };
+                let fix = Fix::replace(format!("Replace with '{eq}'"), op.text_range(), eq);
+                if k2 {
+                    out.report(&FORBIDDEN_IDENTITY_EQUALS, op.text_range(), format!("Identity equality for arguments of types '{}' and '{}' is prohibited.", short(&a), short(&b)), Some(fix));
+                } else {
+                    out.report(&DEPRECATED_IDENTITY_EQUALS, op.text_range(), format!("Identity equality for arguments of types {} and {} is deprecated.", short(&a), short(&b)), Some(fix));
+                }
             }
         }
         SyntaxKind::ELVIS if is_null(&r) => {

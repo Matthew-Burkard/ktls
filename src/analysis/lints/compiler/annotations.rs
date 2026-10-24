@@ -87,7 +87,34 @@ fn source_targets(cx: &Cx, e: &Engine, fq: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// Arguments that are not compile-time constants: project `val`s that are not `const`, and
+/// calls other than array constructors and annotation instantiations.
+fn constant_arguments(e: &Engine, a: &SyntaxNode, out: &mut Sink) {
+    use crate::analysis::ide::infer::Def;
+    use crate::symbols::{Modifiers, SymbolKind};
+    let Some(list) = a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) else { return };
+    for arg in list.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT) {
+        let Some(value) = arg.children().filter(|c| c.kind() != SyntaxKind::VALUE_ARGUMENT_NAME).last() else { continue };
+        let name = match value.kind() {
+            SyntaxKind::NAME_REF => Some(value.clone()),
+            SyntaxKind::DOT_QUALIFIED_EXPR => value.last_child().filter(|l| l.kind() == SyntaxKind::NAME_REF),
+            _ => None,
+        };
+        let Some(name) = name else { continue };
+        let defs = e.resolve_name_ref(&name);
+        let non_const = match defs.as_slice() {
+            [Def::Symbol { sym, .. }] => sym.kind == SymbolKind::Property && !sym.modifiers.has(Modifiers::CONST) && matches!(sym.origin, Origin::Source { .. }),
+            [Def::Local(_)] => true,
+            _ => false,
+        };
+        if non_const {
+            out.report(&ANNOTATION_ARGUMENT_MUST_BE_CONST, value.text_range(), "An annotation argument must be a compile-time constant.", None);
+        }
+    }
+}
+
 fn annotation(cx: &Cx, e: &Engine, a: &SyntaxNode, out: &mut Sink) {
+    constant_arguments(e, a, out);
     // A use-site target (`@get:`, `@field:`) picks the element explicitly.
     if a.children().any(|c| c.kind() == SyntaxKind::ANNOTATION_TARGET) {
         return;

@@ -12,6 +12,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::OBJECT_DECLARATION | SyntaxKind::CLASS => type_parameters(&n, out),
             SyntaxKind::ANONYMOUS_FUNCTION => anonymous_name(&n, out),
             SyntaxKind::FUN if has_modifier(&n, "tailrec") => tailrec(&n, out),
+            SyntaxKind::PROPERTY if has_modifier(&n, "lateinit") => unnecessary_lateinit(&n, out),
             _ => {}
         }
     }
@@ -57,4 +58,25 @@ fn tailrec(f: &SyntaxNode, out: &mut Sink) {
         let end = kw.next_token().filter(|t| t.kind().is_trivia()).map_or(kw.text_range().end(), |t| t.text_range().end());
         out.report(&NO_TAIL_CALLS_FOUND, name.text_range(), "A function is marked as tail-recursive but no tail calls are found.", Some(Fix::delete("Remove 'tailrec' modifier", TextRange::new(kw.text_range().start(), end))));
     }
+}
+
+/// A `lateinit var` of a class without secondary constructors that an `init` block
+/// assigns directly (not in a branch or lambda).
+fn unnecessary_lateinit(p: &SyntaxNode, out: &mut Sink) {
+    let Some(body) = p.parent().filter(|b| b.kind() == SyntaxKind::CLASS_BODY) else { return };
+    let Some(name) = name_token(p).map(|t| ast::ident_text(&t)) else { return };
+    if body.children().any(|m| m.kind() == SyntaxKind::SECONDARY_CONSTRUCTOR) {
+        return;
+    }
+    let assigned = body.children().filter(|m| m.kind() == SyntaxKind::CLASS_INITIALIZER).flat_map(|i| i.children().filter(|c| c.kind() == SyntaxKind::BLOCK).flat_map(|b| b.children().collect::<Vec<_>>()).collect::<Vec<_>>()).any(|s| {
+        assignment_op(&s).is_some_and(|o| o.kind() == SyntaxKind::EQ)
+            && s.first_child().is_some_and(|t| t.text() == name.as_str() || t.text() == format!("this.{name}").as_str())
+    });
+    // Only when nothing else in an `init` block or initializer could read it first.
+    if !assigned {
+        return;
+    }
+    let Some(kw) = modifiers(p).and_then(|m| m.modifiers().find(|t| t.text() == "lateinit")) else { return };
+    let end = kw.next_token().filter(|t| t.kind().is_trivia()).map_or(kw.text_range().end(), |t| t.text_range().end());
+    out.report(&UNNECESSARY_LATEINIT, kw.text_range(), "Lateinit is unnecessary: definitely initialized in constructors", Some(Fix::delete("Remove 'lateinit' modifier", TextRange::new(kw.text_range().start(), end))));
 }

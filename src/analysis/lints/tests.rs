@@ -2614,3 +2614,43 @@ fun f(p: P, s: String) {
     let out = fixed("package a\n\ndata class P(val name: String, val age: Int)\nfun f(p: P) = p.copy(\"b\", 3)\n", "CopyWithoutNamedArguments");
     assert!(out.contains("p.copy(name = \"b\", age = 3)"), "{out}");
 }
+
+#[test]
+fn identity_lateinit_and_constant_arguments() {
+    let found = compiler(
+        r#"package a
+
+class C {
+    lateinit var a: String
+    lateinit var b: String
+    init {
+        a = "x"
+        if (a.isEmpty()) b = "y"
+    }
+}
+"#,
+    );
+    has(&found, "UNNECESSARY_LATEINIT: lateinit");
+    assert_eq!(found.iter().filter(|f| f.starts_with("UNNECESSARY_LATEINIT")).count(), 1, "{found:#?}");
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+const val NAME = "n"
+val other = "o"
+
+annotation class Ann(val v: String)
+
+@Ann(NAME) class A
+@Ann(other) class B
+
+fun f(x: Int, y: Int, s: String, t: String) = x === y || s === t
+"#,
+    );
+    has(&found, "ANNOTATION_ARGUMENT_MUST_BE_CONST: other");
+    assert_eq!(found.iter().filter(|f| f.starts_with("ANNOTATION_ARGUMENT_MUST_BE_CONST")).count(), 1, "{found:#?}");
+    has(&found, "FORBIDDEN_IDENTITY_EQUALS: ===");
+    assert_eq!(found.iter().filter(|f| f.starts_with("FORBIDDEN_IDENTITY_EQUALS")).count(), 1, "{found:#?}");
+}

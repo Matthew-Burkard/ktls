@@ -229,6 +229,8 @@ rules! {
     TAILREC_ON_VIRTUAL_MEMBER_ERROR = "TAILREC_ON_VIRTUAL_MEMBER_ERROR", Compiler, Error, false, [], "'tailrec' on an open, abstract or interface member";
     WRONG_ANNOTATION_TARGET = "WRONG_ANNOTATION_TARGET", Compiler, Error, false, [], "Annotation whose '@Target' excludes the annotated element";
     JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION = "JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION", Compiler, Error, false, [], "'@JvmStatic' on a member of a class or at top level";
+    FORBIDDEN_IDENTITY_EQUALS = "FORBIDDEN_IDENTITY_EQUALS", Compiler, Error, false, [], "'===' or '!==' between primitive values (Kotlin 2)";
+    ANNOTATION_ARGUMENT_MUST_BE_CONST = "ANNOTATION_ARGUMENT_MUST_BE_CONST", Compiler, Error, false, [], "Annotation argument that is not a compile-time constant";
     SMARTCAST_IMPOSSIBLE = "SMARTCAST_IMPOSSIBLE", Compiler, Error, false, [], "Member of a nullable 'var', open, delegated or custom-getter property used after a null check";
     CANNOT_CHECK_FOR_ERASED = "CANNOT_CHECK_FOR_ERASED", Compiler, Error, false, [], "'is' check against type arguments erased at run time";
     TYPE_VARIANCE_CONFLICT = "TYPE_VARIANCE_CONFLICT", Compiler, Error, false, [], "'out' type parameter in an 'in' position (or the reverse) of a member";
@@ -253,6 +255,8 @@ rules! {
     EXTENSION_SHADOWED_BY_MEMBER = "EXTENSION_SHADOWED_BY_MEMBER", Compiler, Warning, false, [], "Extension with the signature of a member of its receiver";
     REDUNDANT_PROJECTION = "REDUNDANT_PROJECTION", Compiler, Warning, true, [], "'out' projection of an 'out' type parameter (or 'in' of an 'in' one)";
     PLATFORM_CLASS_MAPPED_TO_KOTLIN = "PLATFORM_CLASS_MAPPED_TO_KOTLIN", Compiler, Warning, false, [], "Java class used where its Kotlin counterpart should be ('java.lang.Integer', 'java.util.List')";
+    DEPRECATED_IDENTITY_EQUALS = "DEPRECATED_IDENTITY_EQUALS", Compiler, Warning, false, [], "'===' or '!==' between primitive values (Kotlin 1)";
+    UNNECESSARY_LATEINIT = "UNNECESSARY_LATEINIT", Compiler, Warning, true, [], "'lateinit' property assigned in an 'init' block anyway";
     NO_TAIL_CALLS_FOUND = "NO_TAIL_CALLS_FOUND", Compiler, Warning, false, [], "'tailrec' function that never calls itself";
     DIVISION_BY_ZERO = "DIVISION_BY_ZERO", Compiler, Warning, false, [], "Integer division or remainder by the constant zero";
     USELESS_ELVIS_RIGHT_IS_NULL = "USELESS_ELVIS_RIGHT_IS_NULL", Compiler, Warning, true, [], "'?: null'";
