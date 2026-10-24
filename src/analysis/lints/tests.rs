@@ -2498,3 +2498,40 @@ open class C {
     let hits: Vec<_> = found.iter().filter(|f| f.starts_with("SMARTCAST_IMPOSSIBLE")).collect();
     assert_eq!(hits, vec!["SMARTCAST_IMPOSSIBLE: name", "SMARTCAST_IMPOSSIBLE: this.name", "SMARTCAST_IMPOSSIBLE: computed", "SMARTCAST_IMPOSSIBLE: opened"], "{found:#?}");
 }
+
+#[test]
+fn annotation_targets() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+@Target(AnnotationTarget.FUNCTION)
+annotation class OnFun
+
+@Target(AnnotationTarget.CLASS, AnnotationTarget.PROPERTY)
+annotation class OnClassOrProperty
+
+@OnFun
+class C(@OnClassOrProperty val p: Int, @OnClassOrProperty q: Int) {
+    @JvmField val f = 1
+    @JvmField fun g() {}
+    @get:JvmName("h") val h = 1
+    @OnFun fun ok() {}
+    @JvmStatic fun notStatic() {}
+    companion object {
+        @JvmStatic fun fine() {}
+    }
+}
+
+interface I { @JvmField val x: Int }
+
+@JvmStatic fun top() {}
+"#,
+    );
+    let wrong: Vec<_> = found.iter().filter(|f| f.starts_with("WRONG_ANNOTATION_TARGET")).collect();
+    assert_eq!(wrong, vec!["WRONG_ANNOTATION_TARGET: @OnFun", "WRONG_ANNOTATION_TARGET: @OnClassOrProperty", "WRONG_ANNOTATION_TARGET: @JvmField", "WRONG_ANNOTATION_TARGET: @JvmField"], "{found:#?}");
+    let statics: Vec<_> = found.iter().filter(|f| f.starts_with("JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION")).collect();
+    assert_eq!(statics.len(), 2, "{found:#?}");
+}

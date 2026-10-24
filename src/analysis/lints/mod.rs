@@ -227,6 +227,8 @@ rules! {
     TYPE_PARAMETERS_IN_ENUM = "TYPE_PARAMETERS_IN_ENUM", Compiler, Error, false, [], "Enum class with type parameters";
     ANONYMOUS_FUNCTION_WITH_NAME = "ANONYMOUS_FUNCTION_WITH_NAME", Compiler, Error, false, [], "Anonymous function ('fun' expression) with a name";
     TAILREC_ON_VIRTUAL_MEMBER_ERROR = "TAILREC_ON_VIRTUAL_MEMBER_ERROR", Compiler, Error, false, [], "'tailrec' on an open, abstract or interface member";
+    WRONG_ANNOTATION_TARGET = "WRONG_ANNOTATION_TARGET", Compiler, Error, false, [], "Annotation whose '@Target' excludes the annotated element";
+    JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION = "JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION", Compiler, Error, false, [], "'@JvmStatic' on a member of a class or at top level";
     SMARTCAST_IMPOSSIBLE = "SMARTCAST_IMPOSSIBLE", Compiler, Error, false, [], "Member of a nullable 'var', open, delegated or custom-getter property used after a null check";
     CANNOT_CHECK_FOR_ERASED = "CANNOT_CHECK_FOR_ERASED", Compiler, Error, false, [], "'is' check against type arguments erased at run time";
     TYPE_VARIANCE_CONFLICT = "TYPE_VARIANCE_CONFLICT", Compiler, Error, false, [], "'out' type parameter in an 'in' position (or the reverse) of a member";

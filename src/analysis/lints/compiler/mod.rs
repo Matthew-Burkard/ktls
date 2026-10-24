@@ -6,6 +6,7 @@
 //! stays silent when part of the picture (smart casts, unknown lambda receivers, unresolved
 //! supertypes) is missing.
 
+mod annotations;
 mod certain;
 mod dataflow;
 mod declarations;
@@ -54,4 +55,5 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     restrictions::check(cx, out);
     values::check(cx, out);
     smartcast::check(cx, out);
+    annotations::check(cx, out);
 }
