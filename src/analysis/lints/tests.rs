@@ -2799,3 +2799,65 @@ fun use(file: java.io.File) {
     assert_eq!(codes("CONST_VAL_WITH_NON_CONST_INITIALIZER"), vec!["CONST_VAL_WITH_NON_CONST_INITIALIZER: b", "CONST_VAL_WITH_NON_CONST_INITIALIZER: compute()"], "{found:#?}");
     assert_eq!(codes("COMPONENT_FUNCTION_MISSING"), vec!["COMPONENT_FUNCTION_MISSING: p", "COMPONENT_FUNCTION_MISSING: q"], "{found:#?}");
 }
+
+#[test]
+fn more_declaration_restrictions() {
+    let found = compiler(
+        r#"package a
+
+class Outer {
+    typealias Nested = Int
+    companion object {}
+    companion object Second {}
+    inner class Ok
+}
+object O {
+    inner class Bad
+    companion object {}
+    constructor()
+}
+interface I : Runnable by Runnable {}
+class P(val x: Int) {
+    constructor() : this(1)
+    constructor(s: String) {}
+}
+data class D(vararg val xs: Int)
+typealias Bounded<T : Any> = List<T>
+fun <T : String.() -> Unit> g(t: T) {}
+fun f(n: Int) {
+    interface LocalI
+    object LocalO
+    enum class LocalE { A }
+    when (var x = n) { else -> {} }
+    when { n > 1, n < 0 -> {} }
+}
+"#,
+    );
+    for code in [
+        "TOPLEVEL_TYPEALIASES_ONLY: Nested",
+        "MANY_COMPANION_OBJECTS: companion",
+        "WRONG_MODIFIER_CONTAINING_DECLARATION: inner",
+        "COMPANION_OBJECT_NOT_ALLOWED: companion",
+        "SECONDARY_CONSTRUCTOR_IN_OBJECT: constructor",
+        "DELEGATION_IN_INTERFACE: Runnable by Runnable",
+        "PRIMARY_CONSTRUCTOR_DELEGATION_CALL_EXPECTED: constructor",
+        "DATA_CLASS_VARARG_PARAMETER: vararg",
+        "BOUND_ON_TYPE_ALIAS_PARAMETER_NOT_ALLOWED: Any",
+        "UPPER_BOUND_IS_EXTENSION_FUNCTION_TYPE: String.() -> Unit",
+        "LOCAL_INTERFACE_NOT_ALLOWED: LocalI",
+        "LOCAL_OBJECT_NOT_ALLOWED: LocalO",
+        "LOCAL_ENUM_NOT_ALLOWED: LocalE",
+        "ILLEGAL_DECLARATION_IN_WHEN_SUBJECT: var x = n",
+        "COMMA_IN_WHEN_CONDITION_WITHOUT_ARGUMENT: n > 1, n < 0",
+    ] {
+        has(&found, code);
+    }
+    assert_eq!(found.iter().filter(|f| f.starts_with("PRIMARY_CONSTRUCTOR_DELEGATION_CALL_EXPECTED")).count(), 1, "{found:#?}");
+    assert_eq!(found.iter().filter(|f| f.starts_with("WRONG_MODIFIER_CONTAINING_DECLARATION")).count(), 1, "{found:#?}");
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler("package a\n\nenum class Color { RED, GREEN }\nfun f(c: Any): Boolean {\n    val r: Color.RED? = null\n    return c is Color.RED || r == null\n}\n");
+    has(&found, "ENUM_ENTRY_AS_TYPE: Color.RED");
+    has(&found, "IS_ENUM_ENTRY: Color.RED");
+}

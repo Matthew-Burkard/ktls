@@ -22,6 +22,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         match n.kind() {
             SyntaxKind::NAME_REF => value_reference(e, &n, out),
             SyntaxKind::DOT_QUALIFIED_EXPR => abstract_super_call(e, &n, out),
+            SyntaxKind::USER_TYPE => enum_entry_type(e, &n, out),
             SyntaxKind::PROPERTY => {
                 const_initializer(e, &n, out);
                 components(e, &n, out);
@@ -185,5 +186,33 @@ fn components(e: &Engine, p: &SyntaxNode, out: &mut Sink) {
         if e.component_defs(&entry).is_some_and(|defs| defs.is_empty()) {
             out.report(&COMPONENT_FUNCTION_MISSING, entry.text_range(), format!("Destructuring declaration initializer of type '{}' must have a 'component{}()' function.", shown(&t), i + 1), None);
         }
+    }
+}
+
+/// `x is Color.RED` and `val c: Color.RED`: an enum entry is not a type.
+fn enum_entry_type(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    if n.parent().is_some_and(|p| p.kind() == SyntaxKind::USER_TYPE) {
+        return;
+    }
+    let segments: Vec<SyntaxNode> = n.children().filter(|c| c.kind() == SyntaxKind::USER_TYPE_SEGMENT).collect();
+    if segments.len() < 2 || segments.iter().any(|s| s.children().any(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST)) {
+        return;
+    }
+    let Some(names) = segments.iter().map(|s| ast::token(s, SyntaxKind::IDENT).map(|t| ast::ident_text(&t))).collect::<Option<Vec<_>>>() else { return };
+    let (last, prefix) = names.split_last().expect("two segments");
+    let prefix: Vec<&str> = prefix.iter().map(String::as_str).collect();
+    let Some(fq) = e.classifier_named(n, &prefix) else { return };
+    let Some(c) = e.classifier(&fq) else { return };
+    if c.symbol().kind != SymbolKind::Enum || e.classifier(&format!("{fq}.{last}")).is_some() {
+        return;
+    }
+    if !e.all_static_members(&c).1.iter().any(|(m, _)| m.kind == SymbolKind::EnumEntry && m.name == *last) {
+        return;
+    }
+    let is_check = n.ancestors().skip(1).take_while(|a| !matches!(a.kind(), SyntaxKind::BLOCK | SyntaxKind::FUN | SyntaxKind::CLASS_BODY)).any(|a| a.kind() == SyntaxKind::IS_EXPR || a.kind() == SyntaxKind::WHEN_CONDITION && ast::token(&a, SyntaxKind::IS_KW).is_some());
+    if is_check {
+        out.report(&IS_ENUM_ENTRY, n.text_range(), "'is' over enum entry is prohibited, use comparison instead.", None);
+    } else {
+        out.report(&ENUM_ENTRY_AS_TYPE, n.text_range(), "Use of enum entry names as types is prohibited, use enum type instead.", None);
     }
 }
