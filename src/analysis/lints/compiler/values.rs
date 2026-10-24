@@ -44,7 +44,7 @@ fn is_array(fq: &str) -> bool {
 }
 
 fn binary(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
-    let (Some(op), Some((l, r))) = (binary_op(n), binary_operands(n)) else { return };
+    let (Some(op), Some((l, r))) = (binary_op(n).or_else(|| assignment_op(n)), binary_operands(n)) else { return };
     match op.kind() {
         SyntaxKind::SLASH | SyntaxKind::PERCENT | SyntaxKind::SLASH_EQ | SyntaxKind::PERCENT_EQ if is_zero(&r) => {
             if certain_type(e, &l, true).as_ref().and_then(non_null_class).is_some_and(|fq| INTEGRAL.contains(&fq)) {

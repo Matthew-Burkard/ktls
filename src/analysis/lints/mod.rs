@@ -303,6 +303,8 @@ rules! {
     REDUNDANT_ENUM_CONSTRUCTOR_INVOCATION = "RedundantEnumConstructorInvocation", Redundancy, Warning, true, [], "Empty '()' after an enum entry";
     REDUNDANT_SUSPEND = "RedundantSuspendModifier", Redundancy, Warning, true, [], "'suspend' on a function that calls no suspend functions";
     REDUNDANT_COMPANION_REFERENCE = "RedundantCompanionReference", Redundancy, Warning, true, [], "'Companion' in 'C.Companion.member' where 'C.member' means the same";
+    REDUNDANT_ELVIS_RETURN_NULL = "RedundantElvisReturnNull", Redundancy, Warning, true, [], "'return x ?: return null'";
+    REDUNDANT_OVERRIDE = "RedundantOverride", Redundancy, Warning, true, [], "Override that only calls the super implementation";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
@@ -323,10 +325,21 @@ rules! {
     IGNORE_CASE_EQUALS = "ReplaceWithIgnoreCaseEquals", Style, Info, false, [], "'a.lowercase() == b.lowercase()' instead of 'a.equals(b, ignoreCase = true)'";
     JAVA_STATIC_METHOD = "ReplaceJavaStaticMethodWithKotlinAnalog", Style, Info, false, [], "Java static method with a Kotlin counterpart ('Math.max', 'System.out.println', 'Arrays.asList')";
     READLN = "ReplaceReadLineWithReadln", Style, Info, false, [], "'readLine()!!' instead of 'readln()', 'readLine()' instead of 'readlnOrNull()'";
+    COPY_WITHOUT_NAMED_ARGUMENTS = "CopyWithoutNamedArguments", Style, Info, false, [], "Data class 'copy' called with positional arguments";
+    SUBSTRING_WITH_TAKE = "ReplaceSubstringWithTake", Style, Info, false, [], "'s.substring(0, n)' instead of 's.take(n)'";
+    SUBSTRING_WITH_DROP_LAST = "ReplaceSubstringWithDropLast", Style, Info, false, [], "'s.substring(0, s.length - n)' instead of 's.dropLast(n)'";
+    PROTECTED_IN_FINAL = "ProtectedInFinal", Style, Info, false, [], "'protected' member of a final class (effectively 'private')";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
     MAIN_RETURN_UNIT = "MainFunctionReturnUnit", Bugs, Warning, false, [], "'main' function that does not return 'Unit' (not an entry point)";
+    LAMBDA_EXPRESSION_BODY = "FunctionWithLambdaExpressionBody", Bugs, Warning, false, [], "'fun f() = { … }' returning a lambda instead of running it";
+    IMPLICIT_NULLABLE_NOTHING = "ImplicitNullableNothingType", Bugs, Warning, false, [], "'var x = null' or an open 'fun f() = null' of implicit type 'Nothing?'";
+    DELEGATION_TO_VAR = "DelegationToVarProperty", Bugs, Warning, false, [], "Class delegation ('by') to a 'var' constructor property";
+    WRAP_UNARY_OPERATOR = "WrapUnaryOperator", Bugs, Warning, false, [], "'-1.inc()': the call binds tighter than the sign";
+    SUSPICIOUS_COLLECTION_REASSIGNMENT = "SuspiciousCollectionReassignment", Bugs, Warning, false, [], "'+=' on a 'var' of read-only collection type (creates a new collection)";
+    GLOBAL_COROUTINE_USAGE = "GlobalCoroutineUsage", Bugs, Warning, false, [], "Use of 'GlobalScope'";
+    LEAKING_THIS = "LeakingThis", Bugs, Warning, false, [], "Open member called, or 'this' passed, during construction of a non-final class";
     SELF_ASSIGNMENT = "SelfAssignment", Bugs, Warning, false, [], "Variable assigned to itself";
     EQUALS_OR_HASH_CODE = "EqualsOrHashCode", Bugs, Warning, false, [], "Class overrides only one of 'equals()' and 'hashCode()'";
     ARRAY_IN_DATA_CLASS = "ArrayInDataClass", Bugs, Warning, false, [], "Array property in a data class without custom 'equals()'/'hashCode()'";

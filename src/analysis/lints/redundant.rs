@@ -23,7 +23,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                     SyntaxKind::FUN => {
                         unit_return_type(&n, out);
                         redundant_suspend(cx, &n, out);
+                        redundant_override(cx, &n, out);
                     }
+                    SyntaxKind::RETURN_EXPR => elvis_return_null(cx, &n, out),
                     SyntaxKind::IF_EXPR => redundant_if(&n, out),
                     SyntaxKind::CLASS_BODY => empty_class_body(&n, out),
                     SyntaxKind::PRIMARY_CONSTRUCTOR => {
@@ -866,4 +868,58 @@ fn companion_reference(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     }
     let range = TextRange::new(class.text_range().end(), companion.text_range().end());
     out.report(&REDUNDANT_COMPANION_REFERENCE, companion.text_range(), "Redundant Companion reference", Some(Fix::delete("Remove redundant Companion reference", range)));
+}
+
+/// `return x ?: return null`.
+fn elvis_return_null(cx: &Cx, ret: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&REDUNDANT_ELVIS_RETURN_NULL) || ret.children().any(|c| c.kind() == SyntaxKind::LABEL_QUALIFIER) {
+        return;
+    }
+    let Some(value) = ret.children().find(|c| c.kind() == SyntaxKind::BINARY_EXPR) else { return };
+    let (Some(op), Some((l, r))) = (binary_op(&value), binary_operands(&value)) else { return };
+    if op.kind() != SyntaxKind::ELVIS || r.kind() != SyntaxKind::RETURN_EXPR || r.children().any(|c| c.kind() == SyntaxKind::LABEL_QUALIFIER) || r.text().to_string().split_whitespace().collect::<Vec<_>>() != ["return", "null"] {
+        return;
+    }
+    let range = TextRange::new(l.text_range().end(), r.text_range().end());
+    out.report(&REDUNDANT_ELVIS_RETURN_NULL, TextRange::new(op.text_range().start(), r.text_range().end()), "Redundant '?: return null'", Some(Fix::delete("Remove redundant '?: return null'", range)));
+}
+
+/// `override fun f(a: A) = super.f(a)`.
+fn redundant_override(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&REDUNDANT_OVERRIDE) || !has_modifier(f, "override") || has_comments(f) {
+        return;
+    }
+    let Some(m) = modifiers(f) else { return };
+    // Anything besides `override` (visibility, `final`, annotations) changes something.
+    if m.annotations().next().is_some() || m.modifiers().any(|t| t.text() != "override") {
+        return;
+    }
+    // Data classes generate `equals`/`hashCode`/`toString` unless overridden.
+    if f.parent().and_then(|b| b.parent()).is_some_and(|c| has_modifier(&c, "data") || has_modifier(&c, "value") || has_modifier(&c, "enum")) {
+        return;
+    }
+    let Some(decl) = ast::FunDecl::cast(f.clone()) else { return };
+    let Some(name) = name_token(f) else { return };
+    let value = match decl.body_block() {
+        Some(b) => {
+            let Some(s) = only_statement(b.syntax()) else { return };
+            if s.kind() == SyntaxKind::RETURN_EXPR { s.first_child() } else { Some(s) }
+        }
+        None => f.children().find(|c| c.text_range().start() >= ast::token(f, SyntaxKind::EQ).map_or(f.text_range().end(), |t| t.text_range().end())),
+    };
+    let Some(value) = value.filter(|v| v.kind() == SyntaxKind::DOT_QUALIFIED_EXPR) else { return };
+    let mut parts = value.children();
+    let (Some(sup), Some(call)) = (parts.next(), parts.next()) else { return };
+    if sup.kind() != SyntaxKind::SUPER_EXPR || sup.text() != "super" || call.kind() != SyntaxKind::CALL_EXPR || call.first_child().is_none_or(|c| c.text() != name.text()) || call.children().any(|c| matches!(c.kind(), SyntaxKind::LAMBDA_ARGUMENT | SyntaxKind::TYPE_ARGUMENT_LIST)) {
+        return;
+    }
+    let params: Vec<String> = decl.parameters().iter().filter_map(|p| name_token(p.syntax()).map(|t| ast::ident_text(&t))).collect();
+    let args: Option<Vec<String>> = call
+        .children()
+        .find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST)
+        .map(|l| l.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).map(|a| if a.children().count() == 1 && ast::token(&a, SyntaxKind::STAR).is_none() { a.text().to_string() } else { String::new() }).collect());
+    if args.as_ref() != Some(&params) {
+        return;
+    }
+    out.report(&REDUNDANT_OVERRIDE, name.text_range(), "Redundant overriding method", Some(Fix::delete("Remove redundant overriding method", deletion_range(cx.text, f.text_range()))));
 }

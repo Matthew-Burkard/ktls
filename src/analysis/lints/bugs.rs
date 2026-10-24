@@ -18,13 +18,23 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::BINARY_EXPR => {
                 nan_equality(&n, out);
                 self_assignment(cx, &n, out);
+                collection_reassignment(cx, &n, out);
             }
             SyntaxKind::CLASS => {
                 equals_hash_code(&n, out);
                 array_in_data_class(&n, out);
+                leaking_this(cx, &n, out);
             }
             SyntaxKind::CALL_EXPR => throwable_not_thrown(cx, &n, out),
-            SyntaxKind::FUN => main_return_unit(cx, &n, out),
+            SyntaxKind::FUN => {
+                main_return_unit(cx, &n, out);
+                lambda_expression_body(cx, &n, out);
+                implicit_nullable_nothing(cx, &n, out);
+            }
+            SyntaxKind::PROPERTY => implicit_nullable_nothing(cx, &n, out),
+            SyntaxKind::DELEGATED_SUPER_TYPE_ENTRY => delegation_to_var(cx, &n, out),
+            SyntaxKind::PREFIX_EXPR => wrap_unary(cx, &n, out),
+            SyntaxKind::NAME_REF if n.text() == "GlobalScope" => global_scope(cx, &n, out),
             SyntaxKind::PROPERTY_ACCESSOR => recursive_accessor(cx, &n, out),
             SyntaxKind::NAME_REF if n.text() == "it" => nested_it(cx, &n, out),
             _ => {}
@@ -305,4 +315,171 @@ fn main_return_unit(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
         return;
     }
     out.report(&MAIN_RETURN_UNIT, name.text_range(), format!("'main' should return 'Unit' (it returns '{}'), or it is not an entry point", result.display()), None);
+}
+
+/// The expression after `=` in a declaration.
+fn expression_body(decl: &SyntaxNode) -> Option<SyntaxNode> {
+    let eq = ast::token(decl, SyntaxKind::EQ)?;
+    decl.children().find(|c| c.text_range().start() >= eq.text_range().end())
+}
+
+/// `fun f() = { … }`: the function returns the lambda.
+fn lambda_expression_body(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&LAMBDA_EXPRESSION_BODY) {
+        return;
+    }
+    let Some(decl) = ast::FunDecl::cast(f.clone()) else { return };
+    if decl.return_type().is_some() {
+        return;
+    }
+    let Some(body) = expression_body(f).filter(|b| b.kind() == SyntaxKind::LAMBDA_EXPR) else { return };
+    let Some(eq) = ast::token(f, SyntaxKind::EQ) else { return };
+    let fix = (!body.children().any(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST)).then(|| Fix::delete("Remove '=' (run the block)", TextRange::new(eq.text_range().start(), body.text_range().start())));
+    out.report(&LAMBDA_EXPRESSION_BODY, eq.text_range(), "Function returns a lambda: '= { … }' is not a block body", fix);
+}
+
+/// `var x = null`, or an open/override `fun f() = null`: implicitly of type `Nothing?`.
+fn implicit_nullable_nothing(cx: &Cx, d: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&IMPLICIT_NULLABLE_NOTHING) || ast::child::<ast::TypeRef>(d).is_some_and(|t| d.kind() == SyntaxKind::PROPERTY || ast::FunDecl::cast(d.clone()).and_then(|f| f.return_type()).is_some_and(|r| r.syntax() == t.syntax())) {
+        return;
+    }
+    let Some(body) = expression_body(d) else { return };
+    if body.kind() != SyntaxKind::LITERAL || body.first_token().is_none_or(|t| t.kind() != SyntaxKind::NULL_KW) {
+        return;
+    }
+    let applies = match d.kind() {
+        SyntaxKind::PROPERTY => ast::PropertyDecl::cast(d.clone()).is_some_and(|p| p.is_var() && p.type_ref().is_none()) || (has_modifier(d, "open") || has_modifier(d, "override")) && ast::PropertyDecl::cast(d.clone()).is_some_and(|p| p.type_ref().is_none()),
+        _ => (has_modifier(d, "open") || has_modifier(d, "override")) && ast::FunDecl::cast(d.clone()).is_some_and(|f| f.return_type().is_none()),
+    };
+    if !applies {
+        return;
+    }
+    let Some(name) = name_token(d) else { return };
+    out.report(&IMPLICIT_NULLABLE_NOTHING, name.text_range(), "Implicit 'Nothing?' type", None);
+}
+
+/// `class A(var x: I) : I by x`: later assignments to `x` do not change the delegate.
+fn delegation_to_var(cx: &Cx, entry: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&DELEGATION_TO_VAR) {
+        return;
+    }
+    let Some(target) = entry.children().last().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let Some(class) = entry.ancestors().find(|a| a.kind() == SyntaxKind::CLASS) else { return };
+    let Some(ctor) = class.children().find(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR) else { return };
+    let param = ctor.descendants().filter(|d| d.kind() == SyntaxKind::VALUE_PARAMETER).find(|p| name_token(p).is_some_and(|t| target.text() == t.text()));
+    let Some(var) = param.and_then(|p| ast::token(&p, SyntaxKind::VAR_KW)) else { return };
+    out.report(&DELEGATION_TO_VAR, target.text_range(), "Delegating to 'var' property does not take its changes into account", Some(Fix::replace("Change 'var' to 'val'", var.text_range(), "val")));
+}
+
+/// `-1.inc()` is `-(1.inc())`.
+fn wrap_unary(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&WRAP_UNARY_OPERATOR) {
+        return;
+    }
+    let Some(op) = binary_op(n).filter(|o| matches!(o.kind(), SyntaxKind::MINUS | SyntaxKind::PLUS)) else { return };
+    let Some(operand) = n.children().find(|c| c.kind() != SyntaxKind::OPERATION_REFERENCE) else { return };
+    if operand.kind() != SyntaxKind::DOT_QUALIFIED_EXPR {
+        return;
+    }
+    let Some(lit) = operand.first_child().filter(|l| l.kind() == SyntaxKind::LITERAL && l.first_token().is_some_and(|t| matches!(t.kind(), SyntaxKind::INT_LITERAL | SyntaxKind::FLOAT_LITERAL))) else { return };
+    let rest = &operand.text().to_string()[usize::from(lit.text_range().end() - operand.text_range().start())..];
+    let fix = Fix::replace("Wrap unary operator and value with ()", n.text_range(), format!("({}{}){rest}", op.text(), lit.text()));
+    out.report(&WRAP_UNARY_OPERATOR, n.text_range(), "Wrap unary operator and value with ()", Some(fix));
+}
+
+/// `list += x` on a `var list: List<T>`: a new list is created each time.
+fn collection_reassignment(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let Some(op) = assignment_op(n).filter(|o| matches!(o.kind(), SyntaxKind::PLUS_EQ | SyntaxKind::MINUS_EQ)) else { return };
+    if !cx.on(&SUSPICIOUS_COLLECTION_REASSIGNMENT) {
+        return;
+    }
+    let Some((target, value)) = binary_operands(n) else { return };
+    if target.kind() != SyntaxKind::NAME_REF {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let var = match e.resolve_name_ref(&target).as_slice() {
+        [Def::Local(l)] => l.kind == LocalKind::Var,
+        [Def::Symbol { sym, .. }] => sym.kind == SymbolKind::Property && sym.modifiers.has(crate::symbols::Modifiers::VAR),
+        _ => false,
+    };
+    if !var {
+        return;
+    }
+    let Some(t) = e.type_of(&target) else { return };
+    let Some(kind) = fq_of(&t).and_then(|fq| match fq {
+        "kotlin.collections.List" => Some("list"),
+        "kotlin.collections.Set" => Some("set"),
+        "kotlin.collections.Map" => Some("map"),
+        _ => None,
+    }) else {
+        return;
+    };
+    let sign = if op.kind() == SyntaxKind::PLUS_EQ { "+" } else { "-" };
+    let fix = Fix::replace("Replace with ordinary assignment", n.text_range(), format!("{} = {} {sign} {}", target.text(), target.text(), value.text()));
+    out.report(&SUSPICIOUS_COLLECTION_REASSIGNMENT, op.text_range(), format!("'{}' creates a new {kind} under the hood", op.text()), Some(fix));
+}
+
+fn global_scope(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&GLOBAL_COROUTINE_USAGE) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    if matches!(e.resolve_name_ref(n).as_slice(), [Def::Symbol { sym, .. }] if sym.fq_name == "kotlinx.coroutines.GlobalScope") {
+        out.report(&GLOBAL_COROUTINE_USAGE, n.text_range(), "Usage of a GlobalScope instance is highly discouraged", None);
+    }
+}
+
+/// In a non-final class, open members used (or `this` passed on) while constructing:
+/// initializer blocks, property initializers and constructor bodies.
+fn leaking_this(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&LEAKING_THIS) || !(has_modifier(class, "open") || has_modifier(class, "abstract") || has_modifier(class, "sealed")) || ast::token(class, SyntaxKind::INTERFACE_KW).is_some() {
+        return;
+    }
+    let Some(body) = class.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY) else { return };
+    let Some(e) = cx.engine() else { return };
+    let mut regions: Vec<SyntaxNode> = Vec::new();
+    for m in body.children() {
+        match m.kind() {
+            SyntaxKind::CLASS_INITIALIZER => regions.push(m.clone()),
+            SyntaxKind::SECONDARY_CONSTRUCTOR => regions.extend(m.children().filter(|c| c.kind() == SyntaxKind::BLOCK)),
+            SyntaxKind::PROPERTY if ast::PropertyDecl::cast(m.clone()).is_some_and(|p| !p.has_delegate()) => regions.extend(expression_body(&m)),
+            _ => {}
+        }
+    }
+    for region in regions {
+        for n in region.descendants() {
+            // Code in lambdas and local declarations may run later.
+            if n.ancestors().take_while(|a| *a != region).any(|a| matches!(a.kind(), SyntaxKind::LAMBDA_EXPR | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::OBJECT_LITERAL | SyntaxKind::FUN | SyntaxKind::CLASS)) {
+                continue;
+            }
+            match n.kind() {
+                SyntaxKind::NAME_REF => {
+                    // A bare name or `this.name`.
+                    let qualified = n.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(&n) && p.first_child().is_none_or(|f| f.kind() != SyntaxKind::THIS_EXPR));
+                    let callee_of = n.parent().is_some_and(|p| p.kind() == SyntaxKind::CALL_EXPR) && n.parent().and_then(|p| p.parent()).is_some_and(|g| matches!(g.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && g.first_child().is_some_and(|f| f.kind() != SyntaxKind::THIS_EXPR) && g.first_child() != n.parent());
+                    if qualified || callee_of {
+                        continue;
+                    }
+                    let defs = e.resolve_name_ref(&n);
+                    let [Def::Symbol { sym, .. }] = defs.as_slice() else { continue };
+                    let open = sym.modifiers.has(crate::symbols::Modifiers::OPEN) || sym.modifiers.has(crate::symbols::Modifiers::ABSTRACT);
+                    if !open || sym.receiver.is_some() || !matches!(sym.kind, SymbolKind::Function | SymbolKind::Property) || sym.modifiers.has(crate::symbols::Modifiers::FINAL) {
+                        continue;
+                    }
+                    // Members of this class or its supertypes only.
+                    let is_member = sym.fq_name.rsplit_once('.').is_some_and(|(owner, _)| e.classifier(owner).is_some_and(|c| c.symbol().kind.is_classifier()));
+                    if !is_member {
+                        continue;
+                    }
+                    let what = if sym.kind == SymbolKind::Function { "Calling non-final function" } else { "Accessing non-final property" };
+                    out.report(&LEAKING_THIS, n.text_range(), format!("{what} {} in constructor", sym.name), None);
+                }
+                SyntaxKind::THIS_EXPR if n.text() == "this" && n.parent().is_some_and(|p| p.kind() == SyntaxKind::VALUE_ARGUMENT) => {
+                    out.report(&LEAKING_THIS, n.text_range(), "Leaking 'this' in constructor of non-final class", None);
+                }
+                _ => {}
+            }
+        }
+    }
 }

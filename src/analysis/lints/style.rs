@@ -25,7 +25,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 call_chain(cx, &n, out);
                 count_with_size(cx, &n, out);
                 java_static_method(cx, &n, out);
+                copy_without_names(cx, &n, out);
+                substring(cx, &n, out);
             }
+            SyntaxKind::MODIFIER_LIST => protected_in_final(cx, &n, out),
             SyntaxKind::CALL_EXPR => readln(cx, &n, out),
             SyntaxKind::PREFIX_EXPR => {
                 negated_is_empty(cx, &n, out);
@@ -795,4 +798,78 @@ fn readln(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
         None => (call.text_range(), "readlnOrNull()"),
     };
     out.report(&READLN, range, format!("Replace with '{text}'"), Some(Fix::replace(format!("Replace with '{text}'"), range, text)));
+}
+
+/// `user.copy("a", 2)` → `user.copy(name = "a", age = 2)`.
+fn copy_without_names(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let Some(call) = n.children().nth(1).filter(|c| c.kind() == SyntaxKind::CALL_EXPR) else { return };
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && c.text() == "copy") else { return };
+    if !cx.on(&COPY_WITHOUT_NAMED_ARGUMENTS) {
+        return;
+    }
+    let Some(args) = plain_arguments(&call) else { return };
+    if args.is_empty() {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let defs = e.resolve_name_ref(&callee);
+    let [Def::Symbol { sym, .. }] = defs.as_slice() else { return };
+    let Some((owner, _)) = sym.fq_name.rsplit_once('.') else { return };
+    if !e.classifier(owner).is_some_and(|c| c.symbol().modifiers.has(Modifiers::DATA)) || args.len() > sym.params.len() {
+        return;
+    }
+    let edits = args.iter().zip(&sym.params).map(|(a, p)| Edit { range: TextRange::empty(a.text_range().start()), text: format!("{} = ", p.name) }).collect();
+    out.report(&COPY_WITHOUT_NAMED_ARGUMENTS, callee.text_range(), "'copy' method of data class is called without named arguments", Some(Fix::new("Add names to call arguments", edits)));
+}
+
+/// `s.substring(0, n)` → `s.take(n)`, `s.substring(0, s.length - n)` → `s.dropLast(n)`.
+fn substring(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let mut parts = n.children();
+    let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && c.text() == "substring") else { return };
+    if !cx.on(&SUBSTRING_WITH_TAKE) && !cx.on(&SUBSTRING_WITH_DROP_LAST) {
+        return;
+    }
+    let Some(args) = plain_arguments(&call) else { return };
+    let [start, end] = args.as_slice() else { return };
+    if !is_literal(start, "0") || !stdlib_call(cx, &callee) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    if !e.type_of(&recv).is_some_and(|t| fq_of(&t) == Some("kotlin.String")) {
+        return;
+    }
+    let recv_text = recv.text().to_string();
+    // `s.length - n` with the same receiver.
+    let dropped = (end.kind() == SyntaxKind::BINARY_EXPR && binary_op(end).is_some_and(|o| o.kind() == SyntaxKind::MINUS))
+        .then(|| binary_operands(end))
+        .flatten()
+        .filter(|(l, _)| l.text().to_string() == format!("{recv_text}.length"))
+        .map(|(_, r)| r);
+    let (rule, text) = match dropped {
+        Some(k) => (&SUBSTRING_WITH_DROP_LAST, format!("{recv_text}.dropLast({})", k.text())),
+        None => (&SUBSTRING_WITH_TAKE, format!("{recv_text}.take({})", end.text())),
+    };
+    if !cx.on(rule) {
+        return;
+    }
+    let name = if rule.id == SUBSTRING_WITH_TAKE.id { "take" } else { "dropLast" };
+    out.report(rule, callee.text_range(), format!("Replace 'substring' call with '{name}' call"), Some(Fix::replace(format!("Replace with '{name}'"), n.text_range(), text)));
+}
+
+/// `protected` on a member of a final class.
+fn protected_in_final(cx: &Cx, m: &SyntaxNode, out: &mut Sink) {
+    let Some(kw) = ast::ModifierList::cast(m.clone()).and_then(|l| l.modifiers().find(|t| t.text() == "protected")) else { return };
+    if !cx.on(&PROTECTED_IN_FINAL) {
+        return;
+    }
+    let Some(decl) = m.parent() else { return };
+    if has_modifier(&decl, "override") {
+        return;
+    }
+    let Some(class) = decl.parent().filter(|b| b.kind() == SyntaxKind::CLASS_BODY).and_then(|b| b.parent()).or_else(|| decl.parent().filter(|p| p.kind() == SyntaxKind::VALUE_PARAMETER_LIST).and_then(|l| l.parent()).and_then(|c| c.parent())) else { return };
+    if class.kind() != SyntaxKind::CLASS || ["open", "abstract", "sealed", "enum"].iter().any(|x| has_modifier(&class, x)) || ast::token(&class, SyntaxKind::INTERFACE_KW).is_some() {
+        return;
+    }
+    out.report(&PROTECTED_IN_FINAL, kw.text_range(), "'protected' visibility is effectively 'private' in a final class", Some(Fix::replace("Make private", kw.text_range(), "private")));
 }

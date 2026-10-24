@@ -2535,3 +2535,82 @@ interface I { @JvmField val x: Int }
     let statics: Vec<_> = found.iter().filter(|f| f.starts_with("JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION")).collect();
     assert_eq!(statics.len(), 2, "{found:#?}");
 }
+
+#[test]
+fn bug_style_and_redundancy_batch() {
+    let syntactic = lint(
+        r#"package a
+
+interface I { fun f() }
+class D(var x: I) : I by x
+fun run() = { println() }
+fun typed(): () -> Unit = { println() }
+var nothing = null
+val fine = null
+val y = -1.inc()
+val z = (-1).inc()
+open class Base { open fun f(a: Int): Int = a }
+class Sub : Base() { override fun f(a: Int) = super.f(a) }
+class Sub2 : Base() { override fun f(a: Int): Int { return super.f(a + 1) } }
+class Final { protected val p = 1 }
+open class Open { protected val p = 1 }
+fun find(m: Map<String, String>, k: String): String? {
+    return m[k] ?: return null
+}
+"#,
+    );
+    has(&syntactic, "DelegationToVarProperty: x");
+    has(&syntactic, "FunctionWithLambdaExpressionBody: =");
+    assert_eq!(syntactic.iter().filter(|f| f.starts_with("FunctionWithLambdaExpressionBody")).count(), 1, "{syntactic:#?}");
+    has(&syntactic, "ImplicitNullableNothingType: nothing");
+    assert!(!syntactic.iter().any(|f| f == "ImplicitNullableNothingType: fine"), "{syntactic:#?}");
+    has(&syntactic, "WrapUnaryOperator: -1.inc()");
+    assert_eq!(syntactic.iter().filter(|f| f.starts_with("WrapUnaryOperator")).count(), 1, "{syntactic:#?}");
+    has(&syntactic, "RedundantOverride: f");
+    assert_eq!(syntactic.iter().filter(|f| f.starts_with("RedundantOverride")).count(), 1, "{syntactic:#?}");
+    has(&syntactic, "ProtectedInFinal: protected");
+    assert_eq!(syntactic.iter().filter(|f| f.starts_with("ProtectedInFinal")).count(), 1, "{syntactic:#?}");
+    has(&syntactic, "RedundantElvisReturnNull: ?: return null");
+    assert!(fixed("package a\n\nval y = -1.inc()\n", "WrapUnaryOperator").contains("= (-1).inc()"));
+    assert!(fixed("package a\n\nfun run() = { println() }\n", "FunctionWithLambdaExpressionBody").contains("fun run() { println() }"));
+    if !Fixture::new().typed() {
+        return;
+    }
+    let typed = lint(
+        r#"package a
+
+data class P(val name: String, val age: Int)
+
+open class Widget {
+    open val size: Int = 1
+    val area = size * 2
+    init {
+        draw()
+        register(this)
+        listOf(1).forEach { draw() }
+    }
+    open fun draw() {}
+    fun register(w: Widget) {}
+}
+
+fun f(p: P, s: String) {
+    var xs = listOf(1)
+    xs += 2
+    val ys = mutableListOf(1)
+    ys += 2
+    println(p.copy("b", 3) + p.copy(name = "c"))
+    println(s.substring(0, 2) + s.substring(0, s.length - 1) + s.substring(1, 2))
+}
+"#,
+    );
+    has(&typed, "SuspiciousCollectionReassignment: +=");
+    assert_eq!(typed.iter().filter(|f| f.starts_with("SuspiciousCollectionReassignment")).count(), 1, "{typed:#?}");
+    has(&typed, "CopyWithoutNamedArguments: copy");
+    assert_eq!(typed.iter().filter(|f| f.starts_with("CopyWithoutNamedArguments")).count(), 1, "{typed:#?}");
+    has(&typed, "ReplaceSubstringWithTake: substring");
+    has(&typed, "ReplaceSubstringWithDropLast: substring");
+    let leaks: Vec<_> = typed.iter().filter(|f| f.starts_with("LeakingThis")).collect();
+    assert_eq!(leaks, vec!["LeakingThis: size", "LeakingThis: draw", "LeakingThis: this"], "{typed:#?}");
+    let out = fixed("package a\n\ndata class P(val name: String, val age: Int)\nfun f(p: P) = p.copy(\"b\", 3)\n", "CopyWithoutNamedArguments");
+    assert!(out.contains("p.copy(name = \"b\", age = 3)"), "{out}");
+}

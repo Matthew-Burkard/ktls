@@ -225,12 +225,12 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `RedundantInnerClassModifier`, `RedundantEmptyInitializerBlock` — *partial: `RedundantEmptyInitializerBlock`*
 - [ ] [P1] `RedundantNullableReturnType`, `RedundantRequireNotNullCall`
 - [ ] [P1] `RedundantWith`, `RedundantAsSequence`, `RedundantSamConstructor`
-- [ ] [P1] `RedundantElvisReturnNull`, `RedundantRunCatching`
+- [~] [P1] `RedundantElvisReturnNull`, `RedundantRunCatching` — *partial: `RedundantElvisReturnNull`*
 - [x] [P1] `RedundantConstructorKeyword`, `RedundantEnumConstructorInvocation`
 - [ ] [P1] `RedundantLabelMigration`, `RedundantValueArgument` (arg equals default)
 - [~] [P1] `RedundantExplicitTypeArguments` (`listOf<Int>(1)`) — *partial: as `RemoveExplicitTypeArguments`, for calls with one candidate whose type parameters are whole parameter types bound by arguments of exactly that certain type*
 - [~] [P1] `UnusedImport`, `UnusedSymbol` (unused private/internal declarations), `UnusedReceiverParameter`, `UnusedLambdaExpressionBody`, `UnusedUnaryOperator` — *partial: `UnusedImport`, `UnusedSymbol` for private and local declarations*
-- [ ] [P2] `RedundantOverride` (only calls super), `RedundantInterpolationPrefix`
+- [~] [P2] `RedundantOverride` (only calls super), `RedundantInterpolationPrefix` — *partial: `RedundantOverride` (functions forwarding their parameters; not in data/value/enum classes or with other modifiers)*
 
 **Idiomatic Kotlin / style**
 - [x] [P1] `CanBeVal` (`var` never reassigned)
@@ -247,7 +247,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `ReplaceNegatedIsEmptyWithIsNotEmpty`, `SimplifyNegatedBinaryExpression`, `SimplifyBooleanWithConstants` (stdlib `isEmpty`/`isBlank` pairs; `==`, `===`, `in`, `is`; `&& true`, `|| false`, `== true/false` on non-null Booleans)
 - [~] [P1] `ConvertTwoComparisonsToRangeCheck`, `ConvertNaNEquality` — *partial: `ConvertNaNEquality`*
 - [x] [P1] `ReplaceJavaStaticMethodWithKotlinAnalog` (`Math.max`, `System.out.println`, `Arrays.asList`…): `Math` functions (adding `kotlin.math` imports), `Arrays` content functions, `parseInt`-style parsing, `Character` tests, `System.out.print(ln)`
-- [ ] [P1] `ReplaceToStringWithStringTemplate`, `ReplaceSubstringWithTake/Drop/SubstringBefore/After`
+- [~] [P1] `ReplaceToStringWithStringTemplate`, `ReplaceSubstringWithTake/Drop/SubstringBefore/After` — *partial: `ReplaceSubstringWithTake`, `ReplaceSubstringWithDropLast`*
 - [x] [P1] `ReplaceManualRangeWithIndicesCalls` (`0 until list.size` → `list.indices`)
 - [x] [P1] `ReplaceWithOperatorAssignment` (`x = x + 1` → `x += 1`) — *numbers, chars and strings (other types may have `plusAssign`); names and `this.x`/`a.b` chains only*
 - [ ] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `ReplaceArrayOfWithLiteral` (annotations)
@@ -289,23 +289,23 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `EqualsOrHashCode` (one without the other)
 - [~] [P1] `RecursivePropertyAccessor` / `RecursiveEqualsCall` — *partial: `RecursivePropertyAccessor` (getters reading, setters assigning their own property; "Replace with 'field'" when there is a backing field)*
 - [x] [P1] `ArrayInDataClass` (needs custom `equals`/`hashCode`)
-- [ ] [P1] `LeakingThis` (calling open member / passing `this` in constructor)
-- [ ] [P1] `SuspiciousVarProperty`, `SuspiciousCollectionReassignment` (`+=` on `var` read-only list)
-- [ ] [P1] `ImplicitNullableNothingType`, `ImplicitThis` (configurable)
-- [ ] [P1] `DelegationToVarProperty`
-- [ ] [P1] `WrapUnaryOperator` (`-1.inc()` precedence)
+- [x] [P1] `LeakingThis` (calling open member / passing `this` in constructor): init blocks, property initializers and secondary constructor bodies of open/abstract/sealed classes; not inside lambdas
+- [~] [P1] `SuspiciousVarProperty`, `SuspiciousCollectionReassignment` (`+=` on `var` read-only list) — *partial: `SuspiciousCollectionReassignment`*
+- [~] [P1] `ImplicitNullableNothingType`, `ImplicitThis` (configurable) — *partial: `ImplicitNullableNothingType`*
+- [x] [P1] `DelegationToVarProperty`
+- [x] [P1] `WrapUnaryOperator` (`-1.inc()` precedence)
 - [x] [P1] `NestedLambdaShadowedImplicitParameter` (nested `it`) — *when the enclosing lambda's `it` is used too; not for `it.let`/`also`/`takeIf`/`takeUnless`*
-- [ ] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `CopyWithoutNamedArguments`
+- [~] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `CopyWithoutNamedArguments` — *partial: `CopyWithoutNamedArguments` (and the compiler's `ARRAY_EQUALITY_OPERATOR_CAN_BE_REPLACED_WITH_EQUALS`)*
 - [ ] [P1] `UnusedResultOfAsync` / `DeferredResultUnused`, `SuspendFunctionOnCoroutineScope`, `RedundantRunBlocking`
 - [ ] [P1] `RunBlockingInSuspendFunction`, `BlockingMethodInNonBlockingContext` (`Thread.sleep` in coroutine)
-- [ ] [P1] `FlowCollectWithoutLaunch`, `GlobalCoroutineUsage` (`GlobalScope`)
+- [~] [P1] `FlowCollectWithoutLaunch`, `GlobalCoroutineUsage` (`GlobalScope`) — *partial: `GlobalCoroutineUsage`*
 - [~] [P1] `WarningOnMainUnusedParameterMigration`, `MainFunctionReturnUnit` — *partial: `MainFunctionReturnUnit`*
 - [ ] [P1] `OverridingDeprecatedMember`, `DeprecatedCallableAddReplaceWith`
 - [x] [P1] `ConvertNaNEquality` (`x == Double.NaN`)
 - [x] [P1] `ThrowableNotThrown` (`IllegalStateException()` without `throw`)
 - [ ] [P1] `KotlinThrowsInspection` / `@Throws` mismatch for Java callers
 - [ ] [P1] `PublicApiImplicitType` (explicit API mode: `-Xexplicit-api`)
-- [ ] [P2] `SuspiciousCascadingIf`, `ProtectedInFinal`, `NonExhaustiveWhenStatementMigration`
+- [~] [P2] `SuspiciousCascadingIf`, `ProtectedInFinal`, `NonExhaustiveWhenStatementMigration` — *partial: `ProtectedInFinal`*
 - [ ] [P2] `IncompleteDestructuring`, `UnsafeCastFromDynamic` (JS)
 - [ ] [P2] `SerializationAnnotation`/`kotlinx.serialization` misuse, Compose-specific rules (modifier param, remember, stable)
 
@@ -313,7 +313,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `UsePropertyAccessSyntax` (`getFoo()` → `foo`)
 - [ ] [P1] `PlatformExtensionReceiverOfInline`, `HasPlatformType` (public API exposes platform type)
 - [ ] [P1] `JavaIoSerializableObjectMustHaveReadResolve`
-- [ ] [P2] `FunctionWithLambdaExpressionBody`, `JvmStaticWithoutCompanion`
+- [~] [P2] `FunctionWithLambdaExpressionBody`, `JvmStaticWithoutCompanion` — *partial: `FunctionWithLambdaExpressionBody` (and the compiler's `JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION`)*
 
 **Build scripts**
 - [ ] [P2] Gradle `.kts`: deprecated configurations (`compile` → `implementation`), dependency version catalog suggestions, newer library version available
