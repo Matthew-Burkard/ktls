@@ -2654,3 +2654,46 @@ fun f(x: Int, y: Int, s: String, t: String) = x === y || s === t
     has(&found, "FORBIDDEN_IDENTITY_EQUALS: ===");
     assert_eq!(found.iter().filter(|f| f.starts_with("FORBIDDEN_IDENTITY_EQUALS")).count(), 1, "{found:#?}");
 }
+
+#[test]
+fn parameters_copies_destructuring_kdoc_and_getters() {
+    let found = lint(
+        r#"package a
+
+class A(private val x: Int, private val y: Int, val z: Int) {
+    val doubled = x * 2
+    init { println(y) }
+    fun show() = y
+}
+"#,
+    );
+    let params: Vec<_> = found.iter().filter(|f| f.starts_with("CanBeParameter")).collect();
+    assert_eq!(params, vec!["CanBeParameter: val"], "{found:#?}");
+    assert!(fixed("package a\n\nclass A(private val x: Int) {\n    val d = x\n}\n", "CanBeParameter").contains("class A(x: Int)"));
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = lint(
+        r#"package a
+
+data class Person(val name: String, val age: Int)
+
+fun f(p: Person, file: java.io.File, xs: java.util.ArrayList<Int>, n: java.util.concurrent.atomic.AtomicInteger) {
+    p.copy(age = 1)
+    val q = p.copy(age = 2)
+    val (age, name) = p
+    val (name2, age2) = p
+    println(q.toString() + age + name + name2 + age2)
+    println(file.getName() + file.isFile() + file.name + xs.isEmpty() + n.getAndIncrement())
+}
+"#,
+    );
+    has(&found, "UnusedDataClassCopyResult: copy");
+    assert_eq!(found.iter().filter(|f| f.starts_with("UnusedDataClassCopyResult")).count(), 1, "{found:#?}");
+    let wrong: Vec<_> = found.iter().filter(|f| f.starts_with("DestructuringWrongName")).collect();
+    assert_eq!(wrong, vec!["DestructuringWrongName: age", "DestructuringWrongName: name"], "{found:#?}");
+    has(&found, "UsePropertyAccessSyntax: getName");
+    has(&found, "UsePropertyAccessSyntax: isFile");
+    assert_eq!(found.iter().filter(|f| f.starts_with("UsePropertyAccessSyntax")).count(), 2, "{found:#?}");
+    assert!(fixed("package a\n\nfun f(file: java.io.File) = file.getName()\n", "UsePropertyAccessSyntax").contains("= file.name"));
+}

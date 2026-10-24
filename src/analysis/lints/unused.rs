@@ -34,7 +34,11 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             }
             SyntaxKind::PRIMARY_CONSTRUCTOR | SyntaxKind::SECONDARY_CONSTRUCTOR => unused_constructor_parameters(cx, &n, out),
             SyntaxKind::LAMBDA_EXPR => unused_lambda_parameters(cx, &n, out),
-            SyntaxKind::PROPERTY | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::TYPEALIAS => unused_declaration(cx, &n, out),
+            SyntaxKind::CLASS => {
+                unused_declaration(cx, &n, out);
+                can_be_parameter(cx, &n, out);
+            }
+            SyntaxKind::PROPERTY | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::TYPEALIAS => unused_declaration(cx, &n, out),
             SyntaxKind::VALUE_PARAMETER => unused_constructor_property(cx, &n, out),
             _ => {}
         }
@@ -443,4 +447,48 @@ fn unused_constructor_property(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
         return;
     }
     out.report(&UNUSED_SYMBOL, tok.text_range(), format!("Private property '{name}' is never used"), None);
+}
+
+/// `class A(private val x: Int) { val y = x * 2 }`: `x` is only read while constructing,
+/// so it need not be a property.
+pub(super) fn can_be_parameter(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&CAN_BE_PARAMETER) || ["data", "value", "inline", "annotation", "expect", "actual"].iter().any(|m| has_modifier(class, m)) {
+        return;
+    }
+    let Some(ctor) = class.children().find(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR) else { return };
+    let body = class.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY);
+    // What runs during construction (lambdas and objects in it may run later).
+    let construction = |n: &SyntaxNode| -> bool {
+        let Some(body) = &body else { return false };
+        for a in n.ancestors() {
+            if matches!(a.kind(), SyntaxKind::LAMBDA_EXPR | SyntaxKind::ANONYMOUS_FUNCTION | SyntaxKind::OBJECT_LITERAL | SyntaxKind::FUN | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION) {
+                return false;
+            }
+            if a.parent().as_ref() == Some(body) {
+                return matches!(a.kind(), SyntaxKind::CLASS_INITIALIZER | SyntaxKind::PROPERTY);
+            }
+        }
+        false
+    };
+    for p in ctor.descendants().filter(|d| d.kind() == SyntaxKind::VALUE_PARAMETER) {
+        let Some(kw) = ast::token(&p, SyntaxKind::VAL_KW).or_else(|| ast::token(&p, SyntaxKind::VAR_KW)) else { continue };
+        let Some(m) = modifiers(&p) else { continue };
+        if !m.modifiers().any(|t| t.text() == "private") || m.modifiers().count() != 1 || m.annotations().next().is_some() {
+            continue;
+        }
+        let Some(name) = name_token(&p).map(|t| ast::ident_text(&t)) else { continue };
+        let uses: Vec<SyntaxNode> = class.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == name.as_str()).collect();
+        // `this.x` reads the property; plain names during construction read the parameter.
+        let property_use = uses.iter().any(|u| {
+            let qualified = u.parent().is_some_and(|q| matches!(q.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && q.first_child().as_ref() != Some(u));
+            qualified || !construction(u)
+        });
+        if property_use {
+            continue;
+        }
+        // Remove `private val ` (up to the name).
+        let Some(name_tok) = name_token(&p) else { continue };
+        let start = m.syntax().text_range().start();
+        out.report(&CAN_BE_PARAMETER, kw.text_range(), format!("Constructor parameter '{name}' is never used as a property"), Some(Fix::delete("Remove 'val' or 'var' from parameter", TextRange::new(start, name_tok.text_range().start()))));
+    }
 }

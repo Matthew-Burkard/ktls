@@ -234,7 +234,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 
 **Idiomatic Kotlin / style**
 - [x] [P1] `CanBeVal` (`var` never reassigned)
-- [ ] [P1] `CanBeParameter` (constructor `val` used only in init)
+- [x] [P1] `CanBeParameter` (constructor `val` used only in init): `private` constructor properties read only in initializers and `init` blocks
 - [ ] [P1] `CanBePrimaryConstructorProperty`
 - [ ] [P1] `ConvertToStringTemplate` (string concatenation)
 - [ ] [P1] `LiftReturnOrAssignment` (out of `if`/`when`/`try`)
@@ -266,7 +266,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `KotlinConstantConditions` (always true/false)
 - [ ] [P1] `ConvertSecondaryConstructorToPrimary`, `ConvertTryFinallyToUseCall`
 - [~] [P1] `ControlFlowWithEmptyBody`, `EmptyRange` — *partial: `ControlFlowWithEmptyBody`*
-- [ ] [P2] `DestructuringWrongName`, `UnusedDataClassCopyResult`
+- [x] [P2] `DestructuringWrongName`, `UnusedDataClassCopyResult`
 - [~] [P2] `ReplaceCollectionCountWithSize`, `PlatformExtensionReceiverOfInline` — *partial: `ReplaceCollectionCountWithSize`*
 
 **Collections & sequences**
@@ -310,7 +310,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P2] `SerializationAnnotation`/`kotlinx.serialization` misuse, Compose-specific rules (modifier param, remember, stable)
 
 **Java interop**
-- [ ] [P1] `UsePropertyAccessSyntax` (`getFoo()` → `foo`)
+- [x] [P1] `UsePropertyAccessSyntax` (`getFoo()` → `foo`): Java getters (`isX` returning Boolean), not methods of types mapped to Kotlin or `getAndX`
 - [ ] [P1] `PlatformExtensionReceiverOfInline`, `HasPlatformType` (public API exposes platform type)
 - [ ] [P1] `JavaIoSerializableObjectMustHaveReadResolve`
 - [~] [P2] `FunctionWithLambdaExpressionBody`, `JvmStaticWithoutCompanion` — *partial: `FunctionWithLambdaExpressionBody` (and the compiler's `JVM_STATIC_NOT_IN_OBJECT_OR_COMPANION`)*

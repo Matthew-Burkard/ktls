@@ -281,6 +281,7 @@ rules! {
     UNUSED_PARAMETER = "UNUSED_PARAMETER", Unused, Warning, true, ["unused", "UnusedParameter"], "Function or constructor parameter that is never used";
     UNUSED_ANONYMOUS_PARAMETER = "UNUSED_ANONYMOUS_PARAMETER", Unused, Info, true, ["unused"], "Lambda parameter that is never used (can be '_')";
     UNUSED_SYMBOL = "UnusedSymbol", Unused, Warning, true, ["unused", "UnusedPrivateMember", "UnusedPrivateProperty", "UnusedPrivateClass"], "Private or local declaration that is never used";
+    CAN_BE_PARAMETER = "CanBeParameter", Unused, Warning, false, [], "Private constructor property used only while constructing";
     CAN_BE_VAL = "CanBeVal", Unused, Warning, false, ["CAN_BE_VAL"], "Local 'var' that is never reassigned";
 
     REDUNDANT_SEMICOLON = "RedundantSemicolon", Redundancy, Warning, true, [], "Semicolon that is not needed";
@@ -333,6 +334,7 @@ rules! {
     SUBSTRING_WITH_TAKE = "ReplaceSubstringWithTake", Style, Info, false, [], "'s.substring(0, n)' instead of 's.take(n)'";
     SUBSTRING_WITH_DROP_LAST = "ReplaceSubstringWithDropLast", Style, Info, false, [], "'s.substring(0, s.length - n)' instead of 's.dropLast(n)'";
     PROTECTED_IN_FINAL = "ProtectedInFinal", Style, Info, false, [], "'protected' member of a final class (effectively 'private')";
+    PROPERTY_ACCESS_SYNTAX = "UsePropertyAccessSyntax", Style, Info, false, [], "Java getter called as 'getFoo()' instead of the property 'foo'";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
@@ -344,6 +346,8 @@ rules! {
     SUSPICIOUS_COLLECTION_REASSIGNMENT = "SuspiciousCollectionReassignment", Bugs, Warning, false, [], "'+=' on a 'var' of read-only collection type (creates a new collection)";
     GLOBAL_COROUTINE_USAGE = "GlobalCoroutineUsage", Bugs, Warning, false, [], "Use of 'GlobalScope'";
     LEAKING_THIS = "LeakingThis", Bugs, Warning, false, [], "Open member called, or 'this' passed, during construction of a non-final class";
+    UNUSED_COPY_RESULT = "UnusedDataClassCopyResult", Bugs, Warning, false, [], "Data class 'copy' call whose result is unused";
+    DESTRUCTURING_WRONG_NAME = "DestructuringWrongName", Bugs, Warning, false, [], "Destructured variable named like a different component of the data class";
     SELF_ASSIGNMENT = "SelfAssignment", Bugs, Warning, false, [], "Variable assigned to itself";
     EQUALS_OR_HASH_CODE = "EqualsOrHashCode", Bugs, Warning, false, [], "Class overrides only one of 'equals()' and 'hashCode()'";
     ARRAY_IN_DATA_CLASS = "ArrayInDataClass", Bugs, Warning, false, [], "Array property in a data class without custom 'equals()'/'hashCode()'";

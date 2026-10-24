@@ -29,7 +29,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 substring(cx, &n, out);
             }
             SyntaxKind::MODIFIER_LIST => protected_in_final(cx, &n, out),
-            SyntaxKind::CALL_EXPR => readln(cx, &n, out),
+            SyntaxKind::CALL_EXPR => {
+                readln(cx, &n, out);
+                property_access(cx, &n, out);
+            }
             SyntaxKind::PREFIX_EXPR => {
                 negated_is_empty(cx, &n, out);
                 negated_binary(cx, &n, out);
@@ -872,4 +875,58 @@ fn protected_in_final(cx: &Cx, m: &SyntaxNode, out: &mut Sink) {
         return;
     }
     out.report(&PROTECTED_IN_FINAL, kw.text_range(), "'protected' visibility is effectively 'private' in a final class", Some(Fix::replace("Make private", kw.text_range(), "private")));
+}
+
+/// `file.getName()` → `file.name` for Java getters.
+fn property_access(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let name = callee.text().to_string();
+    let property = if let Some(r) = name.strip_prefix("get").filter(|r| r.starts_with(char::is_uppercase)) {
+        let mut c = r.chars();
+        match c.next() {
+            Some(f) => f.to_lowercase().chain(c).collect::<String>(),
+            None => return,
+        }
+    } else if name.strip_prefix("is").is_some_and(|r| r.starts_with(char::is_uppercase)) {
+        name.clone()
+    } else {
+        return;
+    };
+    // `getURL()`: the property would be `url`... no, `uRL`; leave all-caps names alone.
+    // `getAndIncrement()` reads as an action, not a property.
+    if property.chars().nth(1).is_some_and(char::is_uppercase) || name.starts_with("getAnd") || !cx.on(&PROPERTY_ACCESS_SYNTAX) || plain_arguments(call).is_none_or(|a| !a.is_empty()) {
+        return;
+    }
+    // Not `super.getX()` (that is not a property access).
+    if call.parent().is_some_and(|p| p.first_child().is_some_and(|f| f.kind() == SyntaxKind::SUPER_EXPR)) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let defs = e.resolve_name_ref(&callee);
+    let [Def::Symbol { sym, .. }] = defs.as_slice() else { return };
+    if sym.kind != SymbolKind::Function || !sym.params.is_empty() || !sym.type_params.is_empty() || sym.ty.as_ref().is_some_and(|t| fq_of(t) == Some("kotlin.Unit")) {
+        return;
+    }
+    // `isX()` getters return Booleans (`isNotNull()` of assertion libraries does not).
+    if name.starts_with("is") && !sym.ty.as_ref().is_some_and(|t| fq_of(t) == Some("kotlin.Boolean")) {
+        return;
+    }
+    let Some((owner, _)) = sym.fq_name.rsplit_once('.') else { return };
+    if !matches!(e.res.find_classifier(owner), Some(crate::analysis::resolve::Classifier::Library(lc)) if !lc.is_kotlin) {
+        return;
+    }
+    // The property must find this getter (no Kotlin member or extension of that name wins).
+    let recv_type = match call.parent().filter(|p| p.kind() == SyntaxKind::DOT_QUALIFIED_EXPR && p.last_child().as_ref() == Some(call)).and_then(|p| p.first_child()) {
+        Some(r) => e.type_of(&r),
+        None => return,
+    };
+    let Some(t) = recv_type else { return };
+    // Methods of types mapped to Kotlin (`Collection.isEmpty()`) are functions there.
+    if e.supertype_closure(&t).iter().filter_map(fq_of).any(|fq| fq.starts_with("kotlin.") && e.declared_members(fq).iter().any(|m| m.name == name)) {
+        return;
+    }
+    if !e.members_named(&t, &property).iter().all(|(m, _)| m.name == name) || e.members_named(&t, &property).is_empty() || !e.extensions(&t, &property).is_empty() {
+        return;
+    }
+    out.report(&PROPERTY_ACCESS_SYNTAX, callee.text_range(), format!("Use of getter method instead of property access syntax ('{property}')"), Some(Fix::replace("Use property access syntax", call.text_range(), property)));
 }

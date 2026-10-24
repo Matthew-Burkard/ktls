@@ -25,7 +25,11 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 array_in_data_class(&n, out);
                 leaking_this(cx, &n, out);
             }
-            SyntaxKind::CALL_EXPR => throwable_not_thrown(cx, &n, out),
+            SyntaxKind::CALL_EXPR => {
+                throwable_not_thrown(cx, &n, out);
+                unused_copy(cx, &n, out);
+            }
+            SyntaxKind::DESTRUCTURING_DECLARATION => destructuring_names(cx, &n, out),
             SyntaxKind::FUN => {
                 main_return_unit(cx, &n, out);
                 lambda_expression_body(cx, &n, out);
@@ -318,7 +322,7 @@ fn main_return_unit(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
 }
 
 /// The expression after `=` in a declaration.
-fn expression_body(decl: &SyntaxNode) -> Option<SyntaxNode> {
+pub(super) fn expression_body(decl: &SyntaxNode) -> Option<SyntaxNode> {
     let eq = ast::token(decl, SyntaxKind::EQ)?;
     decl.children().find(|c| c.text_range().start() >= eq.text_range().end())
 }
@@ -480,6 +484,60 @@ fn leaking_this(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+/// `p.copy(age = 1)` as a statement: the copy is thrown away.
+fn unused_copy(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && c.text() == "copy") else { return };
+    if !cx.on(&UNUSED_COPY_RESULT) {
+        return;
+    }
+    let expr = match call.parent() {
+        Some(p) if matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.last_child().as_ref() == Some(call) => p,
+        _ => call.clone(),
+    };
+    // A statement, and not the value of a lambda or block expression.
+    let Some(block) = expr.parent().filter(|b| b.kind() == SyntaxKind::BLOCK) else { return };
+    if block.children().last().as_ref() == Some(&expr) && block.parent().is_some_and(|p| p.kind() != SyntaxKind::FUN && p.kind() != SyntaxKind::CLASS_INITIALIZER && p.kind() != SyntaxKind::SECONDARY_CONSTRUCTOR && p.kind() != SyntaxKind::PROPERTY_ACCESSOR) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let defs = e.resolve_name_ref(&callee);
+    let [Def::Symbol { sym, .. }] = defs.as_slice() else { return };
+    let Some((owner, _)) = sym.fq_name.rsplit_once('.') else { return };
+    if e.classifier(owner).is_some_and(|c| c.symbol().modifiers.has(crate::symbols::Modifiers::DATA)) {
+        out.report(&UNUSED_COPY_RESULT, callee.text_range(), "The result of a 'copy' call is unused", None);
+    }
+}
+
+/// `val (age, name) = person` with `Person(val name: String, val age: Int)`.
+fn destructuring_names(cx: &Cx, d: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&DESTRUCTURING_WRONG_NAME) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    // The destructured value: a declaration's initializer, a `for` loop range or a lambda
+    // parameter's type are not followed (only declarations).
+    let Some(decl) = d.parent().filter(|p| p.kind() == SyntaxKind::PROPERTY) else { return };
+    let Some(value) = expression_body(&decl) else { return };
+    let Some(t) = crate::analysis::lints::certain_type(e, &value, true) else { return };
+    let Some(fq) = fq_of(&t) else { return };
+    let Some(c) = e.classifier(fq) else { return };
+    if !c.symbol().modifiers.has(crate::symbols::Modifiers::DATA) {
+        return;
+    }
+    let Some(ctor) = e.constructors(fq).into_iter().find(|k| matches!(&k.origin, crate::symbols::Origin::Source { .. })) else { return };
+    let components: Vec<String> = ctor.params.iter().map(|p| p.name.clone()).collect();
+    for (i, entry) in d.children().filter(|c| c.kind() == SyntaxKind::DESTRUCTURING_ENTRY).enumerate() {
+        let Some(tok) = name_token(&entry) else { continue };
+        let name = ast::ident_text(&tok);
+        if name == "_" || components.get(i).is_some_and(|c| *c == name) {
+            continue;
+        }
+        if let Some(j) = components.iter().position(|c| *c == name) {
+            out.report(&DESTRUCTURING_WRONG_NAME, tok.text_range(), format!("Variable name '{name}' matches the name of a different component (component{} is '{}')", j + 1, components.get(i).map_or("none", String::as_str)), None);
         }
     }
 }
