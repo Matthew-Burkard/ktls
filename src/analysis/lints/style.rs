@@ -1075,11 +1075,12 @@ fn cascade_if(cx: &Cx, i: &SyntaxNode, out: &mut Sink) {
 
 /// `!c` for a condition `c`, simplified for `!x`, comparisons and `is`.
 fn negated_text(c: &SyntaxNode) -> String {
-    if c.kind() == SyntaxKind::PREFIX_EXPR && binary_op(c).is_some_and(|o| o.kind() == SyntaxKind::EXCL) {
-        if let Some(inner) = c.children().find(|x| x.kind() != SyntaxKind::OPERATION_REFERENCE) {
-            let inner = if inner.kind() == SyntaxKind::PAREN_EXPR { inner.children().next().unwrap_or(inner) } else { inner };
-            return inner.text().to_string();
-        }
+    if c.kind() == SyntaxKind::PREFIX_EXPR
+        && binary_op(c).is_some_and(|o| o.kind() == SyntaxKind::EXCL)
+        && let Some(inner) = c.children().find(|x| x.kind() != SyntaxKind::OPERATION_REFERENCE)
+    {
+        let inner = if inner.kind() == SyntaxKind::PAREN_EXPR { inner.children().next().unwrap_or(inner) } else { inner };
+        return inner.text().to_string();
     }
     if c.kind() == SyntaxKind::BINARY_EXPR
         && let Some(op) = binary_op(c)
