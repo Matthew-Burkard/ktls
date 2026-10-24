@@ -16,11 +16,18 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 ranges(cx, &n, out);
                 size_check(cx, &n, out);
                 operator_assignment(cx, &n, out);
+                boolean_constants(cx, &n, out);
+                ignore_case_equals(cx, &n, out);
             }
             SyntaxKind::DOT_QUALIFIED_EXPR => {
                 operator_calls(cx, &n, out);
                 put_assignment(cx, &n, out);
                 call_chain(cx, &n, out);
+                count_with_size(cx, &n, out);
+            }
+            SyntaxKind::PREFIX_EXPR => {
+                negated_is_empty(cx, &n, out);
+                negated_binary(cx, &n, out);
             }
             SyntaxKind::IF_EXPR | SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR => empty_bodies(&n, out),
             _ => {}
@@ -484,4 +491,170 @@ fn call_chain(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     let head = &text[usize::from(inner.text_range().start())..usize::from(first.text_range().start())];
     let fix = Fix::replace(format!("Merge call chain to '{merged}'"), n.text_range(), format!("{head}{merged} {}", lambda.text()));
     out.report(&SIMPLIFIABLE_CALL_CHAIN, TextRange::new(first.text_range().start(), n.text_range().end()), format!("Call chain on collection type can be simplified to '{merged}'"), Some(fix));
+}
+
+/// The operand of `!x` (through parentheses with `paren`).
+fn negated(n: &SyntaxNode) -> Option<SyntaxNode> {
+    let op = n.first_token()?;
+    if op.kind() != SyntaxKind::EXCL || has_comments(n) {
+        return None;
+    }
+    n.children().find(|c| c.kind() != SyntaxKind::OPERATION_REFERENCE)
+}
+
+/// `recv.name()` without arguments: (receiver, name).
+fn no_arg_call(n: &SyntaxNode) -> Option<(SyntaxNode, SyntaxNode)> {
+    if n.kind() != SyntaxKind::DOT_QUALIFIED_EXPR {
+        return None;
+    }
+    let mut parts = n.children();
+    let (recv, call) = (parts.next()?, parts.next()?);
+    if call.kind() != SyntaxKind::CALL_EXPR || call.children().any(|c| matches!(c.kind(), SyntaxKind::LAMBDA_ARGUMENT | SyntaxKind::TYPE_ARGUMENT_LIST)) {
+        return None;
+    }
+    let args = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST)?;
+    if args.children().next().is_some() {
+        return None;
+    }
+    Some((recv, call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF)?))
+}
+
+/// Whether `callee` is a Kotlin standard library function (not a Java method of that name).
+fn stdlib_call(cx: &Cx, callee: &SyntaxNode) -> bool {
+    let Some(e) = cx.engine() else { return false };
+    let defs = e.resolve_name_ref(callee);
+    !defs.is_empty() && defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if sym.fq_name.starts_with("kotlin.")))
+}
+
+/// `!xs.isEmpty()` → `xs.isNotEmpty()`.
+fn negated_is_empty(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&NEGATED_IS_EMPTY) {
+        return;
+    }
+    let Some(x) = negated(n) else { return };
+    let Some((recv, callee)) = no_arg_call(&x) else { return };
+    let name = callee.text().to_string();
+    let Some(opposite) = [("isEmpty", "isNotEmpty"), ("isNotEmpty", "isEmpty"), ("isBlank", "isNotBlank"), ("isNotBlank", "isBlank")].iter().find(|(a, _)| *a == name).map(|(_, b)| *b) else { return };
+    if !stdlib_call(cx, &callee) {
+        return;
+    }
+    out.report(&NEGATED_IS_EMPTY, n.text_range(), format!("Replace negated '{name}' with '{opposite}'"), Some(Fix::replace(format!("Replace with '{opposite}()'"), n.text_range(), format!("{}.{opposite}()", recv.text()))));
+}
+
+/// `!(a == b)` → `a != b`, also `===`, `in`, `is`.
+fn negated_binary(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&NEGATED_BINARY) {
+        return;
+    }
+    let Some(paren) = negated(n).filter(|p| p.kind() == SyntaxKind::PAREN_EXPR) else { return };
+    let Some(inner) = paren.children().next() else { return };
+    let op = match inner.kind() {
+        SyntaxKind::BINARY_EXPR => binary_op(&inner),
+        SyntaxKind::IS_EXPR => binary_op(&inner).or_else(|| inner.children_with_tokens().filter_map(|t| t.into_token()).find(|t| matches!(t.kind(), SyntaxKind::IS_KW | SyntaxKind::NOT_IS_KW))),
+        _ => None,
+    };
+    let Some(op) = op else { return };
+    let flipped = match op.kind() {
+        SyntaxKind::EQ2 => "!=",
+        SyntaxKind::NOT_EQ => "==",
+        SyntaxKind::EQ3 => "!==",
+        SyntaxKind::NOT_EQ2 => "===",
+        SyntaxKind::IN_KW => "!in",
+        SyntaxKind::NOT_IN_KW => "in",
+        SyntaxKind::IS_KW => "!is",
+        SyntaxKind::NOT_IS_KW => "is",
+        _ => return,
+    };
+    let base = inner.text_range().start();
+    let mut text = inner.text().to_string();
+    let r = op.text_range() - base;
+    text.replace_range(usize::from(r.start())..usize::from(r.end()), flipped);
+    out.report(&NEGATED_BINARY, n.text_range(), "Negated expression can be simplified", Some(Fix::replace("Simplify negated expression", n.text_range(), text)));
+}
+
+fn bool_literal(n: &SyntaxNode) -> Option<bool> {
+    if n.kind() != SyntaxKind::LITERAL {
+        return None;
+    }
+    match n.first_token()?.kind() {
+        SyntaxKind::TRUE_KW => Some(true),
+        SyntaxKind::FALSE_KW => Some(false),
+        _ => None,
+    }
+}
+
+/// `x && true`, `false || x` → `x`; `x == true` → `x`, `x == false` → `!x` (non-null
+/// Boolean `x`).
+fn boolean_constants(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&BOOLEAN_CONSTANTS) || has_comments(n) {
+        return;
+    }
+    let (Some(op), Some((l, r))) = (binary_op(n), binary_operands(n)) else { return };
+    let (value, other) = match (bool_literal(&l), bool_literal(&r)) {
+        (Some(v), None) => (v, r),
+        (None, Some(v)) => (v, l),
+        _ => return,
+    };
+    let simple = |x: &SyntaxNode| matches!(x.kind(), SyntaxKind::NAME_REF | SyntaxKind::CALL_EXPR | SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::PAREN_EXPR | SyntaxKind::THIS_EXPR | SyntaxKind::LITERAL);
+    let replacement = match (op.kind(), value) {
+        (SyntaxKind::AMP2, true) | (SyntaxKind::PIPE2, false) => other.text().to_string(),
+        (SyntaxKind::EQ2, _) | (SyntaxKind::NOT_EQ, _) => {
+            let Some(e) = cx.engine() else { return };
+            if !matches!(crate::analysis::lints::certain_type(e, &other, true), Some(TypeRef::Named { ref fq, nullable: false, .. }) if fq.as_deref() == Some("kotlin.Boolean")) {
+                return;
+            }
+            if value == (op.kind() == SyntaxKind::EQ2) {
+                other.text().to_string()
+            } else if simple(&other) {
+                format!("!{}", other.text())
+            } else {
+                format!("!({})", other.text())
+            }
+        }
+        _ => return,
+    };
+    // Keep precedence when the result is an operand of another operator.
+    let replacement = if n.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::BINARY_EXPR | SyntaxKind::PREFIX_EXPR)) && !simple(&other) { format!("({replacement})") } else { replacement };
+    out.report(&BOOLEAN_CONSTANTS, n.text_range(), "Boolean expression can be simplified", Some(Fix::replace("Simplify boolean expression", n.text_range(), replacement)));
+}
+
+/// `xs.count()` → `xs.size`, `s.count()` → `s.length`.
+fn count_with_size(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&COUNT_WITH_SIZE) {
+        return;
+    }
+    let Some((recv, callee)) = no_arg_call(n) else { return };
+    if callee.text() != "count" || !stdlib_call(cx, &callee) {
+        return;
+    }
+    let property = match container(cx, &recv) {
+        Some(Container::Collection | Container::Map | Container::Array) => "size",
+        Some(Container::CharSequence) => "length",
+        None => return,
+    };
+    out.report(&COUNT_WITH_SIZE, n.text_range(), format!("Could be replaced with '{property}'"), Some(Fix::replace(format!("Replace with '{property}'"), n.text_range(), format!("{}.{property}", recv.text()))));
+}
+
+/// `a.lowercase() == b.lowercase()` → `a.equals(b, ignoreCase = true)`.
+fn ignore_case_equals(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&IGNORE_CASE_EQUALS) || has_comments(n) {
+        return;
+    }
+    let (Some(op), Some((l, r))) = (binary_op(n), binary_operands(n)) else { return };
+    if !matches!(op.kind(), SyntaxKind::EQ2 | SyntaxKind::NOT_EQ) {
+        return;
+    }
+    let (Some((a, fa)), Some((b, fb))) = (no_arg_call(&l), no_arg_call(&r)) else { return };
+    let name = fa.text().to_string();
+    if fb.text() != name.as_str() || !matches!(name.as_str(), "lowercase" | "uppercase" | "toLowerCase" | "toUpperCase") || !stdlib_call(cx, &fa) || !stdlib_call(cx, &fb) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let string = |x: &SyntaxNode| matches!(e.type_of(x), Some(TypeRef::Named { ref fq, nullable: false, .. }) if fq.as_deref() == Some("kotlin.String"));
+    if !string(&a) || !string(&b) {
+        return;
+    }
+    let not = if op.kind() == SyntaxKind::NOT_EQ { "!" } else { "" };
+    let text = format!("{not}{}.equals({}, ignoreCase = true)", a.text(), b.text());
+    out.report(&IGNORE_CASE_EQUALS, n.text_range(), "Should be replaced with 'equals(..., ignoreCase = true)'", Some(Fix::replace("Replace with 'equals(..., ignoreCase = true)'", n.text_range(), text)));
 }

@@ -23,7 +23,11 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                     SyntaxKind::FUN => unit_return_type(&n, out),
                     SyntaxKind::IF_EXPR => redundant_if(&n, out),
                     SyntaxKind::CLASS_BODY => empty_class_body(&n, out),
-                    SyntaxKind::PRIMARY_CONSTRUCTOR => empty_constructor(&n, out),
+                    SyntaxKind::PRIMARY_CONSTRUCTOR => {
+                        empty_constructor(&n, out);
+                        constructor_keyword(&n, out);
+                    }
+                    SyntaxKind::ENUM_ENTRY => enum_entry_parens(&n, out),
                     SyntaxKind::CALL_EXPR => lambda_parens(&n, out),
                     SyntaxKind::PROPERTY_ACCESSOR => accessor(&n, out),
                     SyntaxKind::CLASS_INITIALIZER => init_block(cx, &n, out),
@@ -254,6 +258,25 @@ fn empty_constructor(ctor: &SyntaxNode, out: &mut Sink) {
         return;
     }
     out.report(&REDUNDANT_EMPTY_CONSTRUCTOR, ctor.text_range(), "Remove empty primary constructor", Some(Fix::delete("Remove empty primary constructor", ctor.text_range())));
+}
+
+/// `class A constructor(x: Int)`.
+fn constructor_keyword(ctor: &SyntaxNode, out: &mut Sink) {
+    let Some(kw) = ast::token(ctor, SyntaxKind::IDENT).filter(|t| t.text() == "constructor") else { return };
+    if modifiers(ctor).is_some() || has_comments(ctor) {
+        return;
+    }
+    let start = prev_significant(&kw).map_or(kw.text_range().start(), |t| t.text_range().end());
+    out.report(&REDUNDANT_CONSTRUCTOR_KEYWORD, kw.text_range(), "Redundant 'constructor' keyword", Some(Fix::delete("Remove redundant 'constructor' keyword", TextRange::new(start, kw.text_range().end()))));
+}
+
+/// `enum class E { A(), B }`.
+fn enum_entry_parens(entry: &SyntaxNode, out: &mut Sink) {
+    let Some(args) = entry.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) else { return };
+    if args.children().next().is_some() || has_comments(&args) {
+        return;
+    }
+    out.report(&REDUNDANT_ENUM_CONSTRUCTOR_INVOCATION, args.text_range(), "Redundant enum constructor invocation", Some(Fix::delete("Remove enum constructor invocation", args.text_range())));
 }
 
 fn lambda_parens(call: &SyntaxNode, out: &mut Sink) {

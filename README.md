@@ -1,4 +1,4 @@
-# kotlin-lsp-rus
+# Kotlin LSP Rust
 
 Vibe coded kotlin-lsp in rust.
 

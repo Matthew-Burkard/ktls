@@ -223,7 +223,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `RedundantNullableReturnType`, `RedundantRequireNotNullCall`
 - [ ] [P1] `RedundantWith`, `RedundantAsSequence`, `RedundantSamConstructor`
 - [ ] [P1] `RedundantElvisReturnNull`, `RedundantRunCatching`
-- [ ] [P1] `RedundantConstructorKeyword`, `RedundantEnumConstructorInvocation`
+- [x] [P1] `RedundantConstructorKeyword`, `RedundantEnumConstructorInvocation`
 - [ ] [P1] `RedundantLabelMigration`, `RedundantValueArgument` (arg equals default)
 - [~] [P1] `RedundantExplicitTypeArguments` (`listOf<Int>(1)`) — *partial: as `RemoveExplicitTypeArguments`, for calls with one candidate whose type parameters are whole parameter types bound by arguments of exactly that certain type*
 - [~] [P1] `UnusedImport`, `UnusedSymbol` (unused private/internal declarations), `UnusedReceiverParameter`, `UnusedLambdaExpressionBody`, `UnusedUnaryOperator` — *partial: `UnusedImport`, `UnusedSymbol` for private and local declarations*
@@ -241,7 +241,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `ReplaceSizeCheckWithIsNotEmpty`, `ReplaceSizeZeroCheckWithIsEmpty`, `ReplaceIsEmptyWithIfEmpty` — *partial: the size/length checks*
 - [x] [P1] `UseExpressionBody` (single `return` block body; a cursor action by default)
 - [ ] [P1] `IfThenToSafeAccess`, `IfThenToElvis`, `FoldInitializerAndIfToElvis`
-- [ ] [P1] `ReplaceNegatedIsEmptyWithIsNotEmpty`, `SimplifyNegatedBinaryExpression`, `SimplifyBooleanWithConstants`
+- [x] [P1] `ReplaceNegatedIsEmptyWithIsNotEmpty`, `SimplifyNegatedBinaryExpression`, `SimplifyBooleanWithConstants` (stdlib `isEmpty`/`isBlank` pairs; `==`, `===`, `in`, `is`; `&& true`, `|| false`, `== true/false` on non-null Booleans)
 - [~] [P1] `ConvertTwoComparisonsToRangeCheck`, `ConvertNaNEquality` — *partial: `ConvertNaNEquality`*
 - [ ] [P1] `ReplaceJavaStaticMethodWithKotlinAnalog` (`Math.max`, `System.out.println`, `Arrays.asList`…)
 - [ ] [P1] `ReplaceToStringWithStringTemplate`, `ReplaceSubstringWithTake/Drop/SubstringBefore/After`
@@ -256,7 +256,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [~] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate` — *partial: `RemoveExplicitTypeArguments`*
 - [~] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda` — *partial: `SelfAssignment` of local variables*
 - [ ] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`)
-- [ ] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals`
+- [~] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals` — *partial: `ReplaceWithIgnoreCaseEquals`*
 - [ ] [P1] `ReplaceStringFormatWithLiteral`, `ReplaceReadLineWithReadln`, `ReplacePrintlnWithLogging`
 - [ ] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet`
 - [~] [P1] `UnnecessaryVariable`, `UnnecessaryOptInAnnotation` — *partial: `UnnecessaryVariable` (`val x = e; return x`)*
@@ -264,7 +264,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [ ] [P1] `ConvertSecondaryConstructorToPrimary`, `ConvertTryFinallyToUseCall`
 - [~] [P1] `ControlFlowWithEmptyBody`, `EmptyRange` — *partial: `ControlFlowWithEmptyBody`*
 - [ ] [P2] `DestructuringWrongName`, `UnusedDataClassCopyResult`
-- [ ] [P2] `ReplaceCollectionCountWithSize`, `PlatformExtensionReceiverOfInline`
+- [~] [P2] `ReplaceCollectionCountWithSize`, `PlatformExtensionReceiverOfInline` — *partial: `ReplaceCollectionCountWithSize`*
 
 **Collections & sequences**
 - [~] [P1] `SimplifiableCallChain` (`filter{}.first()` → `first{}`, `map{}.filterNotNull()` → `mapNotNull{}`, `sortedBy{}.first()` → `minBy{}`…) — *partial: `filter{}` + `first`/`firstOrNull`/`last`/`lastOrNull`/`single`/`singleOrNull`/`count`/`size`/`any`/`none`/`isEmpty`/`isNotEmpty`, `map{}` + `filterNotNull`/`joinToString`, `sortedBy{}`/`sortedByDescending{}` + `first`/`firstOrNull` on iterables, arrays and sequences*

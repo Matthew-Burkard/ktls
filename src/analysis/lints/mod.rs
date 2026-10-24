@@ -286,6 +286,8 @@ rules! {
     REDUNDANT_TYPE_ARGUMENTS = "RemoveExplicitTypeArguments", Redundancy, Warning, true, [], "Explicit type arguments that the arguments already determine";
     REDUNDANT_EXPLICIT_TYPE = "RedundantExplicitType", Redundancy, Warning, true, [], "Local variable type that its initializer (literal or constructor call) states anyway";
     REDUNDANT_QUALIFIER = "RemoveRedundantQualifierName", Redundancy, Warning, true, [], "Package or class qualifier of a name that resolves the same without it";
+    REDUNDANT_CONSTRUCTOR_KEYWORD = "RedundantConstructorKeyword", Redundancy, Warning, true, [], "'constructor' keyword on a primary constructor without modifiers";
+    REDUNDANT_ENUM_CONSTRUCTOR_INVOCATION = "RedundantEnumConstructorInvocation", Redundancy, Warning, true, [], "Empty '()' after an enum entry";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
@@ -299,6 +301,11 @@ rules! {
     EMPTY_CONTROL_FLOW = "ControlFlowWithEmptyBody", Style, Info, false, [], "'if', 'else', 'for' or 'while' with an empty body";
     OPERATOR_ASSIGNMENT = "ReplaceWithOperatorAssignment", Style, Info, false, [], "'x = x + y' instead of 'x += y'";
     PUT_ASSIGNMENT = "ReplacePutWithAssignment", Style, Info, false, [], "'map.put(k, v)' instead of 'map[k] = v'";
+    NEGATED_IS_EMPTY = "ReplaceNegatedIsEmptyWithIsNotEmpty", Style, Info, false, [], "'!xs.isEmpty()' instead of 'xs.isNotEmpty()'";
+    NEGATED_BINARY = "SimplifyNegatedBinaryExpression", Style, Info, false, [], "'!(a == b)' instead of 'a != b'";
+    BOOLEAN_CONSTANTS = "SimplifyBooleanWithConstants", Style, Info, false, [], "'x && true', 'x || false', 'x == true' and similar";
+    COUNT_WITH_SIZE = "ReplaceCollectionCountWithSize", Style, Info, false, [], "'xs.count()' instead of 'xs.size'";
+    IGNORE_CASE_EQUALS = "ReplaceWithIgnoreCaseEquals", Style, Info, false, [], "'a.lowercase() == b.lowercase()' instead of 'a.equals(b, ignoreCase = true)'";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";

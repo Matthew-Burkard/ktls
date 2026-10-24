@@ -2278,3 +2278,62 @@ fun f(a: java.lang.Integer, b: java.util.List<String>, c: String, d: List<Int>, 
     let mapped: Vec<_> = found.iter().filter(|f| f.starts_with("PLATFORM_CLASS_MAPPED_TO_KOTLIN")).collect();
     assert_eq!(mapped, vec!["PLATFORM_CLASS_MAPPED_TO_KOTLIN: java.lang.Integer", "PLATFORM_CLASS_MAPPED_TO_KOTLIN: java.util.List", "PLATFORM_CLASS_MAPPED_TO_KOTLIN: Integer", "PLATFORM_CLASS_MAPPED_TO_KOTLIN: java.lang.Object"]);
 }
+
+#[test]
+fn simplification_inspections() {
+    let found = lint(
+        r#"package a
+
+class A constructor(val x: Int)
+class B private constructor(val x: Int)
+enum class E { X(), Y, Z(1); constructor(n: Int = 0) }
+
+fun f(xs: List<Int>, s: String, t: String, ok: Boolean, o: java.util.Optional<Int>, n: Boolean?) {
+    if (!xs.isEmpty()) println(1)
+    if (!s.isBlank()) println(2)
+    if (!o.isEmpty()) println(3)
+    if (!(xs.size == 1)) println(4)
+    if (!(s in xs.map { it.toString() })) println(5)
+    if (!(s is CharSequence)) println(6)
+    if (ok && true) println(7)
+    if (false || ok) println(8)
+    if (ok == false) println(9)
+    if (n == true) println(10)
+    println(xs.count() + s.count() + xs.count { it > 1 })
+    if (s.lowercase() == t.lowercase()) println(11)
+}
+"#,
+    );
+    has(&found, "RedundantConstructorKeyword: constructor");
+    has(&found, "RedundantEnumConstructorInvocation: ()");
+    assert_eq!(found.iter().filter(|f| f.starts_with("RedundantConstructorKeyword")).count(), 1, "{found:#?}");
+    assert_eq!(found.iter().filter(|f| f.starts_with("RedundantEnumConstructorInvocation")).count(), 1, "{found:#?}");
+    if !Fixture::new().typed() {
+        return;
+    }
+    has(&found, "ReplaceNegatedIsEmptyWithIsNotEmpty: !xs.isEmpty()");
+    has(&found, "ReplaceNegatedIsEmptyWithIsNotEmpty: !s.isBlank()");
+    assert!(!found.iter().any(|f| f.contains("!o.isEmpty()")), "Optional.isEmpty has no isNotEmpty: {found:#?}");
+    has(&found, "SimplifyNegatedBinaryExpression: !(xs.size == 1)");
+    has(&found, "SimplifyNegatedBinaryExpression: !(s is CharSequence)");
+    assert_eq!(found.iter().filter(|f| f.starts_with("SimplifyNegatedBinaryExpression")).count(), 3, "{found:#?}");
+    has(&found, "SimplifyBooleanWithConstants: ok && true");
+    has(&found, "SimplifyBooleanWithConstants: false || ok");
+    has(&found, "SimplifyBooleanWithConstants: ok == false");
+    assert!(!found.iter().any(|f| f.contains("n == true")), "nullable Boolean: {found:#?}");
+    has(&found, "ReplaceCollectionCountWithSize: xs.count()");
+    has(&found, "ReplaceCollectionCountWithSize: s.count()");
+    assert_eq!(found.iter().filter(|f| f.starts_with("ReplaceCollectionCountWithSize")).count(), 2, "{found:#?}");
+    has(&found, "ReplaceWithIgnoreCaseEquals: s.lowercase() == t.lowercase()");
+    let check = |body: &str, rule: &str, expected: &str| {
+        let text = format!("package a\n\nfun f(xs: List<Int>, s: String, t: String, ok: Boolean) {{\n    println({body})\n}}\n");
+        let out = fixed(&text, rule);
+        assert!(out.contains(&format!("println({expected})")), "{out}");
+    };
+    check("!xs.isEmpty()", "ReplaceNegatedIsEmptyWithIsNotEmpty", "xs.isNotEmpty()");
+    check("!(s == t)", "SimplifyNegatedBinaryExpression", "s != t");
+    check("ok == false", "SimplifyBooleanWithConstants", "!ok");
+    check("xs.count()", "ReplaceCollectionCountWithSize", "xs.size");
+    check("s.uppercase() != t.uppercase()", "ReplaceWithIgnoreCaseEquals", "!s.equals(t, ignoreCase = true)");
+    assert!(fixed("package a\n\nclass A constructor(val x: Int)\n", "RedundantConstructorKeyword").contains("class A(val x: Int)"));
+}
