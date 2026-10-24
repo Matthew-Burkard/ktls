@@ -23,6 +23,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                         to_string_in_template(cx, &n, out);
                     }
                     SyntaxKind::SECONDARY_CONSTRUCTOR => empty_secondary_body(cx, &n, out),
+                    SyntaxKind::CLASS if has_modifier(&n, "inner") => redundant_inner(cx, &n, out),
                     SyntaxKind::MODIFIER_LIST => modifier_list(cx, &n, out),
                     SyntaxKind::FUN => {
                         unit_return_type(&n, out);
@@ -60,6 +61,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                         as_sequence(cx, &n, out);
                         run_catching(cx, &n, out);
                         redundant_let(cx, &n, out);
+                        complex_let(cx, &n, out);
                         useless_on_collection(cx, &n, out);
                     }
                     SyntaxKind::SAFE_QUALIFIED_EXPR => redundant_let(cx, &n, out),
@@ -1218,4 +1220,77 @@ fn useless_on_collection(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     // `toList()` keeps the copy semantics of `filterNotNull()` for lists; drop for others.
     let range = TextRange::new(recv.text_range().end(), call.text_range().end());
     out.report(&USELESS_CALL_ON_COLLECTION, callee.text_range(), "Useless call on collection type: its elements are never null", Some(Fix::delete("Remove useless call", range)));
+}
+
+/// `inner class` that uses nothing of its outer instance.
+fn redundant_inner(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
+    use crate::analysis::ide::infer::Def;
+    if !cx.on(&REDUNDANT_INNER) || in_error(class) {
+        return;
+    }
+    let Some(outer) = class.parent().filter(|b| b.kind() == SyntaxKind::CLASS_BODY).and_then(|b| b.parent()) else { return };
+    let Some(outer_name) = name_token(&outer).map(|t| ast::ident_text(&t)) else { return };
+    // `this@Outer`, or a nested inner class (it needs the outer chain).
+    if class.descendants().any(|d| d.kind() == SyntaxKind::LABEL_QUALIFIER || d.kind() == SyntaxKind::CLASS && d != *class && has_modifier(&d, "inner")) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let outer_defs = e.resolve_name_text(&outer, &outer_name);
+    let Some(Def::Symbol { sym: outer_sym, .. }) = outer_defs.iter().find(|d| matches!(d, Def::Symbol { sym, .. } if sym.kind.is_classifier())) else { return };
+    let outer_fq = outer_sym.fq_name.clone();
+    for r in class.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF) {
+        // Selectors (`x.f`) belong to their receiver.
+        if r.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(&r)) || r.parent().and_then(|c| c.parent()).is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child() != r.parent()) {
+            continue;
+        }
+        let defs = e.resolve_name_ref(&r);
+        if defs.is_empty() {
+            return;
+        }
+        for d in &defs {
+            let Def::Symbol { sym, .. } = d else { continue };
+            // An instance member of the outer class (or one of its other inner classes).
+            let owner = sym.fq_name.trim_end_matches(".<init>").rsplit_once('.').map(|(o, _)| o.to_string()).unwrap_or_default();
+            let member_of_outer = owner == outer_fq && !sym.modifiers.has(crate::symbols::Modifiers::STATIC) && !sym.kind.is_classifier() || sym.modifiers.has(crate::symbols::Modifiers::INNER);
+            // Members inherited by the outer class count too.
+            let inherited = !member_of_outer && e.supertype_closure(&crate::symbols::TypeRef::named(&outer_fq)).iter().filter_map(crate::analysis::ide::infer::fq_of).any(|s| s == owner) && !sym.kind.is_classifier();
+            if member_of_outer || inherited {
+                return;
+            }
+        }
+    }
+    let Some(kw) = modifiers(class).and_then(|m| m.modifiers().find(|t| t.text() == "inner")) else { return };
+    let end = kw.next_token().filter(|t| t.kind().is_trivia()).map_or(kw.text_range().end(), |t| t.text_range().end());
+    out.report(&REDUNDANT_INNER, kw.text_range(), "Redundant 'inner' modifier", Some(Fix::delete("Remove 'inner' modifier", TextRange::new(kw.text_range().start(), end))));
+}
+
+/// `x.let { f(it) }` → `f(x)` (`it` passed once, nothing else).
+fn complex_let(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&COMPLEX_REDUNDANT_LET) || n.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || has_comments(n) {
+        return;
+    }
+    let mut parts = n.children();
+    let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    let Some(callee) = call.first_child().filter(|c| call.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF && c.text() == "let") else { return };
+    if call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_some_and(|l| l.children().next().is_some()) || !matches!(recv.kind(), SyntaxKind::NAME_REF | SyntaxKind::LITERAL | SyntaxKind::STRING_TEMPLATE) {
+        return;
+    }
+    let Some(lambda) = call.children().find(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT).and_then(|a| a.children().find(|c| c.kind() == SyntaxKind::LAMBDA_EXPR)) else { return };
+    if lambda.children().any(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) {
+        return;
+    }
+    let Some(body) = lambda.children().find(|c| c.kind() == SyntaxKind::BLOCK).and_then(|b| only_statement(&b)) else { return };
+    if body.kind() != SyntaxKind::CALL_EXPR || body.first_child().is_none_or(|c| c.kind() != SyntaxKind::NAME_REF) || body.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) {
+        return;
+    }
+    let uses: Vec<SyntaxNode> = body.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d.text() == "it").collect();
+    let [it] = uses.as_slice() else { return };
+    if it.parent().is_none_or(|p| p.kind() != SyntaxKind::VALUE_ARGUMENT) || !stdlib(cx, &callee) {
+        return;
+    }
+    let base = body.text_range().start();
+    let mut text = body.text().to_string();
+    let r = it.text_range() - base;
+    text.replace_range(usize::from(r.start())..usize::from(r.end()), &recv.text().to_string());
+    out.report(&COMPLEX_REDUNDANT_LET, callee.text_range(), "Redundant 'let' call could be removed", Some(Fix::replace("Remove 'let' call", n.text_range(), text)));
 }

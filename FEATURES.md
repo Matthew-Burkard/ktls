@@ -224,7 +224,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `RemoveCurlyBracesFromTemplate` (`${x}` → `$x`), `RemoveSingleExpressionStringTemplate`
 - [x] [P1] `RedundantCompanionReference`, `RedundantObjectTypeCheck` (`C.Companion.member`; `is Obj` → `== Obj`)
 - [x] [P1] `RedundantGetter` / `RedundantSetter`
-- [~] [P1] `RedundantInnerClassModifier`, `RedundantEmptyInitializerBlock` — *partial: `RedundantEmptyInitializerBlock`*
+- [~] [P1] `RedundantInnerClassModifier`, `RedundantEmptyInitializerBlock` — *partial: `RedundantInnerClassModifier`; `RedundantEmptyInitializerBlock`*
 - [x] [P1] `RedundantNullableReturnType`, `RedundantRequireNotNullCall` (final functions whose every result is certainly non-null; values of certain non-null type)
 - [~] [P1] `RedundantWith`, `RedundantAsSequence`, `RedundantSamConstructor` — *partial: `RedundantAsSequence` (iterables and arrays followed by a terminal operation)*
 - [x] [P1] `RedundantElvisReturnNull`, `RedundantRunCatching`
@@ -254,16 +254,16 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `ReplaceWithOperatorAssignment` (`x = x + 1` → `x += 1`) — *numbers, chars and strings (other types may have `plusAssign`); names and `this.x`/`a.b` chains only*
 - [~] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `ReplaceArrayOfWithLiteral` (annotations) — *partial: `ReplaceArrayOfWithLiteral`; array `==` via the compiler warning*
 - [x] [P1] `ReplacePutWithAssignment` (`map.put(k, v)` → `map[k] = v`) — *on `MutableMap`s, when the result is not used*
-- [~] [P1] `ReplaceAssociateFunction`, `ReplaceMapIndexedWithListGenerator` — *partial: `ReplaceAssociateFunction` (`associateWith`, `associateBy`)*
+- [~] [P1] `ReplaceAssociateFunction`, `ReplaceMapIndexedWithListGenerator` — *partial: `ReplaceMapIndexedWithListGenerator`; `ReplaceAssociateFunction` (`associateWith`, `associateBy`)*
 - [x] [P1] `JoinDeclarationAndAssignment`, `MoveVariableDeclarationIntoWhen` (assignment / `when` right after)
 - [x] [P1] `MayBeConstant` (`val` → `const val`)
-- [ ] [P1] `ObjectLiteralToLambda`, `ConvertLambdaToReference`, `ConvertReferenceToLambda`
+- [~] [P1] `ObjectLiteralToLambda`, `ConvertLambdaToReference`, `ConvertReferenceToLambda` — *partial: `ConvertLambdaToReference` (code action; trailing lambdas calling one top-level function)*
 - [~] [P1] `RemoveExplicitTypeArguments`, `RemoveToStringInStringTemplate` — *partial: `RemoveToStringInStringTemplate`; `RemoveExplicitTypeArguments`*
-- [~] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda` — *partial: `SelfAssignment` of local variables*
+- [~] [P1] `SelfAssignment`, `SuspiciousEqualsCombination`, `SuspiciousCallableReferenceInLambda` — *partial: `SuspiciousCallableReferenceInLambda`; `SelfAssignment` of local variables*
 - [x] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`, `requireNotNull`/`checkNotNull`; `val x = y!!` in functions returning Unit or nullable)
-- [~] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals` — *partial: `ReplaceWithIgnoreCaseEquals`*
-- [~] [P1] `ReplaceStringFormatWithLiteral`, `ReplaceReadLineWithReadln`, `ReplacePrintlnWithLogging` — *partial: `ReplaceReadLineWithReadln`*
-- [~] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet` — *partial: `SimpleRedundantLet` (`x.let { it.f() }`, `x?.let { it.f() }`)*
+- [~] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals` — *partial: `ReplaceWithEnumMap` (`hashMapOf`/`HashMap` with explicit enum keys); `ReplaceWithIgnoreCaseEquals`*
+- [~] [P1] `ReplaceStringFormatWithLiteral`, `ReplaceReadLineWithReadln`, `ReplacePrintlnWithLogging` — *partial: `ReplaceStringFormatWithLiteral` (only `%s`); `ReplaceReadLineWithReadln`*
+- [~] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet` — *partial: `ComplexRedundantLet` (`x.let { f(it) }`); `SimpleRedundantLet` (`x.let { it.f() }`, `x?.let { it.f() }`)*
 - [~] [P1] `UnnecessaryVariable`, `UnnecessaryOptInAnnotation` — *partial: `UnnecessaryVariable` (`val x = e; return x`)*
 - [~] [P1] `KotlinConstantConditions` (always true/false) — *partial: literal conditions (not `while (true)`) and comparisons of integer literals*
 - [ ] [P1] `ConvertSecondaryConstructorToPrimary`, `ConvertTryFinallyToUseCall`

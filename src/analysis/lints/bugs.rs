@@ -46,6 +46,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             }
             SyntaxKind::CONDITION => constant_condition(cx, &n, out),
             SyntaxKind::OBJECT_DECLARATION => serializable_object(cx, &n, out),
+            SyntaxKind::LAMBDA_EXPR => callable_reference_in_lambda(cx, &n, out),
             SyntaxKind::DELEGATED_SUPER_TYPE_ENTRY => delegation_to_var(cx, &n, out),
             SyntaxKind::PREFIX_EXPR => wrap_unary(cx, &n, out),
             SyntaxKind::NAME_REF if n.text() == "GlobalScope" => global_scope(cx, &n, out),
@@ -746,4 +747,22 @@ fn serializable_object(cx: &Cx, o: &SyntaxNode, out: &mut Sink) {
     if serializable {
         out.report(&SERIALIZABLE_OBJECT, name.text_range(), "Serializable object must implement 'readResolve'", None);
     }
+}
+
+
+/// `xs.map { ::f }`: the lambda returns the reference instead of calling it.
+fn callable_reference_in_lambda(cx: &Cx, l: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&CALLABLE_REFERENCE_IN_LAMBDA) || l.children().any(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) {
+        return;
+    }
+    let Some(body) = l.children().find(|c| c.kind() == SyntaxKind::BLOCK).and_then(|b| only_statement(&b)) else { return };
+    if body.kind() != SyntaxKind::CALLABLE_REFERENCE {
+        return;
+    }
+    // Only as an argument (a lambda stored in a variable may mean to return a reference).
+    let Some(arg) = l.parent().filter(|p| p.kind() == SyntaxKind::LAMBDA_ARGUMENT) else { return };
+    let start = arg.parent().and_then(|c| c.first_child()).map_or(arg.text_range().start(), |c| c.text_range().end());
+    let fix = Fix::replace("Replace the lambda with the reference", TextRange::new(start, arg.text_range().end()), format!("({})", body.text()));
+    let only_lambda = arg.parent().is_some_and(|c| c.children().find(|x| x.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_none());
+    out.report(&CALLABLE_REFERENCE_IN_LAMBDA, body.text_range(), "Suspicious callable reference as the only lambda element", only_lambda.then_some(fix));
 }

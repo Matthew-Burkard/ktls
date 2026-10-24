@@ -357,6 +357,8 @@ rules! {
     EMPTY_SECONDARY_CONSTRUCTOR_BODY = "RemoveEmptySecondaryConstructorBody", Redundancy, Warning, true, [], "Empty '{}' body of a secondary constructor";
     TO_STRING_IN_TEMPLATE = "RemoveToStringInStringTemplate", Redundancy, Warning, true, [], "'${x.toString()}' in a string template";
     USELESS_CALL_ON_COLLECTION = "UselessCallOnCollection", Redundancy, Warning, true, [], "'filterNotNull()' on a collection whose elements are never null";
+    REDUNDANT_INNER = "RedundantInnerClassModifier", Redundancy, Warning, true, [], "'inner' on a class that never uses its outer instance";
+    COMPLEX_REDUNDANT_LET = "ComplexRedundantLet", Redundancy, Info, false, [], "'x.let { f(it) }' instead of 'f(x)'";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
@@ -404,6 +406,10 @@ rules! {
     UNTIL_TO_RANGE_UNTIL = "ReplaceUntilWithRangeUntil", Style, Action, false, [], "'a until b' instead of 'a..<b'";
     IS_EMPTY_TO_IF_EMPTY = "ReplaceIsEmptyWithIfEmpty", Style, Info, false, [], "'if (s.isEmpty()) d else s' instead of 's.ifEmpty { d }'";
     TWO_COMPARISONS_TO_RANGE = "ConvertTwoComparisonsToRangeCheck", Style, Info, false, [], "'x >= a && x <= b' instead of 'x in a..b'";
+    STRING_FORMAT_TO_TEMPLATE = "ReplaceStringFormatWithLiteral", Style, Info, false, [], "'String.format(\"%s…\", a)' instead of a string template";
+    ENUM_MAP = "ReplaceWithEnumMap", Style, Info, false, [], "'hashMapOf<Enum, V>()' instead of 'EnumMap'";
+    MAP_INDEXED_TO_LIST = "ReplaceMapIndexedWithListGenerator", Style, Info, false, [], "'xs.mapIndexed { i, _ -> … }' instead of 'List(xs.size) { i -> … }'";
+    LAMBDA_TO_REFERENCE = "ConvertLambdaToReference", Style, Action, false, [], "'xs.map { f(it) }' instead of 'xs.map(::f)'";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
@@ -427,6 +433,7 @@ rules! {
     RECURSIVE_EQUALS = "RecursiveEqualsCall", Bugs, Warning, false, [], "'==' with 'this' inside 'equals' (calls itself)";
     SERIALIZABLE_OBJECT = "JavaIoSerializableObjectMustHaveReadResolve", Bugs, Warning, false, [], "Serializable 'object' without 'readResolve' (deserializing makes a second instance)";
     BLOCKING_IN_SUSPEND = "BlockingMethodInNonBlockingContext", Bugs, Warning, false, [], "'Thread.sleep' inside a suspend function";
+    CALLABLE_REFERENCE_IN_LAMBDA = "SuspiciousCallableReferenceInLambda", Bugs, Warning, false, [], "'{ ::f }': a lambda returning a function reference";
     SELF_ASSIGNMENT = "SelfAssignment", Bugs, Warning, false, [], "Variable assigned to itself";
     EQUALS_OR_HASH_CODE = "EqualsOrHashCode", Bugs, Warning, false, [], "Class overrides only one of 'equals()' and 'hashCode()'";
     ARRAY_IN_DATA_CLASS = "ArrayInDataClass", Bugs, Warning, false, [], "Array property in a data class without custom 'equals()'/'hashCode()'";

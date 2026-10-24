@@ -3143,3 +3143,52 @@ fun g(n: Int, s: String, xs: List<String>) {
     check("n >= 1 && n < 10", "ConvertTwoComparisonsToRangeCheck", "println(n in 1..<10)");
     check("\"${n.toString()}\"", "RemoveToStringInStringTemplate", "println(\"${n}\")");
 }
+
+#[test]
+fn inner_let_format_and_reference_inspections() {
+    let found = lint("package a\n\nfun f(xs: List<Int>) = xs.map { ::println }\n");
+    has(&found, "SuspiciousCallableReferenceInLambda: ::println");
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = lint(
+        r#"package a
+
+enum class Color { RED }
+
+class Outer(val size: Int) {
+    inner class Plain { fun f() = 1 }
+    inner class UsesOuter { fun f() = size }
+    inner class UsesOther { fun g() = Plain() }
+}
+
+fun twice(x: Int) = x * 2
+
+fun f(name: String, n: Int, xs: List<Int>) {
+    println(String.format("%s has %s", name, n))
+    println("%s!".format(name))
+    println(String.format("%d", n))
+    val m = hashMapOf<Color, Int>()
+    println(xs.mapIndexed { i, _ -> i * 2 })
+    println(name.let { println(it) })
+    println(xs.map { twice(it) })
+    println(m)
+}
+"#,
+    );
+    let inner: Vec<_> = found.iter().filter(|f| f.starts_with("RedundantInnerClassModifier")).collect();
+    assert_eq!(inner.len(), 1, "only Plain: {found:#?}");
+    assert_eq!(found.iter().filter(|f| f.starts_with("ReplaceStringFormatWithLiteral")).count(), 2, "{found:#?}");
+    has(&found, "ReplaceWithEnumMap: hashMapOf");
+    has(&found, "ReplaceMapIndexedWithListGenerator: mapIndexed");
+    has(&found, "ComplexRedundantLet: let");
+    has(&found, "ConvertLambdaToReference: { twice(it) }");
+    let check = |body: &str, rule: &str, expected: &str| {
+        let out = fixed(&format!("package a\n\nenum class Color {{ RED }}\nfun twice(x: Int) = x * 2\nfun f(name: String, n: Int, xs: List<Int>) {{\n    println({body})\n}}\n"), rule);
+        assert!(out.contains(expected), "{rule}: {out}");
+    };
+    check("String.format(\"%s has %s\", name, n)", "ReplaceStringFormatWithLiteral", "println(\"$name has $n\")");
+    check("hashMapOf<Color, Int>()", "ReplaceWithEnumMap", "println(EnumMap<Color, Int>(Color::class.java))");
+    check("xs.map { twice(it) }", "ConvertLambdaToReference", "println(xs.map(::twice))");
+    check("name.let { println(it) }", "ComplexRedundantLet", "println(println(name))");
+}

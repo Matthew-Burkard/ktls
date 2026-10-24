@@ -31,6 +31,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 java_static_method(cx, &n, out);
                 copy_without_names(cx, &n, out);
                 java_map_for_each(cx, &n, out);
+                string_format(cx, &n, out);
+                map_indexed(cx, &n, out);
+                lambda_to_reference(cx, &n, out);
                 substring(cx, &n, out);
                 simplifiable_call(cx, &n, out);
                 associate_function(cx, &n, out);
@@ -39,6 +42,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::CALL_EXPR => {
                 readln(cx, &n, out);
                 property_access(cx, &n, out);
+                enum_map(cx, &n, out);
+                if n.parent().is_none_or(|p| p.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || p.first_child().as_ref() == Some(&n)) {
+                    lambda_to_reference(cx, &n, out);
+                }
             }
             SyntaxKind::PREFIX_EXPR => {
                 negated_is_empty(cx, &n, out);
@@ -1690,4 +1697,129 @@ fn two_comparisons(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     }
     let range_op = if inclusive { ".." } else { "..<" };
     out.report(&TWO_COMPARISONS_TO_RANGE, n.text_range(), "Two comparisons should be converted to a range check", Some(Fix::replace("Convert to a range check", n.text_range(), format!("{x} in {lo}{range_op}{hi}"))));
+}
+
+/// `String.format("%s and %s", a, b)` / `"%s".format(a)` with only `%s` → a template.
+fn string_format(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&STRING_FORMAT_TO_TEMPLATE) || has_comments(n) {
+        return;
+    }
+    let mut parts = n.children();
+    let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    let Some(callee) = call.first_child().filter(|c| call.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF && c.text() == "format") else { return };
+    let Some(mut args) = plain_arguments(&call) else { return };
+    // `String.format` (Kotlin's or Java's) or `"…".format`, which format `%s` alike.
+    let format = if recv.text() == "String" || recv.text() == "java.lang.String" {
+        if args.is_empty() {
+            return;
+        }
+        args.remove(0)
+    } else {
+        recv.clone()
+    };
+    let Some(content) = plain_string(&format) else { return };
+    // Only `%s`, no other specifiers and no templates already.
+    if content.contains('$') || content.matches('%').count() != content.matches("%s").count() || content.matches("%s").count() != args.len() || args.is_empty() {
+        return;
+    }
+    let mut text = String::from("\"");
+    let mut rest = content.as_str();
+    for a in &args {
+        let Some(at) = rest.find("%s") else { return };
+        text.push_str(&rest[..at]);
+        rest = &rest[at + 2..];
+        let next_name = rest.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if a.kind() == SyntaxKind::NAME_REF && !next_name {
+            text.push_str(&format!("${}", a.text()));
+        } else {
+            text.push_str(&format!("${{{}}}", a.text()));
+        }
+    }
+    text.push_str(rest);
+    text.push('"');
+    out.report(&STRING_FORMAT_TO_TEMPLATE, callee.text_range(), "String.format call can be replaced with string template", Some(Fix::replace("Replace with string template", n.text_range(), text)));
+}
+
+/// `hashMapOf<Color, Int>()` / `HashMap<Color, Int>()` → `EnumMap<Color, Int>(Color::class.java)`.
+fn enum_map(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && matches!(c.text().to_string().as_str(), "hashMapOf" | "HashMap")) else { return };
+    if !cx.on(&ENUM_MAP) || cx.module.is_some_and(|m| m.kotlin.multiplatform) {
+        return;
+    }
+    let Some(targs) = call.children().find(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) else { return };
+    if call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_none_or(|l| l.children().next().is_some()) || call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) {
+        return;
+    }
+    let projections: Vec<SyntaxNode> = targs.children().filter(|c| c.kind() == SyntaxKind::TYPE_PROJECTION).collect();
+    let [key, value] = projections.as_slice() else { return };
+    let Some(tr) = key.children().find_map(ast::TypeRef::cast) else { return };
+    let Some(e) = cx.engine() else { return };
+    let t = e.resolve_syntax_type(&tr);
+    if !fq_of(&t).and_then(|fq| e.classifier(fq)).is_some_and(|c| c.symbol().kind == SymbolKind::Enum) || tr.syntax().text().to_string().ends_with('?') {
+        return;
+    }
+    let mut edits = vec![Edit { range: call.text_range(), text: format!("EnumMap<{}, {}>({}::class.java)", key.text(), value.text(), tr.syntax().text()) }];
+    if !cx.text.contains("import java.util.EnumMap") && !cx.text.contains("import java.util.*")
+        && let Some(file) = cx.snap.file(cx.path)
+    {
+        let (range, text) = crate::analysis::ide::completion::import_edit(file, "java.util.EnumMap");
+        edits.push(Edit { range, text });
+    }
+    out.report(&ENUM_MAP, callee.text_range(), "Replaceable with EnumMap", Some(Fix::new("Replace with EnumMap", edits)));
+}
+
+/// `xs.mapIndexed { i, _ -> f(i) }` → `List(xs.size) { i -> f(i) }`.
+fn map_indexed(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&MAP_INDEXED_TO_LIST) {
+        return;
+    }
+    let Some((recv, callee, lambda)) = lambda_only_call(n) else { return };
+    if callee.text() != "mapIndexed" {
+        return;
+    }
+    let Some(list) = lambda.children().find(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) else { return };
+    let params: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER).collect();
+    let [index, element] = params.as_slice() else { return };
+    if name_token(element).is_none_or(|t| t.text() != "_") || index.children().any(|c| c.kind() == SyntaxKind::TYPE_REFERENCE) {
+        return;
+    }
+    let Some(i) = name_token(index) else { return };
+    // Lists (and collections with a size) only.
+    if !matches!(container(cx, &recv), Some(Container::Collection)) || !stdlib_call(cx, &callee) {
+        return;
+    }
+    let Some(body) = lambda.children().find(|c| c.kind() == SyntaxKind::BLOCK) else { return };
+    out.report(&MAP_INDEXED_TO_LIST, callee.text_range(), "Replace 'mapIndexed' with List generator", Some(Fix::replace("Replace with List generator", n.text_range(), format!("List({}.size) {{ {} -> {} }}", recv.text(), i.text(), body.text()))));
+}
+
+/// `xs.map { f(it) }` → `xs.map(::f)` for a top-level or local function of one parameter.
+fn lambda_to_reference(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&LAMBDA_TO_REFERENCE) {
+        return;
+    }
+    let call = if n.kind() == SyntaxKind::CALL_EXPR { n.clone() } else { match n.children().nth(1).filter(|c| c.kind() == SyntaxKind::CALL_EXPR) { Some(c) => c, None => return } };
+    if call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_some_and(|l| l.children().next().is_some()) {
+        return;
+    }
+    let Some(arg) = call.children().find(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) else { return };
+    let Some(lambda) = arg.children().find(|c| c.kind() == SyntaxKind::LAMBDA_EXPR) else { return };
+    let Some((param, body)) = single_param_lambda(&lambda) else { return };
+    let Some(f) = body.first_child().filter(|c| body.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF) else { return };
+    let Some(args) = plain_arguments(&body) else { return };
+    if args.len() != 1 || args[0].text() != param.as_str() || body.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let defs = e.resolve_name_ref(&f);
+    let [Def::Symbol { sym, .. }] = defs.as_slice() else { return };
+    if sym.kind != SymbolKind::Function || sym.receiver.is_some() || sym.params.len() != 1 || !sym.type_params.is_empty() || sym.fq_name.rsplit_once('.').is_some_and(|(o, _)| e.classifier(o).is_some()) {
+        return;
+    }
+    // A reference to an overloaded name may not resolve.
+    if e.top_level_named(&sym.name).len() > 1 {
+        return;
+    }
+    // From the end of the callee: `map { … }` / `map() { … }` → `map(::f)`.
+    let start = call.first_child().map_or(arg.text_range().start(), |c| c.text_range().end());
+    out.report(&LAMBDA_TO_REFERENCE, lambda.text_range(), "Convert lambda to reference", Some(Fix::replace("Convert lambda to reference", TextRange::new(start, arg.text_range().end()), format!("(::{})", f.text()))));
 }
