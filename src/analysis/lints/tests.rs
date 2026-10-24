@@ -2413,3 +2413,57 @@ fun g() {
     let ok = lint("package a\n\nfun main() = println(1)\nfun main(args: Array<String>) {}\n");
     assert!(!ok.iter().any(|f| f.starts_with("MainFunctionReturnUnit")), "{ok:#?}");
 }
+
+#[test]
+fn restriction_and_value_compiler_checks() {
+    let found = compiler(
+        r#"package a
+
+object O<T>
+enum class E<T> { A }
+val f = fun named() {}
+val g = fun String.() {}
+open class C {
+    open tailrec fun down(n: Int): Int = if (n == 0) 0 else down(n - 1)
+    tailrec fun fact(n: Int, acc: Int = 1): Int = if (n <= 1) acc else fact(n - 1, acc * n)
+    tailrec fun none(n: Int): Int = n + 1
+}
+"#,
+    );
+    has(&found, "TYPE_PARAMETERS_IN_OBJECT: <T>");
+    has(&found, "TYPE_PARAMETERS_IN_ENUM: <T>");
+    has(&found, "ANONYMOUS_FUNCTION_WITH_NAME: named");
+    assert_eq!(found.iter().filter(|f| f.starts_with("ANONYMOUS_FUNCTION_WITH_NAME")).count(), 1, "{found:#?}");
+    has(&found, "TAILREC_ON_VIRTUAL_MEMBER_ERROR: tailrec");
+    has(&found, "NO_TAIL_CALLS_FOUND: none");
+    assert_eq!(found.iter().filter(|f| f.starts_with("NO_TAIL_CALLS_FOUND") || f.starts_with("TAILREC")).count(), 2, "{found:#?}");
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+enum class Color { RED }
+
+fun f(x: Int, d: Double, s: String?, a: IntArray, b: IntArray, any: Any, xs: List<Any>, c: Color) {
+    println(x / 0 + x % 0 + d / 0)
+    println(s ?: null)
+    println(a == b)
+    println(any is List<String>)
+    println(any is List<*>)
+    println(xs is ArrayList<Any>)
+    when (c) {
+        null -> println()
+        else -> println()
+    }
+}
+"#,
+    );
+    assert_eq!(found.iter().filter(|f| f.starts_with("DIVISION_BY_ZERO")).count(), 2, "{found:#?}");
+    has(&found, "USELESS_ELVIS_RIGHT_IS_NULL: ?: null");
+    has(&found, "ARRAY_EQUALITY_OPERATOR_CAN_BE_REPLACED_WITH_EQUALS: ==");
+    has(&found, "CANNOT_CHECK_FOR_ERASED: List<String>");
+    assert_eq!(found.iter().filter(|f| f.starts_with("CANNOT_CHECK_FOR_ERASED")).count(), 1, "{found:#?}");
+    has(&found, "SENSELESS_NULL_IN_WHEN: null");
+    assert!(fixed("package a\n\nfun f(a: IntArray, b: IntArray) = a != b\n", "ARRAY_EQUALITY_OPERATOR_CAN_BE_REPLACED_WITH_EQUALS").contains("= !a.contentEquals(b)"));
+}

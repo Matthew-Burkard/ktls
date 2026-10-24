@@ -17,11 +17,13 @@ mod labels;
 mod inheritance;
 mod jumps;
 mod markers;
+mod restrictions;
 mod shapes;
 mod signatures;
 mod types;
 mod typing;
 mod usage;
+mod values;
 mod variance;
 mod when;
 
@@ -48,4 +50,6 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     jvm::check(cx, out);
     labels::check(cx, out);
     variance::check(cx, out);
+    restrictions::check(cx, out);
+    values::check(cx, out);
 }

@@ -223,6 +223,11 @@ rules! {
     NOT_A_LOOP_LABEL = "NOT_A_LOOP_LABEL", Compiler, Error, false, [], "'break' or 'continue' with a label that is not on a loop";
     CONFLICTING_PROJECTION = "CONFLICTING_PROJECTION", Compiler, Error, false, [], "'in' projection of an 'out' type parameter, or the reverse";
     PROJECTION_IN_IMMEDIATE_ARGUMENT_TO_SUPERTYPE = "PROJECTION_IN_IMMEDIATE_ARGUMENT_TO_SUPERTYPE", Compiler, Error, false, [], "'in', 'out' or '*' type argument of a supertype";
+    TYPE_PARAMETERS_IN_OBJECT = "TYPE_PARAMETERS_IN_OBJECT", Compiler, Error, false, [], "Object declaration with type parameters";
+    TYPE_PARAMETERS_IN_ENUM = "TYPE_PARAMETERS_IN_ENUM", Compiler, Error, false, [], "Enum class with type parameters";
+    ANONYMOUS_FUNCTION_WITH_NAME = "ANONYMOUS_FUNCTION_WITH_NAME", Compiler, Error, false, [], "Anonymous function ('fun' expression) with a name";
+    TAILREC_ON_VIRTUAL_MEMBER_ERROR = "TAILREC_ON_VIRTUAL_MEMBER_ERROR", Compiler, Error, false, [], "'tailrec' on an open, abstract or interface member";
+    CANNOT_CHECK_FOR_ERASED = "CANNOT_CHECK_FOR_ERASED", Compiler, Error, false, [], "'is' check against type arguments erased at run time";
     TYPE_VARIANCE_CONFLICT = "TYPE_VARIANCE_CONFLICT", Compiler, Error, false, [], "'out' type parameter in an 'in' position (or the reverse) of a member";
     ARGUMENT_TYPE_MISMATCH = "ARGUMENT_TYPE_MISMATCH", Compiler, Error, false, [], "Argument of the wrong type (literal, typed local/parameter, constructor call) for a function without overloads";
     NULL_FOR_NONNULL_TYPE = "NULL_FOR_NONNULL_TYPE", Compiler, Error, false, [], "'null' for a non-null type";
@@ -245,6 +250,11 @@ rules! {
     EXTENSION_SHADOWED_BY_MEMBER = "EXTENSION_SHADOWED_BY_MEMBER", Compiler, Warning, false, [], "Extension with the signature of a member of its receiver";
     REDUNDANT_PROJECTION = "REDUNDANT_PROJECTION", Compiler, Warning, true, [], "'out' projection of an 'out' type parameter (or 'in' of an 'in' one)";
     PLATFORM_CLASS_MAPPED_TO_KOTLIN = "PLATFORM_CLASS_MAPPED_TO_KOTLIN", Compiler, Warning, false, [], "Java class used where its Kotlin counterpart should be ('java.lang.Integer', 'java.util.List')";
+    NO_TAIL_CALLS_FOUND = "NO_TAIL_CALLS_FOUND", Compiler, Warning, false, [], "'tailrec' function that never calls itself";
+    DIVISION_BY_ZERO = "DIVISION_BY_ZERO", Compiler, Warning, false, [], "Integer division or remainder by the constant zero";
+    USELESS_ELVIS_RIGHT_IS_NULL = "USELESS_ELVIS_RIGHT_IS_NULL", Compiler, Warning, true, [], "'?: null'";
+    SENSELESS_NULL_IN_WHEN = "SENSELESS_NULL_IN_WHEN", Compiler, Warning, false, [], "'null' branch in a 'when' on a non-null value";
+    ARRAY_EQUALITY_OPERATOR_CAN_BE_REPLACED_WITH_EQUALS = "ARRAY_EQUALITY_OPERATOR_CAN_BE_REPLACED_WITH_EQUALS", Compiler, Warning, false, [], "'==' between arrays (compares identity)";
     FINAL_UPPER_BOUND = "FINAL_UPPER_BOUND", Compiler, Warning, false, [], "Type parameter bounded by a final class";
     UNNECESSARY_SAFE_CALL = "UNNECESSARY_SAFE_CALL", Compiler, Warning, true, [], "'?.' on a non-null receiver";
     UNNECESSARY_NOT_NULL_ASSERTION = "UNNECESSARY_NOT_NULL_ASSERTION", Compiler, Warning, true, [], "'!!' on a non-null value";
