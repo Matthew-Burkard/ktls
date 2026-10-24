@@ -21,6 +21,11 @@ struct Fixture {
 impl Fixture {
     /// One module with the stdlib (types available when a JDK is found).
     fn new() -> Fixture {
+        Fixture::with_module(|_| {})
+    }
+
+    /// Like `new`, with the module adjusted (compiler options, explicit API mode).
+    fn with_module(adjust: impl FnOnce(&mut Module)) -> Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         let deps: Vec<ResolvedArtifact> = stdlib()
@@ -45,6 +50,8 @@ impl Fixture {
             complete: true,
             ..Default::default()
         };
+        let mut module = module;
+        adjust(&mut module);
         let project = Project {
             root: root.clone(),
             build_system: BuildSystem::Gradle,
@@ -3235,4 +3242,27 @@ fun run(executor: java.util.concurrent.Executor, s: String) {
     assert!(out.contains("e.execute({ println() })"), "{out}");
     let out = fixed("package a\n\nval r = object : Runnable {\n    override fun run() = println()\n}\n", "ObjectLiteralToLambda");
     assert!(out.contains("val r = Runnable { println() }"), "{out}");
+}
+
+#[test]
+fn explicit_api_mode_and_missing_docs() {
+    let mut f = Fixture::with_module(|m| m.kotlin.explicit_api = true);
+    let (lints, text) = f.run("src/main/kotlin/a/A.kt", "package a\n\nfun open() = 1\npublic fun typed(): Int = 1\ninternal fun hidden() = 2\nclass Box {\n    public val size = 1\n    private val secret = 2\n}\n");
+    let mut found: Vec<String> = lints.iter().filter(|l| l.rule.id.contains("API_MODE")).map(|l| format!("{}: {}", l.rule.id, &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    found.sort();
+    assert_eq!(found, vec![
+        "NO_EXPLICIT_RETURN_TYPE_IN_API_MODE: open",
+        "NO_EXPLICIT_RETURN_TYPE_IN_API_MODE: size",
+        "NO_EXPLICIT_VISIBILITY_IN_API_MODE: Box",
+        "NO_EXPLICIT_VISIBILITY_IN_API_MODE: open",
+    ]);
+    // Off by default; on when configured.
+    assert!(!lint("package a\n\nclass Undocumented\n").iter().any(|l| l.starts_with("KDocMissingDocumentation")));
+    let mut f = Fixture::new();
+    let mut rules = HashMap::new();
+    rules.insert("KDocMissingDocumentation".to_string(), Level::Info);
+    f.host.set_lint_config(LintConfig { enabled: true, rules });
+    let (lints, _) = f.run("src/main/kotlin/a/A.kt", "package a\n\n/** Documented. */\nclass Doc\nclass Undocumented\nprivate class Hidden\n");
+    let ids: Vec<&str> = lints.iter().filter(|l| l.rule.id == "KDocMissingDocumentation").map(|l| l.message.as_str()).collect();
+    assert_eq!(ids, vec!["Missing documentation for 'Undocumented'"]);
 }

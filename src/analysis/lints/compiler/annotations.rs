@@ -76,7 +76,7 @@ fn source_targets(cx: &Cx, e: &Engine, fq: &str) -> Option<Vec<String>> {
     let c = e.classifier(fq)?;
     let Origin::Source { file, range, .. } = &c.symbol().origin else { return None };
     let root = if file == cx.path { cx.root.clone() } else { cx.snap.file(file)?.parse().syntax() };
-    let decl = root.covering_element(*range).ancestors().find(|a| a.kind() == SyntaxKind::CLASS && a.text_range() == *range)?;
+    let decl = node_at(&root, *range, &[SyntaxKind::CLASS])?;
     let target = modifiers(&decl)?.annotations().find(|a| a.syntax().children().find(|c| c.kind() == SyntaxKind::TYPE_REFERENCE).is_some_and(|t| matches!(t.text().to_string().as_str(), "Target" | "kotlin.annotation.Target")))?;
     let args = target.syntax().children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST)?;
     let mut out = Vec::new();

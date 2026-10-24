@@ -284,7 +284,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `ClassName`, `FunctionName`, `PropertyName`, `ConstPropertyName`, `PrivatePropertyName`, `ObjectPropertyName`, `LocalVariableName`, `EnumEntryName`, `PackageName`, `TestFunctionName`
 - [x] [P1] `PackageDirectoryMismatch`
 - [~] [P1] `MayBeConstant`, `TrailingComma` (missing/redundant per code style) — *partial: `MayBeConstant`*
-- [ ] [P2] `KDocUnresolvedReference`, `KDocMissingDocumentation` (public API)
+- [~] [P2] `KDocUnresolvedReference`, `KDocMissingDocumentation` (public API) — *partial: `KDocMissingDocumentation` (off by default)*
 - [x] [P2] `FileNameMatchesClass` (single top-level class)
 
 **Probable bugs**
@@ -306,7 +306,7 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `ConvertNaNEquality` (`x == Double.NaN`)
 - [x] [P1] `ThrowableNotThrown` (`IllegalStateException()` without `throw`)
 - [ ] [P1] `KotlinThrowsInspection` / `@Throws` mismatch for Java callers
-- [ ] [P1] `PublicApiImplicitType` (explicit API mode: `-Xexplicit-api`)
+- [x] [P1] `PublicApiImplicitType` (explicit API mode: `-Xexplicit-api`): as the compiler's `NO_EXPLICIT_VISIBILITY_IN_API_MODE` / `NO_EXPLICIT_RETURN_TYPE_IN_API_MODE` (with fixes) in modules with `explicitApi()`
 - [~] [P2] `SuspiciousCascadingIf`, `ProtectedInFinal`, `NonExhaustiveWhenStatementMigration` — *partial: `ProtectedInFinal`*
 - [~] [P2] `IncompleteDestructuring`, `UnsafeCastFromDynamic` (JS) — *partial: `IncompleteDestructuring` (project data classes)*
 - [ ] [P2] `SerializationAnnotation`/`kotlinx.serialization` misuse, Compose-specific rules (modifier param, remember, stable)

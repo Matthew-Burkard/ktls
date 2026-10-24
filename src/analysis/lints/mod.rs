@@ -8,7 +8,7 @@
 mod bugs;
 mod compiler;
 
-pub(crate) use compiler::{certain_type, missing_branches};
+pub(crate) use compiler::{certain_type, is_public_api, missing_branches};
 mod naming;
 mod redundant;
 mod style;
@@ -294,6 +294,8 @@ rules! {
     PLATFORM_CLASS_MAPPED_TO_KOTLIN = "PLATFORM_CLASS_MAPPED_TO_KOTLIN", Compiler, Warning, false, [], "Java class used where its Kotlin counterpart should be ('java.lang.Integer', 'java.util.List')";
     DEPRECATED_IDENTITY_EQUALS = "DEPRECATED_IDENTITY_EQUALS", Compiler, Warning, false, [], "'===' or '!==' between primitive values (Kotlin 1)";
     UNNECESSARY_LATEINIT = "UNNECESSARY_LATEINIT", Compiler, Warning, true, [], "'lateinit' property assigned in an 'init' block anyway";
+    NO_EXPLICIT_VISIBILITY_IN_API_MODE = "NO_EXPLICIT_VISIBILITY_IN_API_MODE", Compiler, Warning, false, [], "Public declaration without a visibility modifier in explicit API mode";
+    NO_EXPLICIT_RETURN_TYPE_IN_API_MODE = "NO_EXPLICIT_RETURN_TYPE_IN_API_MODE", Compiler, Warning, false, [], "Public function or property without an explicit type in explicit API mode";
     NO_TAIL_CALLS_FOUND = "NO_TAIL_CALLS_FOUND", Compiler, Warning, false, [], "'tailrec' function that never calls itself";
     DIVISION_BY_ZERO = "DIVISION_BY_ZERO", Compiler, Warning, false, [], "Integer division or remainder by the constant zero";
     USELESS_ELVIS_RIGHT_IS_NULL = "USELESS_ELVIS_RIGHT_IS_NULL", Compiler, Warning, true, [], "'?: null'";
@@ -415,6 +417,7 @@ rules! {
     LAMBDA_TO_REFERENCE = "ConvertLambdaToReference", Style, Action, false, [], "'xs.map { f(it) }' instead of 'xs.map(::f)'";
     OBJECT_LITERAL_TO_LAMBDA = "ObjectLiteralToLambda", Style, Info, false, [], "'object : Runnable { override fun run() … }' instead of a lambda";
     TRY_FINALLY_TO_USE = "ConvertTryFinallyToUseCall", Style, Info, false, [], "'try { … } finally { r.close() }' instead of 'use { }'";
+    KDOC_MISSING = "KDocMissingDocumentation", Style, Off, false, [], "Public declaration without KDoc";
     SIMPLIFIABLE_CALL_CHAIN = "SimplifiableCallChain", Style, Info, false, [], "Call chain that one call replaces ('filter { }.first()' instead of 'first { }')";
 
     NAN_EQUALITY = "ConvertNaNEquality", Bugs, Warning, false, [], "Comparison with NaN using '==' (always false)";
@@ -864,6 +867,15 @@ pub(crate) fn uses_receiver(e: &crate::analysis::ide::infer::Engine, scope: &Syn
         }
     }
     Some(false)
+}
+
+/// The node of `kind` spanning exactly `range` in `root` (a declaration found through the
+/// index, whose file may have changed since).
+pub(crate) fn node_at(root: &SyntaxNode, range: TextRange, kinds: &[SyntaxKind]) -> Option<SyntaxNode> {
+    if !root.text_range().contains_range(range) {
+        return None;
+    }
+    root.covering_element(range).ancestors().find(|a| a.text_range() == range && kinds.contains(&a.kind()))
 }
 
 pub(crate) fn has_comments(n: &SyntaxNode) -> bool {

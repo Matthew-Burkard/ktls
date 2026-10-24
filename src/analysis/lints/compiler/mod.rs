@@ -10,6 +10,7 @@ mod annotations;
 mod certain;
 mod dataflow;
 mod declarations;
+mod explicit_api;
 mod expressions;
 mod flow;
 mod inlining;
@@ -34,6 +35,7 @@ mod when;
 use super::{Cx, Sink};
 
 pub(crate) use certain::certain_type;
+pub(crate) use explicit_api::is_public_api;
 pub(crate) use when::missing_branches;
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
@@ -60,4 +62,5 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     annotations::check(cx, out);
     references::check(cx, out);
     operators::check(cx, out);
+    explicit_api::check(cx, out);
 }

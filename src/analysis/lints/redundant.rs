@@ -1112,7 +1112,7 @@ fn value_argument(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
     let Some(Def::Symbol { .. }) = e.resolve_name_ref(&callee).first() else { return };
     let crate::symbols::Origin::Source { file, range, .. } = &sym.origin else { return };
     let root = if file == cx.path { cx.root.clone() } else { match cx.snap.file(file) { Some(f) => f.parse().syntax(), None => return } };
-    let Some(decl) = root.covering_element(*range).ancestors().find(|a| a.text_range() == *range && matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::PRIMARY_CONSTRUCTOR | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::CLASS)) else { return };
+    let Some(decl) = node_at(&root, *range, &[SyntaxKind::FUN, SyntaxKind::PRIMARY_CONSTRUCTOR, SyntaxKind::SECONDARY_CONSTRUCTOR, SyntaxKind::CLASS]) else { return };
     let params: Vec<SyntaxNode> = decl.descendants().filter(|d| d.kind() == SyntaxKind::VALUE_PARAMETER && d.parent().is_some_and(|l| l.kind() == SyntaxKind::VALUE_PARAMETER_LIST && l.ancestors().nth(1).as_ref() == Some(&decl) || l.parent().is_some_and(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR && c.parent().as_ref() == Some(&decl)))).collect();
     let default_of = |name: &str| -> Option<String> {
         let p = params.iter().find(|p| name_token(p).is_some_and(|t| ast::ident_text(&t) == name))?;

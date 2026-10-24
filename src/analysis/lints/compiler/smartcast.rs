@@ -116,7 +116,7 @@ fn instability(cx: &Cx, sym: &Symbol) -> Option<&'static str> {
     if file != cx.path {
         return None;
     }
-    let decl = cx.root.covering_element(*range).ancestors().find(|a| a.kind() == SyntaxKind::PROPERTY && a.text_range() == *range)?;
+    let decl = node_at(&cx.root, *range, &[SyntaxKind::PROPERTY])?;
     let p = ast::PropertyDecl::cast(decl.clone())?;
     if p.has_delegate() {
         return Some("is a delegated property");

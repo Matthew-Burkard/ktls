@@ -6,6 +6,15 @@ use crate::symbols::{Modifiers, SymbolKind, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     file_name(cx, out);
+    if cx.on(&KDOC_MISSING) && !cx.test_source {
+        for n in cx.root.descendants().filter(|n| matches!(n.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::TYPEALIAS)) {
+            if crate::analysis::lints::is_public_api(&n) && !n.children_with_tokens().any(|t| t.kind() == SyntaxKind::KDOC)
+                && let Some(name) = name_token(&n)
+            {
+                out.report(&KDOC_MISSING, name.text_range(), format!("Missing documentation for '{}'", ast::ident_text(&name)), None);
+            }
+        }
+    }
     for n in cx.root.descendants() {
         if in_error(&n) {
             continue;
