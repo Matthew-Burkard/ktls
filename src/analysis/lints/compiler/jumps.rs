@@ -36,14 +36,17 @@ fn expression_body(e: &Engine, f: &SyntaxNode, out: &mut Sink) {
     returned(e, &v, &t, out);
 }
 
-/// A value returned where `t` is declared (a `T` type parameter: only a nullable `T?` local).
+/// A value returned where `t` is declared (a `T` type parameter: only a nullable `T?` local
+/// or property chain).
 fn returned(e: &Engine, v: &SyntaxNode, t: &ast::TypeRef, out: &mut Sink) {
     let ty = e.resolve_syntax_type(t);
     let shown = t.syntax().text().to_string();
     if let TypeRef::TypeParam { name, nullable: false } = &ty {
+        let nullable_t = |a: &TypeRef| matches!(a, TypeRef::TypeParam { name: n, nullable: true } if n == name.as_str());
         for v in super::expressions::branch_leaves(v) {
-            let local = v.kind() == SyntaxKind::NAME_REF && super::expressions::nullable_local(e, &v).is_some_and(|s| s == format!("{name}?"));
-            if local && e.type_of(&v).is_some_and(|a| matches!(a, TypeRef::TypeParam { name: n, nullable: true } if n == name.as_str())) {
+            let local = v.kind() == SyntaxKind::NAME_REF && super::expressions::nullable_local(e, &v).is_some_and(|s| s == format!("{name}?")) && e.type_of(&v).is_some_and(|a| nullable_t(&a));
+            let property = || super::expressions::nullable_type_param_chain(e, &v).is_some_and(|a| nullable_t(&a));
+            if local || property() {
                 let fix = Fix::replace("Add non-null asserted (!!) call", TextRange::empty(v.text_range().end()), "!!");
                 out.report(&RETURN_TYPE_MISMATCH, v.text_range(), format!("Type mismatch: inferred type is '{name}?' but '{shown}' was expected."), Some(fix));
             }

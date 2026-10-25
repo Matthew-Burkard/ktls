@@ -634,9 +634,21 @@ fn nullable_operations(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     }
 }
 
-/// `a.b` (names only) where property `b` has a nullable type and the same chain is not
-/// used earlier in the function (where a check could smart cast it).
+/// `a.b` (see [`property_chain`]) where property `b` has a nullable class type: as shown.
 fn nullable_property_chain(e: &Engine, recv: &SyntaxNode) -> Option<String> {
+    // Declared nullable (`String?`; a type parameter's argument may only look so: `*`).
+    property_chain(e, recv, |t| matches!(t, TypeRef::Named { nullable: true, .. })).map(|t| super::certain::shown(&t))
+}
+
+/// `b.v` (names only) where property `v` is declared `T?` and the same chain is not used
+/// earlier in the function: its type with the receiver's type arguments.
+pub(super) fn nullable_type_param_chain(e: &Engine, recv: &SyntaxNode) -> Option<TypeRef> {
+    property_chain(e, recv, |t| matches!(t, TypeRef::TypeParam { nullable: true, .. }))
+}
+
+/// `a.b` (names only) where the declared type of property `b` passes `declared`, and the
+/// same chain is not used earlier in the function (where a check could smart cast it).
+fn property_chain(e: &Engine, recv: &SyntaxNode, declared: impl Fn(&TypeRef) -> bool) -> Option<TypeRef> {
     if recv.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || recv.descendants().any(|d| !matches!(d.kind(), SyntaxKind::NAME_REF | SyntaxKind::DOT_QUALIFIED_EXPR)) {
         return None;
     }
@@ -646,12 +658,11 @@ fn nullable_property_chain(e: &Engine, recv: &SyntaxNode) -> Option<String> {
     if sym.kind != SymbolKind::Property {
         return None;
     }
-    // Declared nullable (`String?`; a type parameter's argument may only look so: `*`).
-    let declared = e.resolve_declared(sym, sym.ty.as_ref()?);
-    if !matches!(declared, TypeRef::Named { nullable: true, .. }) || in_unknown_lambda(e, recv) {
+    let ty = e.resolve_declared(sym, sym.ty.as_ref()?);
+    if !declared(&ty) || in_unknown_lambda(e, recv) {
         return None;
     }
-    let t = crate::analysis::ide::infer::substitute(&declared, subst);
+    let t = crate::analysis::ide::infer::substitute(&ty, subst);
     let text: String = recv.text().to_string().chars().filter(|c| !c.is_whitespace()).collect();
     let scope = recv.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::CLASS_INITIALIZER | SyntaxKind::SECONDARY_CONSTRUCTOR) && !is_local(a))?;
     // The same chain checked earlier (`a.b != null`, `a.b!!`, `a.b ?: …`).
@@ -660,7 +671,7 @@ fn nullable_property_chain(e: &Engine, recv: &SyntaxNode) -> Option<String> {
         // The engine does not smart cast property chains: null checks count too.
         dt == text && (d.parent().is_some_and(|p| null_check_or_is(&p)) || may_narrow(e, &d))
     });
-    (!narrowed).then(|| super::certain::shown(&t))
+    (!narrowed).then_some(t)
 }
 
 /// `x == null`, `x != null` (also `===`/`!==`), or `x is T` / `x !is T`.

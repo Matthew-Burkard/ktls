@@ -3339,6 +3339,12 @@ fun letResult(u: User?): String { return u?.let { it.nick } }
 fun letElvis(u: User?): String { return u?.let { it.nick } ?: "" }
 fun <T> generic(x: T?): T { return x }
 fun <T> genericChecked(x: T?): T { if (x != null) return x; throw Exception() }
+class Box<T>(val v: T?, val w: T)
+fun <R> genericProperty(b: Box<R>): R { return b.v }
+fun <R> genericPropertyBody(b: Box<R>): R = b.v
+fun <R> genericPropertyOk(b: Box<R>): R { return b.w }
+fun <R> genericPropertyChecked(b: Box<R>): R { if (b.v != null) return b.v; throw Exception() }
+fun boxed(b: Box<String>): String { return b.v }
 fun elvisNull(u: User?): String { return u?.nick ?: null }
 fun elvisOk(u: User?): String { return u?.nick ?: "" }
 "#;
@@ -3346,5 +3352,6 @@ fun elvisOk(u: User?): String { return u?.nick ?: "" }
     for expected in ["RETURN_TYPE_MISMATCH: nick", "RETURN_TYPE_MISMATCH: maybeFile()", "RETURN_TYPE_MISMATCH: u?.let { it.nick }", "RETURN_TYPE_MISMATCH: x", "NULL_FOR_NONNULL_TYPE: null"] {
         has(&found, expected);
     }
-    assert_eq!(found.len(), 5, "{found:#?}");
+    assert_eq!(found.iter().filter(|f| *f == "RETURN_TYPE_MISMATCH: b.v").count(), 3, "{found:#?}");
+    assert_eq!(found.len(), 8, "{found:#?}");
 }
