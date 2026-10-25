@@ -15,6 +15,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 local_classifier(&n, out);
                 class_members(&n, out);
                 if n.kind() == SyntaxKind::CLASS {
+                    annotation_parameters(cx, &n, out);
                     delegation_cycles(&n, out);
                     super_call_required(cx, &n, out);
                 }
@@ -27,6 +28,55 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::PROPERTY if has_modifier(&n, "lateinit") => unnecessary_lateinit(&n, out),
             _ => {}
         }
+    }
+}
+
+/// Parameters of an annotation class: `val`, non-null, of a primitive, `String`, `KClass`,
+/// enum or annotation type, or an array of those.
+fn annotation_parameters(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
+    if !has_modifier(class, "annotation") {
+        return;
+    }
+    let params: Vec<SyntaxNode> = class.children().filter(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR).flat_map(|c| c.descendants().filter(|d| d.kind() == SyntaxKind::VALUE_PARAMETER).collect::<Vec<_>>()).collect();
+    let e = cx.engine();
+    for p in params {
+        if let Some(var) = ast::token(&p, SyntaxKind::VAR_KW) {
+            out.report(&VAR_ANNOTATION_PARAMETER, var.text_range(), "An annotation parameter cannot be 'var'.", Some(Fix::replace("Change to 'val'", var.text_range(), "val")));
+        } else if ast::token(&p, SyntaxKind::VAL_KW).is_none() {
+            let at = name_token(&p).map_or(p.text_range(), |t| t.text_range());
+            out.report(&MISSING_VAL_ON_ANNOTATION_PARAMETER, at, "An annotation parameter must be 'val'.", Some(Fix::replace("Add 'val'", TextRange::empty(at.start()), "val ")));
+        }
+        let (Some(e), Some(ty)) = (e, ast::child::<ast::TypeRef>(&p)) else { continue };
+        let t = e.resolve_syntax_type(&ty);
+        let vararg = has_modifier(&p, "vararg");
+        if !allowed_in_annotation(e, &t, !vararg) {
+            out.report(&INVALID_TYPE_OF_ANNOTATION_MEMBER, ty.syntax().text_range(), "Invalid type of annotation member.", None);
+        }
+    }
+}
+
+fn allowed_in_annotation(e: &crate::analysis::ide::infer::Engine, t: &crate::symbols::TypeRef, arrays: bool) -> bool {
+    use crate::symbols::{SymbolKind, TypeArg, TypeRef};
+    let TypeRef::Named { fq: Some(fq), nullable, args, .. } = t else { return true };
+    if *nullable {
+        return false;
+    }
+    match &**fq {
+        "kotlin.Int" | "kotlin.Long" | "kotlin.Short" | "kotlin.Byte" | "kotlin.Char" | "kotlin.Float" | "kotlin.Double" | "kotlin.Boolean" | "kotlin.String" | "kotlin.reflect.KClass" => true,
+        "kotlin.UInt" | "kotlin.ULong" | "kotlin.UShort" | "kotlin.UByte" => true,
+        "kotlin.IntArray" | "kotlin.LongArray" | "kotlin.ShortArray" | "kotlin.ByteArray" | "kotlin.CharArray" | "kotlin.FloatArray" | "kotlin.DoubleArray" | "kotlin.BooleanArray" => arrays,
+        "kotlin.UIntArray" | "kotlin.ULongArray" | "kotlin.UShortArray" | "kotlin.UByteArray" => arrays,
+        "kotlin.Array" => {
+            arrays
+                && match args.as_slice() {
+                    [TypeArg::Type { ty, .. }] => allowed_in_annotation(e, ty, false),
+                    _ => true,
+                }
+        }
+        other => match e.classifier(other) {
+            Some(c) => matches!(c.symbol().kind, SymbolKind::Enum | SymbolKind::Annotation | SymbolKind::TypeAlias),
+            None => true,
+        },
     }
 }
 

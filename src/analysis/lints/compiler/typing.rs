@@ -44,6 +44,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::PROPERTY_DELEGATE => delegate(e, &n, out),
             SyntaxKind::WHEN_EXPR => when_values(e, &n, out),
             SyntaxKind::IS_EXPR => is_check(e, &n, out),
+            SyntaxKind::THROW_EXPR => thrown(e, &n, out),
+            SyntaxKind::CATCH_CLAUSE => caught(e, &n, out),
             _ => {}
         }
     }
@@ -81,9 +83,14 @@ fn assignment(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     };
     let expected = match e.resolve_name_ref(&name_ref).as_slice() {
         [Def::Local(l)] => {
-            let decl = crate::syntax::covering(&e.root, l.name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::PROPERTY | SyntaxKind::VALUE_PARAMETER));
-            let Some(ty) = decl.and_then(|d| ast::child::<ast::TypeRef>(&d)) else { return };
-            e.resolve_syntax_type(&ty)
+            let Some(decl) = crate::syntax::covering(&e.root, l.name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::PROPERTY | SyntaxKind::VALUE_PARAMETER)) else { return };
+            match ast::child::<ast::TypeRef>(&decl) {
+                Some(ty) => e.resolve_syntax_type(&ty),
+                None => match inferred(e, &decl) {
+                    Some(t) => t,
+                    None => return,
+                },
+            }
         }
         [Def::Symbol { sym, subst }] if sym.kind == SymbolKind::Property => {
             // Source properties: only with a written type.
@@ -91,7 +98,10 @@ fn assignment(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
                 let Some(f) = cx.snap.file(file) else { return };
                 let root = f.parse().syntax();
                 let decl = crate::syntax::covering(&root, *name_range).into_iter().flat_map(|el| el.ancestors()).find(|a| matches!(a.kind(), SyntaxKind::PROPERTY | SyntaxKind::VALUE_PARAMETER));
-                if decl.and_then(|d| ast::child::<ast::TypeRef>(&d)).is_none() {
+                // Without a written type: that of an initializer in this file.
+                if decl.as_ref().and_then(ast::child::<ast::TypeRef>).is_none() {
+                    let Some(t) = decl.filter(|_| file.as_path() == cx.path).and_then(|d| inferred(e, &d)) else { return };
+                    report_assignment(e, &value, &t, out);
                     return;
                 }
             }
@@ -100,11 +110,25 @@ fn assignment(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         }
         _ => return,
     };
-    if matches!(expected, TypeRef::Platform(_)) || matches!(strip(&expected), TypeRef::TypeParam { .. }) {
+    report_assignment(e, &value, &expected, out);
+}
+
+/// The type of a variable or property without a written type: that of its initializer,
+/// when certain (`var x = null` and delegates excluded).
+fn inferred(e: &Engine, decl: &SyntaxNode) -> Option<TypeRef> {
+    if decl.kind() != SyntaxKind::PROPERTY || decl.children().any(|c| c.kind() == SyntaxKind::PROPERTY_DELEGATE) {
+        return None;
+    }
+    let t = super::certain::certain_type(e, &initializer(decl)?, true)?;
+    matches!(&t, TypeRef::Named { fq: Some(fq), .. } if &**fq != "kotlin.Nothing").then_some(t)
+}
+
+fn report_assignment(e: &Engine, value: &SyntaxNode, expected: &TypeRef, out: &mut Sink) {
+    if matches!(expected, TypeRef::Platform(_)) || matches!(strip(expected), TypeRef::TypeParam { .. }) {
         return;
     }
-    for value in super::expressions::branch_leaves(&value) {
-        if let Some((rule, msg, _, convert)) = type_mismatch(e, &value, &expected, &shown(&expected)) {
+    for value in super::expressions::branch_leaves(value) {
+        if let Some((rule, msg, _, convert)) = type_mismatch(e, &value, expected, &shown(expected)) {
             let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ASSIGNMENT_TYPE_MISMATCH } else { rule };
             out.report_fixes(rule, value.text_range(), msg, convert.into_iter().collect());
         }
@@ -232,7 +256,17 @@ fn when_values(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     };
     let Some(st) = expr.and_then(|x| operand_type(e, &x)) else { return };
     let conditions = n.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY).flat_map(|en| en.children().filter(|c| c.kind() == SyntaxKind::WHEN_CONDITION).collect::<Vec<_>>());
-    for v in conditions.filter_map(|c| condition_value(&c)) {
+    let conditions: Vec<SyntaxNode> = conditions.collect();
+    // `is T` branches for a class unrelated to the subject's.
+    for c in &conditions {
+        let is = c.children().find(|o| o.kind() == SyntaxKind::OPERATION_REFERENCE).and_then(|o| o.first_token()).is_some_and(|t| matches!(t.kind(), SyntaxKind::IS_KW | SyntaxKind::NOT_IS_KW));
+        if let Some(ty) = c.children().find_map(ast::TypeRef::cast).filter(|_| is)
+            && incompatible(e, &e.resolve_syntax_type(&ty), &st)
+        {
+            out.report(&INCOMPATIBLE_TYPES, ty.syntax().text_range(), format!("Incompatible types '{}' and '{}'.", ty.syntax().text(), shown(&st)), None);
+        }
+    }
+    for v in conditions.iter().filter_map(condition_value) {
         if int_literal_incompatible(e, &v, &st) {
             out.report(&INCOMPATIBLE_TYPES, v.text_range(), format!("Incompatible types 'Int' and '{}'.", shown(&st)), None);
             continue;
@@ -241,6 +275,28 @@ fn when_values(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         if incompatible(e, &vt, &st) {
             out.report(&INCOMPATIBLE_TYPES, v.text_range(), format!("Incompatible types '{}' and '{}'.", shown(&vt), shown(&st)), None);
         }
+    }
+}
+
+/// `throw x` where `x` is certainly not a `Throwable`.
+fn thrown(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    let Some(v) = n.children().last() else { return };
+    let Some(t) = certain(e, &v) else { return };
+    let Some(fq) = fq_of(&t) else { return };
+    if fq != "kotlin.Nothing" && e.conforms(&TypeRef::named(fq), "kotlin.Throwable") == Some(false) {
+        out.report(&TYPE_MISMATCH, v.text_range(), format!("Type mismatch: inferred type is '{}' but 'Throwable' was expected.", shown(&t)), None);
+    }
+}
+
+/// `catch (e: T)` where `T` is certainly not a `Throwable`.
+fn caught(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    // The parameter's own type (not an annotation's: `catch (@Suppress("x") e: E)`).
+    let param = n.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER_LIST).and_then(|l| l.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER));
+    let Some(ty) = param.and_then(|p| ast::child::<ast::TypeRef>(&p)) else { return };
+    let t = e.resolve_syntax_type(&ty);
+    let Some(fq) = fq_of(&t) else { return };
+    if e.conforms(&TypeRef::named(fq), "kotlin.Throwable") == Some(false) {
+        out.report(&TYPE_MISMATCH, ty.syntax().text_range(), format!("Type mismatch: '{}' is not a subtype of 'Throwable'.", ty.syntax().text()), None);
     }
 }
 

@@ -6,7 +6,7 @@
 use super::super::*;
 use super::certain::{certain_type, in_unknown_lambda, shown};
 use crate::analysis::ide::infer::{Def, Engine};
-use crate::symbols::{Modifiers, Origin, SymbolKind};
+use crate::symbols::{Modifiers, Origin, SymbolKind, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     for n in cx.root.descendants() {
@@ -144,9 +144,25 @@ fn abstract_super_call(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     }
 }
 
+const CONST_TYPES: &[&str] = &["kotlin.Int", "kotlin.Long", "kotlin.Short", "kotlin.Byte", "kotlin.Char", "kotlin.Float", "kotlin.Double", "kotlin.Boolean", "kotlin.String", "kotlin.UInt", "kotlin.ULong", "kotlin.UShort", "kotlin.UByte"];
+
 /// `const val X = compute()` or `= other` (a non-`const` property of this project).
 fn const_initializer(e: &Engine, p: &SyntaxNode, out: &mut Sink) {
     if !has_modifier(p, "const") {
+        return;
+    }
+    // Only primitives, unsigned integers and `String`.
+    let t = match ast::child::<ast::TypeRef>(p) {
+        Some(ty) => Some(e.resolve_syntax_type(&ty)),
+        None => initializer(p).and_then(|i| certain_type(e, &i, true)),
+    };
+    if let Some(TypeRef::Named { fq: Some(fq), nullable, .. }) = &t
+        && (*nullable || !CONST_TYPES.contains(&&**fq))
+        && &**fq != "kotlin.Nothing"
+        && e.classifier(fq).is_some_and(|c| c.symbol().kind != SymbolKind::TypeAlias)
+    {
+        let at = ast::child::<ast::TypeRef>(p).map(|t| t.syntax().text_range()).or_else(|| name_token(p).map(|t| t.text_range())).unwrap_or(p.text_range());
+        out.report(&TYPE_CANT_BE_USED_FOR_CONST_VAL, at, format!("Const 'val' has type '{}'. Only primitives and String are allowed.", shown(t.as_ref().unwrap())), None);
         return;
     }
     let Some(init) = initializer(p) else { return };
@@ -167,7 +183,10 @@ fn const_initializer(e: &Engine, p: &SyntaxNode, out: &mut Sink) {
     let source = matches!(sym.origin, Origin::Source { .. });
     let non_const = match sym.kind {
         SymbolKind::Property => source && !sym.modifiers.has(Modifiers::CONST),
-        SymbolKind::Function => source && init.kind() == SyntaxKind::CALL_EXPR,
+        // Project functions, and library top-level functions (only members of primitives
+        // and `String` are evaluated at compile time).
+        SymbolKind::Function => init.kind() == SyntaxKind::CALL_EXPR && (source || sym.receiver.is_none() && sym.fq_name.rsplit_once('.').is_none_or(|(owner, _)| e.classifier(owner).is_none())),
+        SymbolKind::Constructor => true,
         _ => false,
     };
     if non_const {

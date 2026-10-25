@@ -356,7 +356,8 @@ fn supertypes(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
     let plugins = all_open(cx);
     let mut classes = 0;
     for entry in entries {
-        let Some(ut) = entry.descendants().find_map(ast::UserType::cast) else { continue };
+        // The supertype itself (not a type inside a function type: `: (Int) -> Unit`).
+        let Some(ut) = entry.children().find(|c| c.kind() == SyntaxKind::TYPE_REFERENCE).and_then(|t| t.children().find_map(ast::UserType::cast)) else { continue };
         let names: Vec<String> = ut.segments().iter().filter_map(|s| s.name_token()).map(|t| ast::ident_text(&t)).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let Ok(Resolved::Classifier(cls)) = e.res.resolve_type_name(&refs, &scope) else { continue };

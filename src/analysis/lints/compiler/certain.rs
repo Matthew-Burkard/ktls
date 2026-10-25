@@ -106,6 +106,17 @@ fn certain(e: &Engine, x: &SyntaxNode, smart: bool, depth: u32) -> Option<TypeRe
     }
 }
 
+/// Type `t` refers to type parameter `name`.
+fn mentions(t: &TypeRef, name: &str) -> bool {
+    match t {
+        TypeRef::TypeParam { name: n, .. } => n == name,
+        TypeRef::Named { args, .. } => args.iter().any(|a| matches!(a, TypeArg::Type { ty, .. } if mentions(ty, name))),
+        TypeRef::Function { receiver, params, ret, .. } => receiver.as_deref().is_some_and(|r| mentions(r, name)) || params.iter().any(|p| mentions(p, name)) || mentions(ret, name),
+        TypeRef::Platform(inner) => mentions(inner, name),
+        _ => false,
+    }
+}
+
 /// A certain type as shown in messages: unknown type arguments as `*`.
 pub(super) fn shown(t: &TypeRef) -> String {
     t.display().replace("<error>", "*")
@@ -169,6 +180,15 @@ fn call_candidates(e: &Engine, c: &SyntaxNode, smart: bool, depth: u32) -> Optio
     let callee = c.first_child().filter(|n| n.kind() == SyntaxKind::NAME_REF)?;
     let defs = e.resolve_name_ref(&callee);
     if defs.is_empty() || uncertain_implicit_member(e, &callee, &defs) {
+        return None;
+    }
+    // Default-imported functions (`kotlin.sequences.Sequence()`) lose to a class of that
+    // name imported or declared here (`Sequence("seq")`), which the resolver may not rank.
+    let default_package = |fq: &str| fq.rsplit_once('.').is_some_and(|(p, _)| crate::analysis::resolve::KOTLIN_DEFAULT_IMPORTS.contains(&p));
+    if defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if sym.kind == SymbolKind::Function && default_package(&sym.fq_name)))
+        && let crate::analysis::ide::infer::Qualifier::Static(cls) = e.resolve_qualifier(&callee)
+        && !default_package(cls.fq_name())
+    {
         return None;
     }
     // The resolver falls back to candidates that do not fit; the call is then unclear.
@@ -340,6 +360,22 @@ fn return_type(e: &Engine, sym: &Symbol, subst: &Subst, call: Option<&SyntaxNode
             let inferred = infer(e, sym, &s, c, vars, None, smart, depth);
             s.extend(inferred);
         }
+        // An extension's type parameters bound by its receiver are also inferred from the
+        // arguments: a different class there widens them (`columns.plus(functions)`).
+        if sym.receiver.is_some() {
+            let bound: HashSet<String> = sym.type_params.iter().map(|tp| tp.name.clone()).filter(|n| s.contains_key(n)).collect();
+            if !bound.is_empty() {
+                let mut open = s.clone();
+                open.retain(|k, _| !bound.contains(k));
+                // Those in parameter types must be inferred from the arguments too.
+                // (Lambdas take them as given: `map { }` does not widen `T`.)
+                let in_params: HashSet<String> = bound.iter().filter(|b| sym.params.iter().any(|p| !matches!(p.ty, TypeRef::Function { .. }) && mentions(&p.ty, b))).cloned().collect();
+                let from_args = infer(e, sym, &open, c, bound, None, smart, depth);
+                if from_args.iter().any(|(k, t)| s.get(k).is_some_and(|r| fq_of(r) != fq_of(t))) || in_params.iter().any(|b| !from_args.contains_key(b)) && !arguments(sym, c).is_some_and(|a| a.is_empty()) {
+                    return None;
+                }
+            }
+        }
     }
     let t = substitute(&declared, &s);
     // Invoking a property of function type.
@@ -429,7 +465,7 @@ fn smart_castable(at: &SyntaxNode, sym: &Symbol) -> bool {
 
 /// A nullable project `val` named nowhere else in the function reading it, so nothing there
 /// can have smart cast it.
-fn unchecked_nullable_property(at: &SyntaxNode, sym: &Symbol) -> bool {
+pub(super) fn unchecked_nullable_property(at: &SyntaxNode, sym: &Symbol) -> bool {
     if !sym.ty.as_ref().is_some_and(|t| matches!(t, TypeRef::Named { nullable: true, .. })) || checked_with_is(at, &sym.name) {
         return false;
     }

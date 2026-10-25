@@ -3456,3 +3456,82 @@ class Explicit : Needs { constructor() : super(1) }
     let found: Vec<String> = compiler(ok).into_iter().filter(|f| !f.starts_with("UNUSED_EXPRESSION") && !f.starts_with("USELESS_IS_CHECK")).collect();
     assert!(found.is_empty(), "{found:#?}");
 }
+
+#[test]
+fn values_operators_and_shapes() {
+    let text = r#"package a
+
+fun assigns(a: Box) { var x = 1; x = "s"; a.n = "s"; var i = 0; i += "s"; var s = ""; s -= 1; for (k in 1..2) { k = 3 } }
+class Box { var n = 1 }
+fun ranges() = 1.."a"
+fun throws() { throw "error" }
+fun catches() { try {} catch (e: String) {} }
+fun branches(x: Int) = when (x) { is String -> 1; else -> 2 }
+object O { fun f() = 1 }
+fun invokes() { val x = 1; x(1); O().f() }
+annotation class Ann(var a: Int, val b: List<Int>)
+class Holder { val s: String? = null; fun f() = s.length }
+const val C = listOf(1)
+fun varargs(vararg x: Int) {}
+fun callsVarargs() = varargs(1, "a")
+fun expected() { val xs: List<Int> = listOf("a"); val ys: Set<String> = setOf(1) }
+fun lambdas() { val f: (Int) -> Int = { a, b -> a }; val g: (Int) -> Int = { s: String -> 1 }; listOf(1).map { a, b -> a } }
+class Task : Runnable
+enum class E(val x: Int) { A, B("s") }
+"#;
+    let found = compiler(text);
+    for expected in [
+        "ASSIGNMENT_TYPE_MISMATCH: \"s\"",
+        "NONE_APPLICABLE: +=",
+        "UNRESOLVED_REFERENCE: -=",
+        "VAL_REASSIGNMENT: k",
+        "NONE_APPLICABLE: ..",
+        "TYPE_MISMATCH: \"error\"",
+        "TYPE_MISMATCH: String",
+        "INCOMPATIBLE_TYPES: String",
+        "FUNCTION_EXPECTED: x",
+        "FUNCTION_EXPECTED: O",
+        "VAR_ANNOTATION_PARAMETER: var",
+        "INVALID_TYPE_OF_ANNOTATION_MEMBER: List<Int>",
+        "UNSAFE_CALL: .",
+        "TYPE_CANT_BE_USED_FOR_CONST_VAL: C",
+        "ARGUMENT_TYPE_MISMATCH: \"a\"",
+        "ARGUMENT_TYPE_MISMATCH: 1",
+        "EXPECTED_PARAMETERS_NUMBER_MISMATCH: a, b",
+        "EXPECTED_PARAMETER_TYPE_MISMATCH: String",
+        "ABSTRACT_MEMBER_NOT_IMPLEMENTED: Task",
+        "NO_VALUE_FOR_PARAMETER: A",
+        "ARGUMENT_TYPE_MISMATCH: \"s\"",
+    ] {
+        has(&found, expected);
+    }
+    assert_eq!(found.iter().filter(|f| *f == "ASSIGNMENT_TYPE_MISMATCH: \"s\"").count(), 2, "{found:#?}");
+
+    let ok = r#"package a
+
+import java.io.Closeable
+
+open class Base
+class Derived : Base()
+fun assigns() { var x = 1; x = 2; var b = Base(); b = Derived(); var s = ""; s += 1; var l = 1L; l += 1; var d = 1.0; d -= 1 }
+fun ranges(c: Char) = (1..2L).count() + ('a'..c).count()
+fun throws() { throw IllegalStateException("x") }
+fun catches() { try {} catch (e: IllegalStateException) {} catch (@Suppress("TooGenericExceptionCaught") e: Exception) {} }
+fun branches(x: Any) = when (x) { is String -> 1; is Int -> 2; else -> 3 }
+class Calls(val value: Int) { fun value(s: String) = s; fun use() = value("a") }
+interface Fn : (Int) -> Int
+fun invokes(f: Fn, g: () -> Unit) { f(1); g() }
+annotation class Ann(val a: Int, val b: Array<String>, val c: IntArray, vararg val d: String)
+class Holder { val s: String? = null; fun f() = if (s != null) s.length else 0 }
+const val C = 1 + 2
+fun varargs(vararg x: Int) {}
+fun callsVarargs(a: IntArray) { varargs(1, 2); varargs(*a) }
+fun expected() { val xs: List<Number> = listOf(1, 2.0); val ys: List<Long> = listOf(1); val zs: List<String?> = listOf(null) }
+fun lambdas() { val f: (Int) -> Int = { a -> a }; val g: (Int) -> Any = { a: Any -> a }; listOf(1).map { it }; mapOf(1 to 2).forEach { (k, v) -> k + v }; mapOf(1 to 2).forEach { k, v -> k + v } }
+class Task : Runnable { override fun run() {} }
+class Res : Closeable { override fun close() {} }
+enum class E(val x: Int, val y: String = "") { A(1), B(2, "b") }
+"#;
+    let found: Vec<String> = compiler(ok).into_iter().filter(|f| !f.starts_with("UNUSED_") && !f.starts_with("ASSIGNED_BUT_NEVER")).collect();
+    assert!(found.is_empty(), "{found:#?}");
+}

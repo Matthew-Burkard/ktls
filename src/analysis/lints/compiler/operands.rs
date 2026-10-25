@@ -47,6 +47,20 @@ fn functions(e: &Engine, at: &SyntaxNode, t: &TypeRef, name: &str) -> Option<Vec
 }
 
 fn binary(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
+    // `a += b`: `plusAssign`, or `plus` and an assignment.
+    if let Some(op) = assignment_op(n) {
+        let names: &[&str] = match op.kind() {
+            SyntaxKind::PLUS_EQ => &["plusAssign", "plus"],
+            SyntaxKind::MINUS_EQ => &["minusAssign", "minus"],
+            SyntaxKind::STAR_EQ => &["timesAssign", "times"],
+            SyntaxKind::SLASH_EQ => &["divAssign", "div"],
+            SyntaxKind::PERCENT_EQ => &["remAssign", "rem"],
+            _ => return,
+        };
+        let (Some(l), Some(r)) = (n.first_child(), n.children().last()) else { return };
+        applicable(e, n, &op, &l, &r, names, out);
+        return;
+    }
     let Some(op) = binary_op(n) else { return };
     let name = match op.kind() {
         SyntaxKind::PLUS => "plus",
@@ -54,33 +68,49 @@ fn binary(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         SyntaxKind::STAR => "times",
         SyntaxKind::SLASH => "div",
         SyntaxKind::PERCENT => "rem",
+        SyntaxKind::RANGE => "rangeTo",
+        SyntaxKind::RANGE_UNTIL => "rangeUntil",
         SyntaxKind::LT | SyntaxKind::GT | SyntaxKind::LT_EQ | SyntaxKind::GT_EQ => "compareTo",
         _ => return,
     };
     let Some((l, r)) = binary_operands(n) else { return };
-    let Some(lt) = operand(e, &l) else { return };
-    let Some(candidates) = functions(e, n, &lt, name) else { return };
+    applicable(e, n, &op, &l, &r, &[name], out);
+}
+
+/// Operator `op` on `l` and `r`, calling a function of one of `names`: unresolved when
+/// none exists, inapplicable when every one rejects `r`'s certain type.
+fn applicable(e: &Engine, n: &SyntaxNode, op: &SyntaxToken, l: &SyntaxNode, r: &SyntaxNode, names: &[&str], out: &mut Sink) {
+    let Some(lt) = operand(e, l) else { return };
+    let mut candidates = Vec::new();
+    for name in names {
+        let Some(found) = functions(e, n, &lt, name) else { return };
+        candidates.extend(found);
+    }
     let shown = super::certain::shown(&lt);
     if candidates.is_empty() {
-        out.report(&UNRESOLVED_REFERENCE_EXPR, op.text_range(), format!("Unresolved reference '{name}' for operator '{}' on '{shown}'.", op.text()), None);
+        out.report(&UNRESOLVED_REFERENCE_EXPR, op.text_range(), format!("Unresolved reference '{}' for operator '{}' on '{shown}'.", names[0], op.text()), None);
         return;
     }
     // The right operand's type must be certain and accepted by none.
-    if certain_type(e, &r, true).is_none() {
-        return;
-    }
+    let Some(rt) = certain_type(e, r, true) else { return };
     let mut rejected = 0;
     for (sym, subst) in &candidates {
         let [param] = sym.params.as_slice() else { return };
-        let mut subst = subst.clone();
-        for tp in &sym.type_params {
-            subst.remove(&tp.name);
+        // `T.rangeTo(that: T)` for `Comparable` `T`: unrelated classes have no common `T`.
+        if !sym.type_params.is_empty() {
+            let unrelated = matches!(sym.name.as_str(), "rangeTo" | "rangeUntil")
+                && fq_of(&rt).is_some_and(|r| e.conforms(&TypeRef::named(r), fq_of(&lt).unwrap_or_default()) == Some(false) && e.conforms(&lt, r) == Some(false));
+            if !unrelated {
+                return;
+            }
+            rejected += 1;
+            continue;
         }
-        let t = substitute(&e.resolve_declared(sym, &param.ty), &subst);
+        let t = substitute(&e.resolve_declared(sym, &param.ty), subst);
         if has_type_param(&t) || !matches!(t, TypeRef::Named { fq: Some(_), .. }) {
             return;
         }
-        if type_mismatch(e, &r, &t, &t.display()).is_none() {
+        if type_mismatch(e, r, &t, &t.display()).is_none() {
             return;
         }
         rejected += 1;

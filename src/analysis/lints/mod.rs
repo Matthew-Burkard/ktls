@@ -114,6 +114,13 @@ rules! {
     CONST_VAL_NOT_TOP_LEVEL_OR_OBJECT = "CONST_VAL_NOT_TOP_LEVEL_OR_OBJECT", Compiler, Error, false, [], "'const val' inside a class";
     CONST_VAL_WITHOUT_INITIALIZER = "CONST_VAL_WITHOUT_INITIALIZER", Compiler, Error, false, [], "'const val' without a value";
     CONST_VAL_WITH_GETTER = "CONST_VAL_WITH_GETTER", Compiler, Error, false, [], "'const val' with a getter";
+    TYPE_MISMATCH = "TYPE_MISMATCH", Compiler, Error, false, [], "Thrown or caught value that is not a 'Throwable'";
+    VAR_ANNOTATION_PARAMETER = "VAR_ANNOTATION_PARAMETER", Compiler, Error, false, [], "'var' parameter of an annotation class";
+    MISSING_VAL_ON_ANNOTATION_PARAMETER = "MISSING_VAL_ON_ANNOTATION_PARAMETER", Compiler, Error, false, [], "Annotation class parameter without 'val'";
+    INVALID_TYPE_OF_ANNOTATION_MEMBER = "INVALID_TYPE_OF_ANNOTATION_MEMBER", Compiler, Error, false, [], "Annotation class parameter of a type annotations cannot hold";
+    TYPE_CANT_BE_USED_FOR_CONST_VAL = "TYPE_CANT_BE_USED_FOR_CONST_VAL", Compiler, Error, false, [], "'const val' of a type other than a primitive or String";
+    EXPECTED_PARAMETERS_NUMBER_MISMATCH = "EXPECTED_PARAMETERS_NUMBER_MISMATCH", Compiler, Error, false, [], "Lambda declaring a different number of parameters than its function type";
+    EXPECTED_PARAMETER_TYPE_MISMATCH = "EXPECTED_PARAMETER_TYPE_MISMATCH", Compiler, Error, false, [], "Lambda parameter declared with a type the function type does not pass";
     CONST_VAL_WITH_DELEGATE = "CONST_VAL_WITH_DELEGATE", Compiler, Error, false, [], "'const val' with a delegate";
     NULLABLE_SUPERTYPE = "NULLABLE_SUPERTYPE", Compiler, Error, false, [], "Nullable type in a supertype list";
     WRONG_GETTER_RETURN_TYPE = "WRONG_GETTER_RETURN_TYPE", Compiler, Error, false, [], "Getter whose written return type is not the property's type";

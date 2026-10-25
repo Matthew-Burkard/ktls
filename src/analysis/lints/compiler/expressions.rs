@@ -40,12 +40,15 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 call_arguments(e, &n, out);
                 property_invoked(e, &n, out);
                 function_value_call(e, &n, out);
+                value_invoked(e, &n, out);
+                lambda_arguments(e, &n, out);
                 suspend_call(e, &n, out);
             }
             SyntaxKind::PROPERTY | SyntaxKind::VALUE_PARAMETER => {
                 literal_initializer(e, &n, out);
                 getter_value(e, &n, out);
             }
+            SyntaxKind::ENUM_ENTRY => enum_entry_arguments(e, &n, out),
             SyntaxKind::RETURN_EXPR => literal_return(e, &n, out),
             SyntaxKind::FUN => literal_expression_body(e, &n, out),
             _ => {}
@@ -365,10 +368,14 @@ fn val_target(cx: &Cx, e: &Engine, target: &SyntaxNode) -> Option<(String, Optio
     let [def] = defs.as_slice() else { return None };
     match def {
         Def::Local(l) => match l.kind {
-            LocalKind::Parameter | LocalKind::LambdaParameter => Some((l.name.clone(), None)),
+            LocalKind::Parameter | LocalKind::LambdaParameter | LocalKind::It => Some((l.name.clone(), None)),
             LocalKind::Val => {
-                // `val x: Int` assigned later is a deferred initialization.
-                let decl = crate::syntax::covering(&cx.root, l.name_range)?.ancestors().find(|a| a.kind() == SyntaxKind::PROPERTY)?;
+                // `val x: Int` assigned later is a deferred initialization; loop and `catch`
+                // variables are never assignable.
+                let decl = crate::syntax::covering(&cx.root, l.name_range)?.ancestors().find(|a| matches!(a.kind(), SyntaxKind::PROPERTY | SyntaxKind::FOR_EXPR | SyntaxKind::CATCH_CLAUSE))?;
+                if decl.kind() != SyntaxKind::PROPERTY {
+                    return Some((l.name.clone(), None));
+                }
                 let initialized = ast::token(&decl, SyntaxKind::EQ).is_some() || decl.children().any(|c| c.kind() == SyntaxKind::PROPERTY_DELEGATE);
                 let val = ast::token(&decl, SyntaxKind::VAL_KW)?;
                 initialized.then(|| (l.name.clone(), Some(Fix::replace("Change to 'var'", val.text_range(), "var"))))
@@ -526,6 +533,15 @@ fn unsafe_call(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         report(&ty, out, surround_with_null_check(cx, n, &recv.text().to_string()));
     } else if let Some(ty) = nullable_property_chain(e, &recv) {
         report(&ty, out, None);
+    } else if recv.kind() == SyntaxKind::NAME_REF
+        && let [Def::Symbol { sym, .. }] = e.resolve_name_ref(&recv).as_slice()
+        && sym.kind == SymbolKind::Property
+        && !in_unknown_lambda(e, &recv)
+        && super::certain::unchecked_nullable_property(&recv, sym)
+        && let Some(t) = super::certain::certain_type(e, &recv, true).filter(|t| nullable(t))
+    {
+        // A nullable class property not named elsewhere in the function.
+        report(&super::certain::shown(&t), out, None);
     }
 }
 
@@ -929,7 +945,7 @@ fn property_invoked(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
         let Some(declared) = s.ty.as_ref() else { return };
         let pt = crate::analysis::ide::infer::substitute(&e.resolve_declared(s, declared), subst);
         let TypeRef::Named { fq: Some(_), .. } = &pt else { return };
-        if e.classifier(fq_of(&pt).unwrap_or_default()).is_none() || !e.members_named(&pt, "invoke").is_empty() || !e.extensions(&pt, "invoke").is_empty() || !e.member_extensions(call, &pt, "invoke").is_empty() {
+        if e.classifier(fq_of(&pt).unwrap_or_default()).is_none() || invocable(e, &pt, call) {
             return;
         }
         shown.get_or_insert_with(|| super::certain::shown(&pt));
@@ -939,6 +955,59 @@ fn property_invoked(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
     let empty = list.as_ref().is_some_and(|l| l.children().next().is_none()) && !call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT);
     let fix = list.filter(|_| empty).map(|l| Fix::replace(format!("Use property '{name}'"), l.text_range(), ""));
     out.report(&FUNCTION_EXPECTED, callee.text_range(), format!("Expression '{name}' of type '{shown}' cannot be invoked as a function."), fix);
+}
+
+/// Values of type `t` can be called: an `invoke` operator (member or extension), or a
+/// function type among the supertypes (`interface F : (Int) -> Unit`).
+fn invocable(e: &Engine, t: &TypeRef, at: &SyntaxNode) -> bool {
+    !e.members_named(t, "invoke").is_empty()
+        || !e.extensions(t, "invoke").is_empty()
+        || !e.member_extensions(at, t, "invoke").is_empty()
+        || function_supertype(e, t, 0)
+}
+
+fn function_supertype(e: &Engine, t: &TypeRef, depth: u32) -> bool {
+    let function = |s: &TypeRef| matches!(s, TypeRef::Function { .. }) || fq_of(s).is_some_and(|f| f.starts_with("kotlin.Function") || f.starts_with("kotlin.jvm.functions.") || f.starts_with("kotlin.coroutines.SuspendFunction"));
+    if function(t) {
+        return true;
+    }
+    let Some(c) = fq_of(t).and_then(|f| e.classifier(f)) else { return false };
+    depth < 8 && c.symbol().supertypes.iter().any(|s| function_supertype(e, &e.resolve_declared(c.symbol(), s), depth + 1))
+}
+
+/// `x(…)` where `x` is a local or parameter of a class type without `invoke`, or an
+/// object (`O()`: objects have no constructors).
+fn value_invoked(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    if call.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(call)) {
+        return;
+    }
+    if in_unknown_lambda(e, call) || in_context_scope(call) || e.call_candidates(&callee).is_some_and(|c| !c.is_empty()) {
+        return;
+    }
+    // A function of that name is called instead when the value cannot be invoked: members
+    // and extensions of implicit receivers, local and top-level functions.
+    let name = callee.text().to_string();
+    let function = |s: &Symbol| matches!(s.kind, SymbolKind::Function | SymbolKind::Constructor) || s.kind.is_classifier();
+    if e.top_level_named(&name).iter().any(function)
+        || e.implicit_receivers(call).iter().any(|(t, _)| e.members_named(t, &name).iter().chain(&e.extensions(t, &name)).any(|(s, _)| function(s)))
+        || e.locals_at(call).iter().any(|l| l.name == name && matches!(l.kind, LocalKind::Function | LocalKind::Class))
+    {
+        return;
+    }
+    let t = match e.resolve_name_ref(&callee).as_slice() {
+        [Def::Local(l)] if matches!(l.kind, LocalKind::Parameter | LocalKind::Val | LocalKind::Var) => match super::certain::certain_type(e, &callee, true) {
+            Some(t @ TypeRef::Named { fq: Some(_), nullable: false, .. }) => t,
+            _ => return,
+        },
+        [Def::Symbol { sym, .. }] if sym.kind == SymbolKind::Object => TypeRef::named(&sym.fq_name),
+        _ => return,
+    };
+    let Some(fq) = fq_of(&t) else { return };
+    if e.classifier(fq).is_none() || invocable(e, &t, call) {
+        return;
+    }
+    out.report(&FUNCTION_EXPECTED, callee.text_range(), format!("Expression '{}' of type '{}' cannot be invoked as a function.", callee.text(), super::certain::shown(&t)), None);
 }
 
 /// `f(…)` where `f` is a local or parameter of function type (`(Int) -> String`): the
@@ -977,6 +1046,35 @@ fn function_value_call(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
             out.report(rule, value.text_range(), message, convert);
         }
     }
+}
+
+/// `A` / `A("s")` in `enum class E(val x: Int)`: the entry's constructor arguments (enums
+/// with a single constructor).
+fn enum_entry_arguments(e: &Engine, entry: &SyntaxNode, out: &mut Sink) {
+    let Some(class) = entry.ancestors().find(|a| a.kind() == SyntaxKind::CLASS) else { return };
+    let Some(class_name) = name_token(&class) else { return };
+    if class.children().filter(|c| c.kind() == SyntaxKind::CLASS_BODY).any(|b| b.children().any(|m| m.kind() == SyntaxKind::SECONDARY_CONSTRUCTOR)) {
+        return;
+    }
+    let Some(fq) = e.classifier_named(entry, &[ast::ident_text(&class_name).as_str()]) else { return };
+    let ctors = e.constructors(&fq);
+    let [ctor] = ctors.as_slice() else { return };
+    let list = entry.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST);
+    let args: Vec<SyntaxNode> = list.iter().flat_map(|l| l.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect::<Vec<_>>()).collect();
+    if args.iter().any(|a| a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME) || ast::token(a, SyntaxKind::STAR).is_some()) {
+        return;
+    }
+    let vararg = ctor.params.iter().any(|p| p.vararg);
+    if let Some(extra) = args.get(ctor.params.len()).filter(|_| !vararg) {
+        out.report(&TOO_MANY_ARGUMENTS, extra.text_range(), format!("Too many arguments for constructor of '{}'.", class_name.text()), None);
+        return;
+    }
+    if let Some(p) = ctor.params.iter().skip(args.len()).find(|p| !p.has_default && !p.vararg) {
+        let at = list.as_ref().and_then(|l| l.last_token()).map_or_else(|| name_token(entry).map_or(entry.text_range(), |t| t.text_range()), |t| t.text_range());
+        out.report(&NO_VALUE_FOR_PARAMETER, at, format!("No value passed for parameter '{}'.", p.name), None);
+        return;
+    }
+    argument_types(e, ctor, &crate::analysis::ide::infer::Subst::new(), &args, out);
 }
 
 // ------------------------------------------------------------ call arguments
@@ -1126,21 +1224,24 @@ fn argument_mismatches(e: &Engine, sym: &Symbol, subst: &crate::analysis::ide::i
     for tp in &sym.type_params {
         subst.remove(&tp.name);
     }
+    let named_params: Vec<String> = args.iter().filter_map(|a| a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME)).filter_map(|n| ast::token(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t)).collect();
     for (index, a) in args.iter().enumerate() {
         let name = a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| ast::token(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t));
         // A positional argument takes the parameter at its own index (named ones before it
         // must be in their own positions).
-        let param = match &name {
-            Some(n) => sym.params.iter().find(|p| p.name == *n),
-            None => sym.params.get(index),
+        // Positional arguments from the vararg's position on are its elements (unless it
+        // is passed by name, and the others keep their positions).
+        let vararg = sym.params.iter().position(|p| p.vararg).filter(|v| name.is_none() && index >= *v && !named_params.contains(&sym.params[*v].name));
+        let param = match (&name, vararg) {
+            (Some(n), _) => sym.params.iter().find(|p| p.name == *n),
+            (None, Some(v)) => sym.params.get(v),
+            (None, None) => sym.params.get(index),
         };
-        let Some(param) = param.filter(|p| !p.vararg) else {
-            // Positions after a vararg are ambiguous.
-            if name.is_none() {
-                return out;
-            }
+        let Some(param) = param.filter(|p| !p.vararg || vararg.is_some()) else { continue };
+        // A spread passes an array.
+        if param.vararg && ast::token(a, SyntaxKind::STAR).is_some() {
             continue;
-        };
+        }
         let Some(value) = a.children().filter(|c| c.kind() != SyntaxKind::VALUE_ARGUMENT_NAME).last() else { continue };
         let t = crate::analysis::ide::infer::substitute(&e.resolve_declared(sym, &param.ty), &subst);
         // Java parameters (platform types) accept null; generic ones need inference.
@@ -1482,11 +1583,160 @@ fn literal_initializer(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     let Some(value) = initializer(n) else { return };
     if value.kind() == SyntaxKind::LAMBDA_EXPR {
         lambda_result(e, &value, &ty, out);
+        lambda_parameters(e, &value, &[e.resolve_syntax_type(&ty)], true, out);
         return;
     }
     for value in branch_leaves(&value) {
         if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "type") {
             out.report_fixes(rule, value.text_range(), msg, fixes);
+        } else {
+            inferred_from_expected(e, &value, &e.resolve_syntax_type(&ty), out);
+        }
+    }
+}
+
+/// `val xs: List<Int> = listOf("a")`: a generic call whose result type takes its type
+/// arguments from the expected type, with arguments for those type parameters that do not
+/// fit them (`out` and invariant positions only).
+fn inferred_from_expected(e: &Engine, call: &SyntaxNode, expected: &TypeRef, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && call.kind() == SyntaxKind::CALL_EXPR) else { return };
+    // Explicit type arguments decide on their own.
+    if call.children().any(|c| c.kind() == SyntaxKind::TYPE_ARGUMENT_LIST) || in_unknown_lambda(e, call) {
+        return;
+    }
+    let list = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST);
+    let args: Vec<SyntaxNode> = list.iter().flat_map(|l| l.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect::<Vec<_>>()).collect();
+    if args.is_empty() || call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) || args.iter().any(|a| ast::token(a, SyntaxKind::STAR).is_some() || a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME)) {
+        return;
+    }
+    let Some(candidates) = e.call_candidates(&callee) else { return };
+    let fits = |s: &Symbol| {
+        let required = s.params.iter().filter(|p| !p.has_default && !p.vararg).count();
+        args.len() >= required && (args.len() <= s.params.len() || s.params.iter().any(|p| p.vararg))
+    };
+    // Every overload taking this many arguments must reject them.
+    let mut first = None;
+    for (sym, _) in candidates.iter().filter(|(s, _)| fits(s)) {
+        let Some(found) = bound_argument_mismatches(e, sym, &args, expected) else { return };
+        if found.is_empty() {
+            return;
+        }
+        first.get_or_insert(found);
+    }
+    for (value, rule, message, convert) in first.unwrap_or_default() {
+        out.report(rule, value.text_range(), message, convert);
+    }
+}
+
+/// Arguments of a call to `sym` that do not fit the type arguments `expected` gives its
+/// result; `None` when the result's type arguments do not come from `sym`'s type
+/// parameters (or not in `out`/invariant positions).
+#[allow(clippy::type_complexity)]
+fn bound_argument_mismatches(e: &Engine, sym: &Symbol, args: &[SyntaxNode], expected: &TypeRef) -> Option<Vec<(SyntaxNode, &'static Rule, String, Option<Fix>)>> {
+    let TypeRef::Named { fq: Some(efq), args: eargs, .. } = expected else { return None };
+    let TypeRef::Named { fq: Some(rfq), args: rargs, .. } = e.resolve_declared(sym, sym.ty.as_ref()?) else { return None };
+    let class = e.classifier(efq)?;
+    if rfq != *efq || rargs.len() != eargs.len() || class.symbol().type_params.len() != eargs.len() {
+        return None;
+    }
+    // Type parameter → the expected argument it must fit.
+    let mut bound: HashMap<String, TypeRef> = HashMap::new();
+    for ((r, x), tp) in rargs.iter().zip(eargs).zip(&class.symbol().type_params) {
+        let (crate::symbols::TypeArg::Type { ty: TypeRef::TypeParam { name, .. }, .. }, crate::symbols::TypeArg::Type { ty, variance }) = (r, x) else { continue };
+        if tp.variance == crate::symbols::Variance::In || *variance != crate::symbols::Variance::Invariant || has_type_param(ty) || !sym.type_params.iter().any(|t| t.name == *name) {
+            continue;
+        }
+        bound.insert(name.clone(), ty.clone());
+    }
+    if bound.is_empty() {
+        return None;
+    }
+    let vararg = sym.params.iter().position(|p| p.vararg);
+    let mut found = Vec::new();
+    for (i, a) in args.iter().enumerate() {
+        let param = vararg.filter(|v| i >= *v).and_then(|v| sym.params.get(v)).or_else(|| sym.params.get(i))?;
+        let TypeRef::TypeParam { name, nullable } = &param.ty else { continue };
+        let Some(want) = bound.get(name) else { continue };
+        let want = if *nullable { want.clone().nullable(true) } else { want.clone() };
+        let Some(value) = a.children().last() else { continue };
+        if let Some((rule, message, _, convert)) = type_mismatch(e, &value, &want, &super::certain::shown(&want)) {
+            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ARGUMENT_TYPE_MISMATCH } else { rule };
+            found.push((value, rule, message, convert));
+        }
+    }
+    Some(found)
+}
+
+/// Lambdas passed to a call: their parameters against the function type every candidate
+/// expects at that position.
+fn lambda_arguments(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let list = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST);
+    let args: Vec<SyntaxNode> = list.iter().flat_map(|l| l.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect::<Vec<_>>()).collect();
+    let trailing = call.children().find(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT).and_then(|l| l.children().find(|c| c.kind() == SyntaxKind::LAMBDA_EXPR));
+    let positional: Vec<(usize, SyntaxNode)> = args.iter().enumerate().filter_map(|(i, a)| a.children().last().filter(|v| v.kind() == SyntaxKind::LAMBDA_EXPR).map(|v| (i, v))).collect();
+    if trailing.is_none() && positional.is_empty() || args.iter().any(|a| a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME || c.kind() == SyntaxKind::STAR)) || in_unknown_lambda(e, call) {
+        return;
+    }
+    // Java members of mapped built-ins are not candidates here (`Map.forEach(BiConsumer)`).
+    if let Some(recv) = call.parent().filter(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(call)).and_then(|p| p.first_child()) {
+        let Some(t) = e.type_of(&recv) else { return };
+        if jvm_members(e, &t).is_none_or(|m| m.contains(&callee.text().to_string())) {
+            return;
+        }
+    }
+    let Some(candidates) = e.call_candidates(&callee) else { return };
+    if candidates.is_empty() {
+        return;
+    }
+    let lambdas = positional.into_iter().map(|(i, l)| (Some(i), l)).chain(trailing.map(|l| (None, l)));
+    for (index, lambda) in lambdas {
+        // The parameter type of every candidate at the lambda's position.
+        let mut expected = Vec::new();
+        for (sym, subst) in &candidates {
+            let param = match index {
+                Some(i) if !sym.params.iter().take(i + 1).any(|p| p.vararg) => sym.params.get(i),
+                None => sym.params.last(),
+                _ => None,
+            };
+            let Some(param) = param else { return };
+            expected.push(crate::analysis::ide::infer::substitute(&e.resolve_declared(sym, &param.ty), subst));
+        }
+        lambda_parameters(e, &lambda, &expected, candidates.len() == 1, out);
+    }
+}
+
+/// A lambda's declared parameters against the function types it may be passed as (all of
+/// the same arity): their number, and with `types`, their written types.
+fn lambda_parameters(e: &Engine, lambda: &SyntaxNode, expected: &[TypeRef], types: bool, out: &mut Sink) {
+    let Some(list) = lambda.children().find(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST) else { return };
+    let declared: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER).collect();
+    let mut arity = None;
+    for t in expected {
+        let TypeRef::Function { params, .. } = strip(t) else { return };
+        if arity.is_some_and(|a| a != params.len()) {
+            return;
+        }
+        arity = Some(params.len());
+    }
+    let Some(arity) = arity else { return };
+    if declared.len() != arity {
+        let what = if arity == 1 { "parameter".to_string() } else { "parameters".to_string() };
+        out.report(&EXPECTED_PARAMETERS_NUMBER_MISMATCH, list.text_range(), format!("Expected {arity} {what}, but {} declared.", declared.len()), None);
+        return;
+    }
+    let ([t], true) = (expected, types) else { return };
+    let TypeRef::Function { params, .. } = strip(t) else { return };
+    for (p, want) in declared.iter().zip(params) {
+        let Some(written) = ast::child::<ast::TypeRef>(p) else { continue };
+        let got = e.resolve_syntax_type(&written);
+        // A parameter may be declared with a supertype of the expected one.
+        let (Some(wfq), Some(gfq)) = (fq_of(want), fq_of(&got)) else { continue };
+        if has_type_param(want) || e.classifier(wfq).is_none() || e.classifier(gfq).is_none() {
+            continue;
+        }
+        if e.conforms(&TypeRef::named(wfq), gfq) == Some(false) {
+            out.report(&EXPECTED_PARAMETER_TYPE_MISMATCH, written.syntax().text_range(), format!("Expected parameter of type '{}'.", super::certain::shown(want)), None);
         }
     }
 }

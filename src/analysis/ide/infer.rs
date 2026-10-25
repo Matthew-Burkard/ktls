@@ -2626,6 +2626,8 @@ pub struct AbstractMember {
     pub subst: Subst,
     /// Declared in an interface (rather than an abstract class).
     pub from_interface: bool,
+    /// Declared in a Java class.
+    pub java: bool,
 }
 
 impl<'s> Engine<'s> {
@@ -2663,9 +2665,17 @@ impl<'s> Engine<'s> {
         let supers = self.known_supertypes(t)?;
         // Delegation (`: I by d`) and Java classes (implementing Kotlin's mapped collection
         // members under Java names) make implementations invisible here.
+        // Plain Java interfaces are fine (`Runnable`, a library's listener), unless a Kotlin
+        // type mapped to Java (collections, `CharSequence`, `Number`…) is also implemented.
+        let plain_java = |fq: &str| !fq.starts_with("java.util.") && (!fq.starts_with("java.lang.") || matches!(fq, "java.lang.Runnable" | "java.lang.AutoCloseable"));
+        let kotlin_mapped = supers.iter().filter_map(fq_of).any(|f| f.starts_with("kotlin.collections.") || matches!(f, "kotlin.CharSequence" | "kotlin.Comparable" | "kotlin.Number" | "kotlin.Throwable" | "kotlin.Enum" | "kotlin.Annotation"));
         for st in &supers {
             match fq_of(st).and_then(|fq| self.classifier_for(fq)).map(|(c, _)| c) {
-                Some(Classifier::Library(lc)) if !lc.is_kotlin && lc.symbol.fq_name != "java.lang.Object" => return None,
+                Some(Classifier::Library(lc)) if !lc.is_kotlin && lc.symbol.fq_name != "java.lang.Object" => {
+                    if lc.symbol.kind != SymbolKind::Interface || !plain_java(&lc.symbol.fq_name) || kotlin_mapped {
+                        return None;
+                    }
+                }
                 Some(Classifier::Source(sym)) if self.delegates(&sym) => return None,
                 _ => {}
             }
@@ -2685,14 +2695,15 @@ impl<'s> Engine<'s> {
             let args = if alias_args.is_empty() { args_of(st).to_vec() } else { alias_args };
             let subst = self.type_subst(&c, &args);
             let interface = c.symbol().kind == SymbolKind::Interface;
-            let mapped = fq.starts_with("java.lang.") || fq.starts_with("java.util.");
+            let java = matches!(&c, Classifier::Library(lc) if !lc.is_kotlin);
+            let mapped = !plain_java(fq) && (fq.starts_with("java.lang.") || fq.starts_with("java.util."));
             for m in self.members_of(&c) {
                 if !matches!(m.kind, SymbolKind::Function | SymbolKind::Property) || m.modifiers.has(Modifiers::STATIC) {
                     continue;
                 }
                 if m.modifiers.has(Modifiers::ABSTRACT) {
                     if !mapped {
-                        abstract_members.push(AbstractMember { symbol: m, subst: subst.clone(), from_interface: interface });
+                        abstract_members.push(AbstractMember { symbol: m, subst: subst.clone(), from_interface: interface, java });
                     }
                 } else {
                     implemented.push((m, subst.clone()));
@@ -2705,7 +2716,9 @@ impl<'s> Engine<'s> {
                     m.name == a.symbol.name
                         && match a.symbol.kind {
                             SymbolKind::Property => matches!(m.kind, SymbolKind::Property | SymbolKind::Field),
-                            // Unknown comparisons count as implemented.
+                            // Java members (platform, `Object` and array types) by name and
+                            // arity; unknown comparisons count as implemented.
+                            _ if a.java => m.kind == SymbolKind::Function && m.params.len() == a.symbol.params.len(),
                             _ => m.kind == SymbolKind::Function && self.same_signature(m, s, &a.symbol, &a.subst) != Some(false),
                         }
                 })
