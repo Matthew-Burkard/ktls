@@ -38,9 +38,14 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::DOT_QUALIFIED_EXPR => unsafe_call(cx, e, &n, out),
             SyntaxKind::CALL_EXPR => {
                 call_arguments(e, &n, out);
+                property_invoked(e, &n, out);
+                function_value_call(e, &n, out);
                 suspend_call(e, &n, out);
             }
-            SyntaxKind::PROPERTY | SyntaxKind::VALUE_PARAMETER => literal_initializer(e, &n, out),
+            SyntaxKind::PROPERTY | SyntaxKind::VALUE_PARAMETER => {
+                literal_initializer(e, &n, out);
+                getter_value(e, &n, out);
+            }
             SyntaxKind::RETURN_EXPR => literal_return(e, &n, out),
             SyntaxKind::FUN => literal_expression_body(e, &n, out),
             _ => {}
@@ -193,6 +198,16 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
         if e.resolve_name_text(nr, &name).iter().any(|d| matches!(d, Def::Local(_))) {
             return;
         }
+        // `E.B` / `Obj.f()` on a project class, object or enum.
+        if let Qualifier::Static(c) = e.resolve_qualifier(&recv) {
+            // Compiler plugins add members to annotated classes (`@Serializable`: `serializer()`).
+            let annotated = super::markers::source_decl(cx, c.symbol()).and_then(|d| modifiers(&d)).is_some_and(|m| m.annotations().next().is_some());
+            if !annotated && static_name_missing(e, &c, &name) {
+                let kind = if c.symbol().kind == SymbolKind::Enum { "enum class" } else { "class" };
+                out.report(&UNRESOLVED_REFERENCE_EXPR, tok.text_range(), format!("Unresolved reference '{name}' in {kind} '{}'.", c.symbol().name), None);
+            }
+            return;
+        }
         // Only receivers of certain type.
         let Some(t) = certain_receiver(e, &recv) else { return };
         let Some(fq) = fq_of(&t) else { return };
@@ -223,6 +238,35 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
         }
     }
     out.report(&UNRESOLVED_REFERENCE_EXPR, tok.text_range(), format!("Unresolved reference '{name}'."), None);
+}
+
+/// `name` is nothing reachable through project classifier `c`: no nested classifier, enum
+/// entry, object or companion member, or extension on the companion.
+fn static_name_missing(e: &Engine, c: &crate::analysis::resolve::Classifier, name: &str) -> bool {
+    let sym = c.symbol();
+    if !matches!(sym.origin, Origin::Source { .. }) || !matches!(sym.kind, SymbolKind::Class | SymbolKind::Enum | SymbolKind::Object | SymbolKind::Interface) {
+        return false;
+    }
+    // Generated for enums; `Companion` names the companion object.
+    if sym.kind == SymbolKind::Enum && matches!(name, "values" | "valueOf" | "entries") || name == "Companion" {
+        return false;
+    }
+    let (nested, members) = e.all_static_members(c);
+    if nested.iter().any(|(n, _)| n == name) || members.iter().any(|(m, _)| m.name == name) {
+        return false;
+    }
+    // Members with other visibility, and extensions on the object or companion.
+    if !e.members_named(&TypeRef::named(&sym.fq_name), name).is_empty() {
+        return false;
+    }
+    let companion = if sym.kind == SymbolKind::Object { Some(sym.clone()) } else { e.res.find_classifier(&format!("{}.Companion", sym.fq_name)).map(|c| c.symbol().clone()) };
+    if let Some(obj) = companion {
+        let t = TypeRef::named(&obj.fq_name);
+        if !e.extensions(&t, name).is_empty() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Kotlin built-in types mapped to JVM classes (`MutableMap` → `java.util.Map`) also expose
@@ -863,6 +907,78 @@ fn lambda_callee_unique(e: &Engine, lambda: &SyntaxNode) -> bool {
     e.call_candidates(&callee).is_some_and(|c| c.len() == 1)
 }
 
+/// `s.length()`: a member call on a receiver of certain type whose name only has
+/// properties, none of a type with an `invoke` operator.
+fn property_invoked(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let Some(outer) = call.parent().filter(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR)) else { return };
+    let Some(recv) = outer.first_child().filter(|r| r != call) else { return };
+    if in_unknown_lambda(e, call) || in_context_scope(call) {
+        return;
+    }
+    let Some(t) = certain_receiver(e, &recv) else { return };
+    let Some(tok) = callee.first_token() else { return };
+    let name = ast::ident_text(&tok);
+    let found: Vec<(Symbol, crate::analysis::ide::infer::Subst)> = e.members_named(&t, &name).into_iter().chain(e.member_extensions(&recv, &t, &name)).chain(e.extensions(&t, &name)).collect();
+    if found.is_empty() || found.iter().any(|(s, _)| s.kind != SymbolKind::Property) {
+        return;
+    }
+    // Every property's type is a known class without `invoke`.
+    let mut shown = None;
+    for (s, subst) in &found {
+        let Some(declared) = s.ty.as_ref() else { return };
+        let pt = crate::analysis::ide::infer::substitute(&e.resolve_declared(s, declared), subst);
+        let TypeRef::Named { fq: Some(_), .. } = &pt else { return };
+        if e.classifier(fq_of(&pt).unwrap_or_default()).is_none() || !e.members_named(&pt, "invoke").is_empty() || !e.extensions(&pt, "invoke").is_empty() || !e.member_extensions(call, &pt, "invoke").is_empty() {
+            return;
+        }
+        shown.get_or_insert_with(|| super::certain::shown(&pt));
+    }
+    let Some(shown) = shown else { return };
+    let list = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST);
+    let empty = list.as_ref().is_some_and(|l| l.children().next().is_none()) && !call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT);
+    let fix = list.filter(|_| empty).map(|l| Fix::replace(format!("Use property '{name}'"), l.text_range(), ""));
+    out.report(&FUNCTION_EXPECTED, callee.text_range(), format!("Expression '{name}' of type '{shown}' cannot be invoked as a function."), fix);
+}
+
+/// `f(…)` where `f` is a local or parameter of function type (`(Int) -> String`): the
+/// number and types of the arguments.
+fn function_value_call(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    if call.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(call)) {
+        return;
+    }
+    if !matches!(e.resolve_name_ref(&callee).as_slice(), [Def::Local(l)] if matches!(l.kind, LocalKind::Parameter | LocalKind::Val | LocalKind::Var)) || in_unknown_lambda(e, call) {
+        return;
+    }
+    let Some(TypeRef::Function { receiver: None, params, nullable: false, .. }) = super::certain::certain_type(e, &callee, true) else { return };
+    let list = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST);
+    let mut args: Vec<SyntaxNode> = list.iter().flat_map(|l| l.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect::<Vec<_>>()).collect();
+    if args.iter().any(|a| ast::token(a, SyntaxKind::STAR).is_some() || a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME)) {
+        return;
+    }
+    args.extend(call.children().filter(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT));
+    if let Some(extra) = args.get(params.len()) {
+        out.report(&TOO_MANY_ARGUMENTS, extra.text_range(), format!("Too many arguments for '{}'.", callee.text()), None);
+        return;
+    }
+    if args.len() < params.len() {
+        let at = list.as_ref().and_then(|l| l.last_token()).map_or(callee.text_range(), |t| t.text_range());
+        out.report(&NO_VALUE_FOR_PARAMETER, at, format!("No value passed for parameter 'p{}'.", args.len() + 1), None);
+        return;
+    }
+    for (a, t) in args.iter().zip(&params) {
+        let Some(value) = a.children().last() else { continue };
+        if has_type_param(t) || matches!(t, TypeRef::Platform(_)) {
+            continue;
+        }
+        if let Some((rule, message, _, convert)) = type_mismatch(e, &value, t, &t.display()) {
+            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ARGUMENT_TYPE_MISMATCH } else { rule };
+            out.report(rule, value.text_range(), message, convert);
+        }
+    }
+}
+
 // ------------------------------------------------------------ call arguments
 
 enum Mismatch {
@@ -1067,7 +1183,7 @@ fn parameter_type_fix(e: &Engine, sym: &Symbol, param: &str, to: &str) -> Option
     Some(fix)
 }
 
-fn has_type_param(t: &TypeRef) -> bool {
+pub(super) fn has_type_param(t: &TypeRef) -> bool {
     match t {
         TypeRef::TypeParam { .. } | TypeRef::Error | TypeRef::Dynamic => true,
         TypeRef::Named { fq, args, .. } => fq.is_none() || args.iter().any(|a| matches!(a, crate::symbols::TypeArg::Type { ty, .. } if has_type_param(ty))),
@@ -1103,9 +1219,21 @@ pub(super) fn literal_type(n: &SyntaxNode) -> Option<Option<&'static str>> {
         SyntaxKind::INT_LITERAL if text.ends_with("ul") => Some("kotlin.ULong"),
         SyntaxKind::INT_LITERAL if text.ends_with('u') => Some("kotlin.UInt"),
         SyntaxKind::INT_LITERAL if text.ends_with('l') => Some("kotlin.Long"),
+        // Too large for an Int (`-2147483648` still fits).
+        SyntaxKind::INT_LITERAL if int_value(&text).is_some_and(|v| v > i32::MAX as u128 + u128::from(n.kind() == SyntaxKind::PREFIX_EXPR)) => Some("kotlin.Long"),
         SyntaxKind::INT_LITERAL => Some("kotlin.Int"),
         _ => return None,
     })
+}
+
+/// The value of an integer literal without suffix (lowercase text).
+fn int_value(text: &str) -> Option<u128> {
+    let clean: String = text.chars().filter(|c| *c != '_').collect();
+    match clean.get(..2) {
+        Some("0x") => u128::from_str_radix(&clean[2..], 16).ok(),
+        Some("0b") => u128::from_str_radix(&clean[2..], 2).ok(),
+        _ => clean.parse().ok(),
+    }
 }
 
 /// A literal, or a value of certain type (see `certain::certain_type`), where type `t` (written
@@ -1203,6 +1331,10 @@ fn java_null_mismatch(e: &Engine, value: &SyntaxNode, fq: &str, nullable: bool, 
     }
     if literal_type(value) == Some(None) {
         return Some((&NULL_FOR_NONNULL_TYPE, format!("Null cannot be a value of a non-null type '{shown}'."), format!("{shown}?"), None));
+    }
+    // Locals: unless narrowed in a way the engine does not model.
+    if value.kind() == SyntaxKind::NAME_REF && matches!(e.resolve_name_ref(value).as_slice(), [Def::Local(_)]) && nullable_local(e, value).is_none() {
+        return None;
     }
     let actual = super::certain::certain_type(e, value, false).filter(|a| matches!(a, TypeRef::Named { nullable: true, .. }) && fq_of(a) == Some(fq)).or_else(|| nullable_safe_call(e, value).filter(|a| fq_of(a) == Some(fq)))?;
     let actual_shown = super::certain::shown(&actual);
@@ -1354,6 +1486,22 @@ fn literal_initializer(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     }
     for value in branch_leaves(&value) {
         if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "type") {
+            out.report_fixes(rule, value.text_range(), msg, fixes);
+        }
+    }
+}
+
+/// `val p: Int get() = "s"`: a getter's expression body against the property's type.
+fn getter_value(e: &Engine, p: &SyntaxNode, out: &mut Sink) {
+    let Some(ty) = ast::child::<ast::TypeRef>(p) else { return };
+    let Some(getter) = p.children().find(|c| c.kind() == SyntaxKind::PROPERTY_ACCESSOR && ast::token(c, SyntaxKind::IDENT).is_some_and(|t| t.text() == "get")) else { return };
+    if ast::token(&getter, SyntaxKind::EQ).is_none() {
+        return;
+    }
+    let Some(value) = getter.children().filter(|c| c.kind() != SyntaxKind::TYPE_REFERENCE && c.kind() != SyntaxKind::MODIFIER_LIST).last() else { return };
+    for value in branch_leaves(&value) {
+        if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "type") {
+            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
             out.report_fixes(rule, value.text_range(), msg, fixes);
         }
     }

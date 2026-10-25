@@ -114,6 +114,16 @@ rules! {
     CONST_VAL_NOT_TOP_LEVEL_OR_OBJECT = "CONST_VAL_NOT_TOP_LEVEL_OR_OBJECT", Compiler, Error, false, [], "'const val' inside a class";
     CONST_VAL_WITHOUT_INITIALIZER = "CONST_VAL_WITHOUT_INITIALIZER", Compiler, Error, false, [], "'const val' without a value";
     CONST_VAL_WITH_GETTER = "CONST_VAL_WITH_GETTER", Compiler, Error, false, [], "'const val' with a getter";
+    CONST_VAL_WITH_DELEGATE = "CONST_VAL_WITH_DELEGATE", Compiler, Error, false, [], "'const val' with a delegate";
+    NULLABLE_SUPERTYPE = "NULLABLE_SUPERTYPE", Compiler, Error, false, [], "Nullable type in a supertype list";
+    WRONG_GETTER_RETURN_TYPE = "WRONG_GETTER_RETURN_TYPE", Compiler, Error, false, [], "Getter whose written return type is not the property's type";
+    WRONG_SETTER_PARAMETER_TYPE = "WRONG_SETTER_PARAMETER_TYPE", Compiler, Error, false, [], "Setter whose parameter type is not the property's type";
+    SPREAD_OF_NULLABLE = "SPREAD_OF_NULLABLE", Compiler, Error, false, [], "Spread ('*') of a nullable array";
+    LATEINIT_INTRINSIC_CALL_ON_NON_LATEINIT = "LATEINIT_INTRINSIC_CALL_ON_NON_LATEINIT", Compiler, Error, false, [], "'isInitialized' on a property that is not 'lateinit'";
+    NO_SET_METHOD = "NO_SET_METHOD", Compiler, Error, false, [], "Indexed assignment on a read-only collection or a type without 'set'";
+    INVISIBLE_SETTER = "INVISIBLE_SETTER", Compiler, Error, false, [], "Assignment to a property whose setter is not visible here";
+    CYCLIC_CONSTRUCTOR_DELEGATION_CALL = "CYCLIC_CONSTRUCTOR_DELEGATION_CALL", Compiler, Error, false, [], "Secondary constructors that delegate to each other in a cycle";
+    EXPLICIT_DELEGATION_CALL_REQUIRED = "EXPLICIT_DELEGATION_CALL_REQUIRED", Compiler, Error, false, [], "Secondary constructor without 'this(…)' or 'super(…)' where one is required";
     ABSTRACT_FUNCTION_WITH_BODY = "ABSTRACT_FUNCTION_WITH_BODY", Compiler, Error, false, [], "Abstract function with a body";
     NON_ABSTRACT_FUNCTION_WITH_NO_BODY = "NON_ABSTRACT_FUNCTION_WITH_NO_BODY", Compiler, Error, false, [], "Member function without a body that is not abstract";
     NON_MEMBER_FUNCTION_NO_BODY = "NON_MEMBER_FUNCTION_NO_BODY", Compiler, Error, false, [], "Top-level or local function without a body";
@@ -235,6 +245,7 @@ rules! {
     VAL_OR_VAR_ON_SECONDARY_CONSTRUCTOR_PARAMETER = "VAL_OR_VAR_ON_SECONDARY_CONSTRUCTOR_PARAMETER", Compiler, Error, false, [], "'val'/'var' on a secondary constructor parameter";
     VAL_OR_VAR_ON_LOOP_PARAMETER = "VAL_OR_VAR_ON_LOOP_PARAMETER", Compiler, Error, false, [], "'val'/'var' on a 'for' loop parameter";
     VAL_OR_VAR_ON_CATCH_PARAMETER = "VAL_OR_VAR_ON_CATCH_PARAMETER", Compiler, Error, false, [], "'val'/'var' on a 'catch' parameter";
+    FUNCTION_EXPECTED = "FUNCTION_EXPECTED", Compiler, Error, false, [], "Property called like a function ('s.length()')";
     FUNCTION_CALL_EXPECTED = "FUNCTION_CALL_EXPECTED", Compiler, Error, false, [], "Function name used as a value without '()'";
     NO_COMPANION_OBJECT = "NO_COMPANION_OBJECT", Compiler, Error, false, [], "Class without a companion object used as a value";
     ABSTRACT_SUPER_CALL = "ABSTRACT_SUPER_CALL", Compiler, Error, false, [], "'super.f()' of an abstract member";

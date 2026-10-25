@@ -1,5 +1,6 @@
 //! Declarations that are not allowed in their form: type parameters of objects and enum
-//! classes, named anonymous functions, `tailrec` on open members or without tail calls.
+//! classes, named anonymous functions, `tailrec` on open members or without tail calls,
+//! secondary constructors that delegate in a cycle or skip a required `super(…)`.
 
 use super::super::*;
 
@@ -13,6 +14,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 type_parameters(&n, out);
                 local_classifier(&n, out);
                 class_members(&n, out);
+                if n.kind() == SyntaxKind::CLASS {
+                    delegation_cycles(&n, out);
+                    super_call_required(cx, &n, out);
+                }
             }
             SyntaxKind::TYPEALIAS => type_alias(&n, out),
             SyntaxKind::WHEN_EXPR => when_shape(&n, out),
@@ -22,6 +27,93 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::PROPERTY if has_modifier(&n, "lateinit") => unnecessary_lateinit(&n, out),
             _ => {}
         }
+    }
+}
+
+/// A constructor's value parameters: (required, total, vararg).
+fn arity(ctor: &SyntaxNode) -> (usize, usize, bool) {
+    let params: Vec<SyntaxNode> = ctor.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER_LIST).flat_map(|l| l.children().filter(|p| p.kind() == SyntaxKind::VALUE_PARAMETER).collect::<Vec<_>>()).collect();
+    let vararg = params.iter().any(|p| has_modifier(p, "vararg"));
+    let required = params.iter().filter(|p| ast::token(p, SyntaxKind::EQ).is_none() && !has_modifier(p, "vararg")).count();
+    (required, params.len(), vararg)
+}
+
+/// `this(…)` calls between secondary constructors that lead back to themselves (targets
+/// chosen by argument count, only when exactly one constructor fits).
+fn delegation_cycles(class: &SyntaxNode, out: &mut Sink) {
+    let Some(body) = class.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY) else { return };
+    let secondaries: Vec<SyntaxNode> = body.children().filter(|c| c.kind() == SyntaxKind::SECONDARY_CONSTRUCTOR).collect();
+    if secondaries.is_empty() {
+        return;
+    }
+    let primary = class.children().find(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR);
+    let all: Vec<&SyntaxNode> = primary.iter().chain(&secondaries).collect();
+    let fits = |c: &SyntaxNode, n: usize| {
+        let (required, total, vararg) = arity(c);
+        n >= required && (n <= total || vararg)
+    };
+    // The secondary constructor each one delegates to, if certain.
+    let calls: Vec<Option<SyntaxNode>> = secondaries.iter().map(|s| s.children().find(|c| c.kind() == SyntaxKind::CONSTRUCTOR_DELEGATION_CALL).filter(|d| ast::token(d, SyntaxKind::THIS_KW).is_some())).collect();
+    let targets: Vec<Option<usize>> = calls
+        .iter()
+        .map(|call| {
+            let args: Vec<SyntaxNode> = call.as_ref()?.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).flat_map(|l| l.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect::<Vec<_>>()).collect();
+            if args.iter().any(|a| ast::token(a, SyntaxKind::STAR).is_some() || a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME)) {
+                return None;
+            }
+            let [target] = all.iter().filter(|c| fits(c, args.len())).collect::<Vec<_>>()[..] else { return None };
+            secondaries.iter().position(|s| s == *target)
+        })
+        .collect();
+    for (start, call) in calls.iter().enumerate() {
+        let Some(call) = call else { continue };
+        let mut at = targets[start];
+        for _ in 0..secondaries.len() {
+            match at {
+                Some(i) if i == start => {
+                    out.report(&CYCLIC_CONSTRUCTOR_DELEGATION_CALL, call.text_range(), "There's a cycle in the delegation calls chain.", None);
+                    break;
+                }
+                Some(i) => at = targets[i],
+                None => break,
+            }
+        }
+    }
+}
+
+/// Without a primary constructor, a secondary one with no `super(…)`/`this(…)` calls the
+/// superclass's constructor without arguments, which must exist.
+fn super_call_required(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
+    if class.children().any(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR) {
+        return;
+    }
+    let Some(body) = class.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY) else { return };
+    let implicit: Vec<SyntaxNode> = body.children().filter(|c| c.kind() == SyntaxKind::SECONDARY_CONSTRUCTOR && !c.children().any(|d| d.kind() == SyntaxKind::CONSTRUCTOR_DELEGATION_CALL)).collect();
+    if implicit.is_empty() {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    // The superclass: a supertype without arguments (constructor calls are not allowed
+    // without a primary constructor) that is a class.
+    let entries = class.children().filter(|c| c.kind() == SyntaxKind::SUPER_TYPE_LIST).flat_map(|l| l.children().collect::<Vec<_>>());
+    let superclass = entries.filter(|en| en.kind() == SyntaxKind::SUPER_TYPE_ENTRY).filter_map(|en| en.descendants().find_map(ast::TypeRef::cast)).find_map(|t| {
+        let fq = crate::analysis::ide::infer::fq_of(&e.resolve_syntax_type(&t))?.to_string();
+        let sym = e.classifier(&fq)?.symbol().clone();
+        (sym.kind == crate::symbols::SymbolKind::Class).then_some(sym)
+    });
+    let Some(sup) = superclass else { return };
+    let ctors = e.constructors(&sup.fq_name);
+    // Unknown constructors, or one callable without arguments.
+    if ctors.is_empty() || ctors.iter().any(|c| c.params.iter().all(|p| p.has_default || p.vararg)) {
+        return;
+    }
+    // Library metadata may not record default values.
+    if !matches!(sup.origin, crate::symbols::Origin::Source { .. }) {
+        return;
+    }
+    for c in implicit {
+        let range = ast::token(&c, SyntaxKind::IDENT).map_or(c.text_range(), |t| t.text_range());
+        out.report(&EXPLICIT_DELEGATION_CALL_REQUIRED, range, format!("Explicit 'this' or 'super' call is required: '{}' has no constructor that can be called without arguments.", sup.name), None);
     }
 }
 

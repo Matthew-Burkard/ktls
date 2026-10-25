@@ -6,6 +6,7 @@
 //! stays silent when part of the picture (smart casts, unknown lambda receivers, unresolved
 //! supertypes) is missing.
 
+mod access;
 mod annotations;
 mod certain;
 mod dataflow;
@@ -19,6 +20,7 @@ mod labels;
 mod inheritance;
 mod jumps;
 mod markers;
+mod operands;
 mod operators;
 mod references;
 mod restrictions;
@@ -63,4 +65,6 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     references::check(cx, out);
     operators::check(cx, out);
     explicit_api::check(cx, out);
+    access::check(cx, out);
+    operands::check(cx, out);
 }

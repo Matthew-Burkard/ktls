@@ -4,7 +4,7 @@
 
 use super::super::*;
 use crate::analysis::ide::infer::{Def, Engine, LocalKind, fq_of};
-use crate::symbols::{Modifiers, Origin, SymbolKind};
+use crate::symbols::{Modifiers, Origin, SymbolKind, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     for n in cx.root.descendants() {
@@ -12,7 +12,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             continue;
         }
         match n.kind() {
-            SyntaxKind::PROPERTY => property(&n, out),
+            SyntaxKind::PROPERTY => {
+                property(&n, out);
+                accessor_types(cx, &n, out);
+            }
             SyntaxKind::FUN => function(&n, out),
             SyntaxKind::CLASS => {
                 fun_interface(&n, out);
@@ -138,6 +141,29 @@ fn property(p: &SyntaxNode, out: &mut Sink) {
         }
     }
     let _ = n;
+}
+
+/// `get(): T` / `set(v: T)` with a written type other than the property's.
+fn accessor_types(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
+    let Some(declared) = ast::child::<ast::TypeRef>(p) else { return };
+    let Some(e) = cx.engine() else { return };
+    let resolved = |t: &ast::TypeRef| match e.resolve_syntax_type(t) {
+        TypeRef::Named { fq: Some(fq), nullable, .. } => Some((fq, nullable)),
+        _ => None,
+    };
+    let Some(want) = resolved(&declared) else { return };
+    for acc in p.children().filter(|c| c.kind() == SyntaxKind::PROPERTY_ACCESSOR) {
+        let (written, rule, what) = match accessor_kind(&acc).as_deref() {
+            Some("get") => (ast::child::<ast::TypeRef>(&acc), &WRONG_GETTER_RETURN_TYPE, "Getter return type"),
+            Some("set") => (acc.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER_LIST).and_then(|l| l.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER)).and_then(|v| ast::child::<ast::TypeRef>(&v)), &WRONG_SETTER_PARAMETER_TYPE, "Setter parameter type"),
+            _ => continue,
+        };
+        let Some(written) = written else { continue };
+        if resolved(&written).is_some_and(|got| got != want) {
+            let fix = Fix::replace(format!("Change to '{}'", declared.syntax().text()), written.syntax().text_range(), declared.syntax().text().to_string());
+            out.report(rule, written.syntax().text_range(), format!("{what} must be '{}'.", declared.syntax().text()), Some(fix));
+        }
+    }
 }
 
 fn function(f: &SyntaxNode, out: &mut Sink) {
@@ -284,6 +310,9 @@ fn supertypes(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
     let module_of = |p: &std::path::Path| cx.snap.context_of(p).map(|ctx| ctx.module);
     for entry in &entries {
         let Some(tr) = entry.descendants().find_map(ast::TypeRef::cast) else { continue };
+        if let Some(q) = tr.syntax().children().find(|c| c.kind() == SyntaxKind::NULLABLE_TYPE).and_then(|n| ast::token(&n, SyntaxKind::QUESTION)) {
+            out.report(&NULLABLE_SUPERTYPE, tr.syntax().text_range(), "A supertype cannot be nullable.", Some(Fix::delete("Remove '?'", q.text_range())));
+        }
         let t = e.resolve_syntax_type(&tr);
         let Some(fq) = fq_of(&t).map(str::to_string) else { continue };
         if seen.contains(&fq) {

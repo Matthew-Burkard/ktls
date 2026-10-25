@@ -3355,3 +3355,104 @@ fun elvisOk(u: User?): String { return u?.nick ?: "" }
     assert_eq!(found.iter().filter(|f| *f == "RETURN_TYPE_MISMATCH: b.v").count(), 3, "{found:#?}");
     assert_eq!(found.len(), 8, "{found:#?}");
 }
+
+#[test]
+fn wrong_uses_of_declarations() {
+    let text = r#"package a
+
+interface I
+class C : I?
+object O { const val y by lazy { 1 } }
+class Acc {
+    val bad: Int get() = "s"
+    val typed: Int get(): String = "s"
+    var set: Int = 1
+        set(v: String) {}
+    var hidden = 1
+        private set
+    var t = ""
+    fun h() = this::t.isInitialized
+}
+fun setters(a: Acc) { a.hidden = 2 }
+fun spread(a: IntArray?) = listOf(*a)
+fun big() { val i: Int = 3000000000 }
+fun invoked(s: String, l: List<Int>) { s.length(); l.size() }
+fun values(f: (Int) -> Int) { f("s"); f(1, 2); f() }
+fun checks(x: String) { x is Int; when (x) { 1 -> {}; else -> {} }; x == 1 }
+fun readOnly(l: List<Int>, m: Map<String, Int>) { l[0] = 1; m["a"] = 1 }
+fun operators(a: Int, b: String, c: Boolean) { a + b; c + 1; -b; a > "x" }
+enum class E { A }
+fun entries(e: E) = when (e) { E.A -> 1; E.B -> 2 }
+class Cycle { constructor(x: Int) : this(x, 1); constructor(x: Int, y: Int) : this(x) }
+open class Base(x: Int)
+class NoSuper : Base { constructor() }
+"#;
+    let found = compiler(text);
+    for expected in [
+        "NULLABLE_SUPERTYPE: I?",
+        "CONST_VAL_WITH_DELEGATE: y",
+        "RETURN_TYPE_MISMATCH: \"s\"",
+        "WRONG_GETTER_RETURN_TYPE: String",
+        "WRONG_SETTER_PARAMETER_TYPE: String",
+        "INVISIBLE_SETTER: hidden",
+        "LATEINIT_INTRINSIC_CALL_ON_NON_LATEINIT: isInitialized",
+        "SPREAD_OF_NULLABLE: *a",
+        "INITIALIZER_TYPE_MISMATCH: 3000000000",
+        "FUNCTION_EXPECTED: length",
+        "FUNCTION_EXPECTED: size",
+        "ARGUMENT_TYPE_MISMATCH: \"s\"",
+        "TOO_MANY_ARGUMENTS: 2",
+        "NO_VALUE_FOR_PARAMETER: )",
+        "INCOMPATIBLE_TYPES: Int",
+        "INCOMPATIBLE_TYPES: 1",
+        "EQUALITY_NOT_APPLICABLE: ==",
+        "NO_SET_METHOD: l[0]",
+        "NO_SET_METHOD: m[\"a\"]",
+        "NONE_APPLICABLE: +",
+        "UNRESOLVED_REFERENCE: +",
+        "UNRESOLVED_REFERENCE: -",
+        "NONE_APPLICABLE: >",
+        "UNRESOLVED_REFERENCE: B",
+        "CYCLIC_CONSTRUCTOR_DELEGATION_CALL: this(x, 1)",
+        "CYCLIC_CONSTRUCTOR_DELEGATION_CALL: this(x)",
+        "EXPLICIT_DELEGATION_CALL_REQUIRED: constructor",
+    ] {
+        has(&found, expected);
+    }
+    assert_eq!(fixed("fun f(s: String) = s.length()\n", "FUNCTION_EXPECTED"), "fun f(s: String) = s.length\n");
+
+    // Valid uses of the same shapes.
+    let ok = r#"package a
+
+class Acc {
+    val good: Int get() = 1
+    val block: Int
+        get() { return 1 }
+    var hidden = 1
+        private set
+    lateinit var t: String
+    fun bump() { hidden = 2 }
+    fun h() = this::t.isInitialized
+    val f: () -> Int = { 1 }
+}
+fun calls(a: Acc, s: String, g: (Int) -> String, h: (Int, String) -> Unit) { a.f(); s.length; g(1); h(1, "x"); h(1) { } }
+fun spread(a: IntArray?) = if (a != null) listOf(*a) else null
+fun big() { val l: Long = 3000000000; val i: Int = -2147483648 }
+fun checks(x: String, y: Long, z: Any) { x is CharSequence; when (x) { "a" -> {}; else -> {} }; y == 1L; z == 1; when (y) { 1L -> {}; else -> {} } }
+fun writable(l: MutableList<Int>, m: MutableMap<String, Int>, arr: IntArray) { l[0] = 1; m["a"] = 1; arr[0] = 1 }
+fun operators(a: Int, b: String, c: Char, d: Double, l: Long) { "s" + a; b + null; a + 2L; d + 1; c + 1; c - 'a'; a < 2L; -a; -d; l * 2 }
+enum class E { A }
+fun entries(e: E) = when (e) { E.A -> E.entries.size + E.valueOf("A").ordinal + E.values().size }
+object Obj { fun f() = 1 }
+class Comp { companion object { const val K = 1 } }
+fun Comp.Companion.ext() = 2
+fun statics() = Obj.f() + Comp.K + Comp.ext()
+class Chain(val a: Int) { constructor() : this(1); constructor(s: String) : this() }
+open class Base(x: Int = 0)
+class Implicit : Base { constructor() }
+open class Needs(x: Int)
+class Explicit : Needs { constructor() : super(1) }
+"#;
+    let found: Vec<String> = compiler(ok).into_iter().filter(|f| !f.starts_with("UNUSED_EXPRESSION") && !f.starts_with("USELESS_IS_CHECK")).collect();
+    assert!(found.is_empty(), "{found:#?}");
+}

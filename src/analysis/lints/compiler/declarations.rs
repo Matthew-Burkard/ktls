@@ -209,6 +209,8 @@ fn property(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
             out.report(&CONST_VAL_NOT_TOP_LEVEL_OR_OBJECT, name.text_range(), "'const val' is only allowed at top level or in objects.", None);
         } else if !init && !decl.has_delegate() && !has_modifier(p, "expect") {
             out.report(&CONST_VAL_WITHOUT_INITIALIZER, name.text_range(), "'const val' must have an initializer.", None);
+        } else if decl.has_delegate() {
+            out.report(&CONST_VAL_WITH_DELEGATE, name.text_range(), "'const val' cannot be delegated.", None);
         } else if getter_body {
             out.report(&CONST_VAL_WITH_GETTER, name.text_range(), "'const val' cannot have a getter.", None);
         }

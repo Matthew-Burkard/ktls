@@ -174,6 +174,8 @@ fn is_check(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     if e.conforms(&TypeRef::named(afq), tfq) == Some(true) {
         let result = if negated { "false" } else { "true" };
         out.report(&USELESS_IS_CHECK, n.text_range(), format!("Check for instance is always '{result}'."), None);
+    } else if incompatible(e, &actual, &target) {
+        out.report(&INCOMPATIBLE_TYPES, ty.syntax().text_range(), format!("Incompatible types '{}' and '{}'.", ty.syntax().text(), shown(&actual)), None);
     }
 }
 
@@ -185,6 +187,12 @@ fn incompatible(e: &Engine, a: &TypeRef, b: &TypeRef) -> bool {
         return false;
     }
     e.conforms(&TypeRef::named(afq), bfq) == Some(false) && e.conforms(&TypeRef::named(bfq), afq) == Some(false)
+}
+
+/// An integer literal (of whichever integer type) compared with a value of class `t`
+/// unrelated to all of them.
+fn int_literal_incompatible(e: &Engine, v: &SyntaxNode, t: &TypeRef) -> bool {
+    literal_type(v) == Some(Some("kotlin.Int")) && ["kotlin.Int", "kotlin.Long", "kotlin.Short", "kotlin.Byte"].iter().all(|i| incompatible(e, &TypeRef::named(i), t))
 }
 
 /// The certain type of an operand, except integer literals (their type follows the other
@@ -200,6 +208,15 @@ fn operand_type(e: &Engine, v: &SyntaxNode) -> Option<TypeRef> {
 fn equality(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     let Some(op) = binary_op(n).filter(|o| matches!(o.kind(), SyntaxKind::EQ2 | SyntaxKind::NOT_EQ)) else { return };
     let Some((l, r)) = binary_operands(n) else { return };
+    for (lit, other) in [(&l, &r), (&r, &l)] {
+        if let Some(t) = operand_type(e, other)
+            && int_literal_incompatible(e, lit, &t)
+        {
+            let (a, b) = if lit == &l { ("Int".to_string(), shown(&t)) } else { (shown(&t), "Int".to_string()) };
+            out.report(&EQUALITY_NOT_APPLICABLE, op.text_range(), format!("Operator '{}' cannot be applied to '{a}' and '{b}'.", op.text()), None);
+            return;
+        }
+    }
     let (Some(a), Some(b)) = (operand_type(e, &l), operand_type(e, &r)) else { return };
     if incompatible(e, &a, &b) {
         out.report(&EQUALITY_NOT_APPLICABLE, op.text_range(), format!("Operator '{}' cannot be applied to '{}' and '{}'.", op.text(), shown(&a), shown(&b)), None);
@@ -216,6 +233,10 @@ fn when_values(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     let Some(st) = expr.and_then(|x| operand_type(e, &x)) else { return };
     let conditions = n.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY).flat_map(|en| en.children().filter(|c| c.kind() == SyntaxKind::WHEN_CONDITION).collect::<Vec<_>>());
     for v in conditions.filter_map(|c| condition_value(&c)) {
+        if int_literal_incompatible(e, &v, &st) {
+            out.report(&INCOMPATIBLE_TYPES, v.text_range(), format!("Incompatible types 'Int' and '{}'.", shown(&st)), None);
+            continue;
+        }
         let Some(vt) = operand_type(e, &v) else { continue };
         if incompatible(e, &vt, &st) {
             out.report(&INCOMPATIBLE_TYPES, v.text_range(), format!("Incompatible types '{}' and '{}'.", shown(&vt), shown(&st)), None);

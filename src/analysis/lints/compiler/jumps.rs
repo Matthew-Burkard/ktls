@@ -114,6 +114,11 @@ fn return_value(e: &Engine, ret: &SyntaxNode, out: &mut Sink) {
                 _ => {}
             }
         }
+        // A getter's block body: values of the property's type.
+        SyntaxKind::PROPERTY_ACCESSOR if ast::token(&target, SyntaxKind::IDENT).is_some_and(|t| t.text() == "get") => {
+            let (Some(t), Some(v)) = (target.parent().and_then(|p| ast::child::<ast::TypeRef>(&p)), value) else { return };
+            returned(e, &v, &t, out);
+        }
         _ => {}
     }
 }
