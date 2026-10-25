@@ -1116,12 +1116,20 @@ fn mismatch_of(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: &str, check_a
         _ => return None,
     };
     let c = e.res.find_classifier(&fq);
-    if fq != "kotlin.Function" && c.as_ref().is_none_or(|c| c.symbol().kind == SymbolKind::TypeAlias || matches!(c, crate::analysis::resolve::Classifier::Library(lc) if !lc.is_kotlin)) {
+    if fq != "kotlin.Function" && c.as_ref().is_none_or(|c| c.symbol().kind == SymbolKind::TypeAlias) {
         return None;
+    }
+    // Java classes: only `null` and nullable values of the same class.
+    if matches!(c, Some(crate::analysis::resolve::Classifier::Library(ref lc)) if !lc.is_kotlin) {
+        return java_null_mismatch(e, value, &fq, nullable, shown);
     }
     let Some(lit) = literal_type(value) else {
         if fq == "kotlin.Function" {
             return None;
+        }
+        if !nullable && let Some(actual) = nullable_safe_call(e, value).filter(|a| e.conforms(a, &fq) == Some(true)) {
+            let actual_shown = super::certain::shown(&actual);
+            return Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: inferred type is '{actual_shown}' but '{shown}' was expected."), actual_shown, None));
         }
         // A nullable property chain (`u.nick`) not checked earlier.
         if !nullable
@@ -1174,6 +1182,35 @@ fn mismatch_of(e: &Engine, value: &SyntaxNode, t: &TypeRef, shown: &str, check_a
     let to = if nullable { format!("{actual}?") } else { actual.to_string() };
     let convert = conversion(value, lit, &fq, true);
     Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: expected '{shown}', actual '{actual}'."), to, convert))
+}
+
+/// `null` or a certainly nullable value of the class itself where a non-null Java class is
+/// expected (its subtypes are not known well enough to judge other values).
+fn java_null_mismatch(e: &Engine, value: &SyntaxNode, fq: &str, nullable: bool, shown: &str) -> Option<(&'static Rule, String, String, Option<Fix>)> {
+    if nullable {
+        return None;
+    }
+    if literal_type(value) == Some(None) {
+        return Some((&NULL_FOR_NONNULL_TYPE, format!("Null cannot be a value of a non-null type '{shown}'."), format!("{shown}?"), None));
+    }
+    let actual = super::certain::certain_type(e, value, false).filter(|a| matches!(a, TypeRef::Named { nullable: true, .. }) && fq_of(a) == Some(fq)).or_else(|| nullable_safe_call(e, value).filter(|a| fq_of(a) == Some(fq)))?;
+    let actual_shown = super::certain::shown(&actual);
+    let fix = (value.kind() != SyntaxKind::SAFE_QUALIFIED_EXPR).then(|| Fix::replace("Add non-null asserted (!!) call", TextRange::empty(value.text_range().end()), "!!"));
+    Some((&INITIALIZER_TYPE_MISMATCH, format!("Type mismatch: inferred type is '{actual_shown}' but '{shown}' was expected."), actual_shown, fix))
+}
+
+/// `x?.let { … }` on a certainly nullable `x` whose result the certain types do not cover
+/// (a generic lambda result): nullable, of the class the engine infers.
+fn nullable_safe_call(e: &Engine, value: &SyntaxNode) -> Option<TypeRef> {
+    if value.kind() != SyntaxKind::SAFE_QUALIFIED_EXPR || super::certain::certain_type(e, value, false).is_some() {
+        return None;
+    }
+    let recv = super::certain::certain_type(e, &value.first_child()?, true)?;
+    if !matches!(recv, TypeRef::Named { nullable: true, ref fq, .. } if fq.as_deref() != Some("kotlin.Nothing")) {
+        return None;
+    }
+    let TypeRef::Named { name, fq: Some(fq), args, .. } = crate::analysis::ide::infer::strip(&e.type_of(value)?).clone() else { return None };
+    (&*fq != "kotlin.Nothing" && &*fq != "kotlin.Unit").then_some(TypeRef::Named { name, fq: Some(fq), args, nullable: true })
 }
 
 /// `List<User>` where `List<String>` is expected: type arguments of the same class that do
@@ -1273,6 +1310,12 @@ pub(super) fn branch_leaves(v: &SyntaxNode) -> Vec<SyntaxNode> {
             }
         }
         SyntaxKind::RETURN_EXPR | SyntaxKind::THROW_EXPR | SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR => {}
+        // `a ?: b`: the fallback (the left side is non-null when taken).
+        SyntaxKind::BINARY_EXPR if binary_op(v).is_some_and(|o| o.kind() == SyntaxKind::ELVIS) => {
+            if let Some((_, r)) = binary_operands(v) {
+                out.extend(branch_leaves(&r));
+            }
+        }
         _ => out.push(v.clone()),
     }
     out

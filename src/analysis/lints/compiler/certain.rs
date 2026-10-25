@@ -409,7 +409,7 @@ fn name(e: &Engine, nr: &SyntaxNode, smart: bool, depth: u32) -> Option<TypeRef>
         [Def::Symbol { sym, subst }] => {
             // A project `val` may be smart cast where it is read: by a null check when its
             // type is nullable, or by an `is` check.
-            if smart_castable(nr, sym) {
+            if smart_castable(nr, sym) && !unchecked_nullable_property(nr, sym) {
                 return None;
             }
             return_type(e, sym, subst, None, false, smart, depth)
@@ -425,6 +425,16 @@ fn smart_castable(at: &SyntaxNode, sym: &Symbol) -> bool {
         && sym.kind == SymbolKind::Property
         && !sym.modifiers.has(Modifiers::VAR)
         && (sym.ty.as_ref().is_some_and(|t| matches!(t, TypeRef::Named { nullable: true, .. })) || checked_with_is(at, &sym.name))
+}
+
+/// A nullable project `val` named nowhere else in the function reading it, so nothing there
+/// can have smart cast it.
+fn unchecked_nullable_property(at: &SyntaxNode, sym: &Symbol) -> bool {
+    if !sym.ty.as_ref().is_some_and(|t| matches!(t, TypeRef::Named { nullable: true, .. })) || checked_with_is(at, &sym.name) {
+        return false;
+    }
+    let Some(body) = at.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::CLASS_INITIALIZER | SyntaxKind::SECONDARY_CONSTRUCTOR)) else { return false };
+    !body.descendants().any(|d| d.kind() == SyntaxKind::NAME_REF && d != *at && d.first_token().is_some_and(|t| ast::ident_text(&t) == sym.name))
 }
 
 /// A local or parameter: its written type, or the certain type of its initializer, with

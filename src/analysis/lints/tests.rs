@@ -3323,3 +3323,28 @@ fn compiler_quick_fixes() {
     check("package a\n\ninternal fun helper() = 1\ninline fun api() = helper()\n", "NON_PUBLIC_CALL_FROM_PUBLIC_INLINE", "@PublishedApi\ninternal fun helper()");
 }
 
+#[test]
+fn nullable_values_returned_as_non_null() {
+    let text = r#"
+import java.io.File
+class User(val nick: String?) {
+    fun bare(): String { return nick }
+    fun checked(): String { if (nick != null) return nick; return "" }
+}
+fun maybeFile(): File? = null
+fun javaClass(): File { return maybeFile() }
+fun javaOk(): File { return File("x") }
+fun javaNull(): File? { return maybeFile() }
+fun letResult(u: User?): String { return u?.let { it.nick } }
+fun letElvis(u: User?): String { return u?.let { it.nick } ?: "" }
+fun <T> generic(x: T?): T { return x }
+fun <T> genericChecked(x: T?): T { if (x != null) return x; throw Exception() }
+fun elvisNull(u: User?): String { return u?.nick ?: null }
+fun elvisOk(u: User?): String { return u?.nick ?: "" }
+"#;
+    let found: Vec<String> = compiler(text).into_iter().filter(|f| f.contains("TYPE_MISMATCH") || f.contains("NONNULL")).collect();
+    for expected in ["RETURN_TYPE_MISMATCH: nick", "RETURN_TYPE_MISMATCH: maybeFile()", "RETURN_TYPE_MISMATCH: u?.let { it.nick }", "RETURN_TYPE_MISMATCH: x", "NULL_FOR_NONNULL_TYPE: null"] {
+        has(&found, expected);
+    }
+    assert_eq!(found.len(), 5, "{found:#?}");
+}

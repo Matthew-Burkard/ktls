@@ -33,12 +33,28 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
 fn expression_body(e: &Engine, f: &SyntaxNode, out: &mut Sink) {
     let Some(decl) = ast::FunDecl::cast(f.clone()) else { return };
     let (Some(t), Some(v)) = (decl.return_type(), initializer(f)) else { return };
-    let ty = e.resolve_syntax_type(&t);
+    returned(e, &v, &t, out);
+}
+
+/// A value returned where `t` is declared (a `T` type parameter: only a nullable `T?` local).
+fn returned(e: &Engine, v: &SyntaxNode, t: &ast::TypeRef, out: &mut Sink) {
+    let ty = e.resolve_syntax_type(t);
+    let shown = t.syntax().text().to_string();
+    if let TypeRef::TypeParam { name, nullable: false } = &ty {
+        for v in super::expressions::branch_leaves(v) {
+            let local = v.kind() == SyntaxKind::NAME_REF && super::expressions::nullable_local(e, &v).is_some_and(|s| s == format!("{name}?"));
+            if local && e.type_of(&v).is_some_and(|a| matches!(a, TypeRef::TypeParam { name: n, nullable: true } if n == name.as_str())) {
+                let fix = Fix::replace("Add non-null asserted (!!) call", TextRange::empty(v.text_range().end()), "!!");
+                out.report(&RETURN_TYPE_MISMATCH, v.text_range(), format!("Type mismatch: inferred type is '{name}?' but '{shown}' was expected."), Some(fix));
+            }
+        }
+        return;
+    }
     if matches!(ty, TypeRef::Platform(_) | TypeRef::TypeParam { .. }) {
         return;
     }
-    for v in super::expressions::branch_leaves(&v) {
-        if let Some((rule, msg, _, convert)) = type_mismatch(e, &v, &ty, &t.syntax().text().to_string()) {
+    for v in super::expressions::branch_leaves(v) {
+        if let Some((rule, msg, _, convert)) = type_mismatch(e, &v, &ty, &shown) {
             let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
             out.report_fixes(rule, v.text_range(), msg, convert.into_iter().collect());
         }
@@ -83,18 +99,7 @@ fn return_value(e: &Engine, ret: &SyntaxNode, out: &mut Sink) {
                     }
                 }
                 // A value of the wrong type.
-                (Some(t), Some(v)) => {
-                    let ty = e.resolve_syntax_type(&t);
-                    if matches!(ty, TypeRef::Platform(_) | TypeRef::TypeParam { .. }) {
-                        return;
-                    }
-                    for v in super::expressions::branch_leaves(&v) {
-                        if let Some((rule, msg, _, convert)) = type_mismatch(e, &v, &ty, &t.syntax().text().to_string()) {
-                            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
-                            out.report_fixes(rule, v.text_range(), msg, convert.into_iter().collect());
-                        }
-                    }
-                }
+                (Some(t), Some(v)) => returned(e, &v, &t, out),
                 // A value from a block-bodied function without a result type (Unit).
                 (None, Some(v)) => {
                     if let Some((rule, msg, _, _)) = type_mismatch(e, &v, &TypeRef::named("kotlin.Unit"), "Unit") {
