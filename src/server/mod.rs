@@ -8,6 +8,7 @@ mod handlers;
 pub mod line_index;
 mod loader;
 mod to_proto;
+mod watcher;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -41,6 +42,8 @@ pub enum Task {
     Diagnostics { path: PathBuf, version: Option<i32>, diagnostics: Vec<lsp_types::Diagnostic>, coverage: Coverage },
     Loaded(Box<Loaded>),
     Progress(ProgressEvent),
+    /// Files changed on disk, seen by the server's own watcher.
+    FilesChanged(Vec<(PathBuf, lsp_types::FileChangeType)>),
 }
 
 struct OpenDoc {
@@ -63,6 +66,8 @@ pub struct Server {
     config: Config,
     encoding: Encoding,
     caps: ClientCapabilities,
+    /// The client handles `workspace/diagnostic/refresh`.
+    diagnostic_refresh: bool,
     folders: Vec<PathBuf>,
     /// In-flight requests and their cancellation flags.
     in_flight: HashMap<RequestId, Arc<AtomicBool>>,
@@ -71,7 +76,14 @@ pub struct Server {
     /// Flag shared by all work on the current snapshot; set when the state changes.
     snapshot_flag: Arc<AtomicBool>,
     diagnostics_due: HashMap<PathBuf, Instant>,
+    /// When to ask a pull-diagnostics client to pull again for every open file.
+    refresh_due: Option<Instant>,
     reload_due: Option<Instant>,
+    /// Watches files when the client does not do it for the server.
+    watcher: Option<watcher::Watcher>,
+    /// Files changed on disk while a project load was running (its file contents may be
+    /// older).
+    changed_during_load: HashSet<PathBuf>,
     load_generation: u64,
     loading: bool,
     pending_reload: bool,
@@ -189,6 +201,9 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
 /// Run the server over `connection` until `exit`.
 pub fn run(connection: Connection) -> anyhow::Result<()> {
     let (id, params) = connection.initialize_start()?;
+    // The specification (and Neovim) name it `workspace.diagnostics`; lsp-types reads
+    // `workspace.diagnostic`.
+    let diagnostic_refresh = ["diagnostics", "diagnostic"].iter().any(|k| params["capabilities"]["workspace"][k]["refreshSupport"].as_bool() == Some(true));
     let init: InitializeParams = serde_json::from_value(params).context("invalid initialize params")?;
     let encoding = match init.capabilities.general.as_ref().and_then(|g| g.position_encodings.as_ref()) {
         Some(encs) if encs.contains(&PositionEncodingKind::UTF8) => Encoding::Utf8,
@@ -230,13 +245,17 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
         config,
         encoding,
         caps: init.capabilities,
+        diagnostic_refresh,
         folders,
         in_flight: HashMap::new(),
         outgoing: HashMap::new(),
         next_id: 0,
         snapshot_flag: handlers::new_flag(),
         diagnostics_due: HashMap::new(),
+        refresh_due: None,
         reload_due: None,
+        watcher: None,
+        changed_during_load: HashSet::new(),
         load_generation: 0,
         loading: false,
         pending_reload: false,
@@ -282,7 +301,7 @@ impl Server {
     fn main_loop(&mut self, receiver: &Receiver<Message>) -> anyhow::Result<()> {
         loop {
             let now = Instant::now();
-            let next_due = self.diagnostics_due.values().copied().chain(self.reload_due).min();
+            let next_due = self.diagnostics_due.values().copied().chain(self.reload_due).chain(self.refresh_due).min();
             let timeout = next_due.map(|d| d.saturating_duration_since(now)).unwrap_or(Duration::from_secs(3600));
             select! {
                 recv(receiver) -> msg => {
@@ -738,6 +757,8 @@ impl Server {
                     self.publish(&path, None, Vec::new());
                 }
                 self.state_changed();
+                // Unsaved changes are gone: other files may see different declarations.
+                self.schedule_open_files(Duration::from_millis(self.config.diagnostics.debounce_ms));
             }
             DidSaveTextDocument::METHOD => {
                 let Ok(p) = serde_json::from_value::<lsp_types::DidSaveTextDocumentParams>(n.params) else { return };
@@ -757,7 +778,7 @@ impl Server {
             }
             DidChangeWatchedFiles::METHOD => {
                 let Ok(p) = serde_json::from_value::<lsp_types::DidChangeWatchedFilesParams>(n.params) else { return };
-                self.on_watched_files(p.changes);
+                self.on_watched_files(p.changes.into_iter().filter_map(|c| Some((uri_to_path(&c.uri)?, c.typ))).collect());
             }
             DidChangeWorkspaceFolders::METHOD => {
                 let Ok(p) = serde_json::from_value::<lsp_types::DidChangeWorkspaceFoldersParams>(n.params) else { return };
@@ -798,6 +819,9 @@ impl Server {
             .and_then(|w| w.did_change_watched_files.as_ref())
             .and_then(|d| d.dynamic_registration)
             .unwrap_or(false);
+        if !dynamic_watch {
+            self.watcher = watcher::Watcher::start(self.tasks_tx.clone());
+        }
         if dynamic_watch {
             let watchers = ["**/*.kt", "**/*.kts", "**/*.java", "**/pom.xml", "**/*.gradle", "**/gradle.properties", "**/*.versions.toml"]
                 .iter()
@@ -821,10 +845,9 @@ impl Server {
         self.start_load(false);
     }
 
-    fn on_watched_files(&mut self, changes: Vec<lsp_types::FileEvent>) {
+    fn on_watched_files(&mut self, changes: Vec<(PathBuf, lsp_types::FileChangeType)>) {
         let mut sources_changed = false;
-        for change in changes {
-            let Some(path) = uri_to_path(&change.uri) else { continue };
+        for (path, typ) in changes {
             if is_build_file(&path) {
                 self.reload_due = Some(Instant::now() + Duration::from_millis(1500));
                 continue;
@@ -832,7 +855,10 @@ impl Server {
             if self.docs.contains_key(&path) || crate::analysis::Language::of(&path).is_none() {
                 continue;
             }
-            if change.typ == lsp_types::FileChangeType::DELETED {
+            if self.loading {
+                self.changed_during_load.insert(path.clone());
+            }
+            if typ == lsp_types::FileChangeType::DELETED {
                 self.host.remove_file(&path);
             } else if let Ok(text) = std::fs::read_to_string(&path) {
                 self.host.set_file(path, text.into(), None);
@@ -868,6 +894,7 @@ impl Server {
             }
             Task::Loaded(loaded) => self.on_loaded(*loaded),
             Task::Progress(ev) => self.on_progress(ev),
+            Task::FilesChanged(changes) => self.on_watched_files(changes),
         }
     }
 
@@ -944,6 +971,17 @@ impl Server {
                 self.host.insert_file(f);
             }
         }
+        // The load read these before they changed.
+        for path in std::mem::take(&mut self.changed_during_load) {
+            if self.docs.contains_key(&path) || crate::analysis::Language::of(&path).is_none() {
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(text) => self.host.set_file(path, text.into(), None),
+                Err(_) => self.host.remove_file(&path),
+            }
+        }
+        self.watch_workspace();
         for note in &loaded.notes {
             self.log(MessageType::WARNING, note.clone());
         }
@@ -956,7 +994,7 @@ impl Server {
         }
         self.state_changed();
         if self.pull_diagnostics() {
-            let refresh = self.caps.workspace.as_ref().and_then(|w| w.diagnostic.as_ref()).and_then(|d| d.refresh_support).unwrap_or(false);
+            let refresh = self.diagnostic_refresh;
             if refresh {
                 self.request::<lsp_types::request::WorkspaceDiagnosticRefresh>((), Outgoing::Other);
             }
@@ -996,7 +1034,34 @@ impl Server {
         }
     }
 
+    /// Point the server's own watcher (if any) at the source roots and the directories of
+    /// build files.
+    fn watch_workspace(&mut self) {
+        let Some(w) = self.watcher.as_mut() else { return };
+        let ws = self.host.workspace();
+        let roots: Vec<PathBuf> = ws.source_roots().map(|(p, _)| p.clone()).collect();
+        let mut dirs: Vec<PathBuf> = self.folders.clone();
+        for p in &ws.projects {
+            dirs.push(p.root.clone());
+            dirs.push(p.root.join("gradle"));
+            dirs.extend(p.build_files.iter().filter_map(|f| f.parent().map(Path::to_path_buf)));
+            dirs.extend(p.modules.iter().map(|m| m.dir.clone()));
+        }
+        dirs.sort();
+        dirs.dedup();
+        w.watch(&roots, &dirs);
+    }
+
+    /// Recompute diagnostics of every open file (other files' declarations changed): in
+    /// pull mode by asking the client to pull again.
     fn schedule_open_files(&mut self, delay: Duration) {
+        if self.pull_diagnostics() {
+            let refresh = self.diagnostic_refresh;
+            if refresh && self.config.diagnostics.enabled {
+                self.refresh_due = Some(Instant::now() + delay);
+            }
+            return;
+        }
         let paths: Vec<PathBuf> = self.docs.keys().cloned().collect();
         for p in paths {
             self.schedule_diagnostics(&p, delay);
@@ -1005,6 +1070,10 @@ impl Server {
 
     fn run_due(&mut self) {
         let now = Instant::now();
+        if self.refresh_due.is_some_and(|d| d <= now) {
+            self.refresh_due = None;
+            self.request::<lsp_types::request::WorkspaceDiagnosticRefresh>((), Outgoing::Other);
+        }
         if self.reload_due.is_some_and(|d| d <= now) {
             self.reload_due = None;
             self.start_load(true);

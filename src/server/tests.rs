@@ -18,6 +18,11 @@ struct Client {
 
 impl Client {
     fn start(root: &Path, options: Value, pull: bool) -> Client {
+        Client::start_with(root, options, pull, |_| {})
+    }
+
+    /// Like `start`, with the client capabilities adjusted by `caps`.
+    fn start_with(root: &Path, options: Value, pull: bool, adjust: impl FnOnce(&mut Value)) -> Client {
         let (server_conn, client_conn) = Connection::memory();
         let server = std::thread::spawn(move || super::run(server_conn));
         let mut c = Client { conn: client_conn, server: Some(server), next_id: 0, notifications: Vec::new() };
@@ -35,6 +40,7 @@ impl Client {
         if pull {
             caps["textDocument"]["diagnostic"] = json!({ "dynamicRegistration": false });
         }
+        adjust(&mut caps);
         let result = c.request(
             "initialize",
             json!({
@@ -263,6 +269,62 @@ fn pull_diagnostics_and_plain_folders() {
     assert!(!c.notifications.iter().any(|n| n.method == "textDocument/publishDiagnostics"), "pushed diagnostics to a pull client");
     let report = c.request("textDocument/diagnostic", json!({ "textDocument": { "uri": path_to_uri(&file).as_str() } }));
     assert_eq!(report["items"].as_array().unwrap().len(), 1, "one error per line: {report}");
+    c.shutdown();
+}
+
+/// Like Neovim on Linux: no file watching for the server, pull diagnostics with refresh.
+#[test]
+fn external_changes_and_cross_file_refresh() {
+    let Some(stdlib) = stdlib() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let (project, options) = maven_fixture(tmp.path(), &stdlib);
+    let mut c = Client::start_with(&project, options, true, |caps| {
+        caps["workspace"]["didChangeWatchedFiles"] = json!({ "dynamicRegistration": false });
+        caps["workspace"]["diagnostics"] = json!({ "refreshSupport": true });
+    });
+    c.wait_for_import();
+    let refreshed = |c: &mut Client| {
+        c.pump(Duration::from_secs(10), |m, _| match m {
+            Message::Request(r) if r.method == "workspace/diagnostic/refresh" => Some(()),
+            _ => None,
+        })
+    };
+    let errors = |c: &mut Client, path: &Path| -> Vec<String> {
+        let report = c.request("textDocument/diagnostic", json!({ "textDocument": { "uri": path_to_uri(path).as_str() } }));
+        report["items"].as_array().unwrap().iter().filter(|d| d["severity"] == 1).map(|d| d["message"].as_str().unwrap().to_string()).collect()
+    };
+
+    // A file another program creates later.
+    let app = project.join("src/main/kotlin/demo/App.kt");
+    let text = "package demo\n\nfun app(): Int = helper()\n";
+    write(&app, text);
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": path_to_uri(&app).as_str(), "languageId": "kotlin", "version": 1, "text": text } }));
+    assert_eq!(errors(&mut c, &app), vec!["Unresolved reference 'helper'."]);
+    write(&project.join("src/main/kotlin/demo/Helper.kt"), "package demo\n\nfun helper(): Int = 1\n");
+    refreshed(&mut c);
+    assert!(errors(&mut c, &app).is_empty());
+
+    // Another open file's declarations change in the editor: the first one is pulled again.
+    let lib = project.join("src/main/kotlin/demo/Lib.kt");
+    let lib_text = "package demo\n\nfun lib(): Int = 2\n";
+    write(&lib, lib_text);
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": path_to_uri(&lib).as_str(), "languageId": "kotlin", "version": 1, "text": lib_text } }));
+    c.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": path_to_uri(&app).as_str(), "version": 2 }, "contentChanges": [{ "text": "package demo\n\nfun app(): Int = helper() + lib()\n" }] }),
+    );
+    assert!(errors(&mut c, &app).is_empty());
+    c.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": path_to_uri(&lib).as_str(), "version": 2 }, "contentChanges": [{ "text": "package demo\n\nfun renamed(): Int = 2\n" }] }),
+    );
+    refreshed(&mut c);
+    assert_eq!(errors(&mut c, &app), vec!["Unresolved reference 'lib'."]);
+
+    // A deleted file.
+    std::fs::remove_file(project.join("src/main/kotlin/demo/Helper.kt")).unwrap();
+    refreshed(&mut c);
+    assert_eq!(errors(&mut c, &app), vec!["Unresolved reference 'helper'.", "Unresolved reference 'lib'."]);
     c.shutdown();
 }
 
