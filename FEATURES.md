@@ -266,10 +266,10 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `ReplaceNotNullAssertionWithElvisReturn`, `ReplaceGuardClauseWithFunctionCall` (`require`/`check`, `requireNotNull`/`checkNotNull`; `val x = y!!` in functions returning Unit or nullable)
 - [~] [P1] `ReplaceWithEnumMap`, `ReplaceWithIgnoreCaseEquals` — *partial: `ReplaceWithEnumMap` (`hashMapOf`/`HashMap` with explicit enum keys); `ReplaceWithIgnoreCaseEquals`*
 - [~] [P1] `ReplaceStringFormatWithLiteral`, `ReplaceReadLineWithReadln`, `ReplacePrintlnWithLogging` — *partial: `ReplaceStringFormatWithLiteral` (only `%s`); `ReplaceReadLineWithReadln`*
-- [~] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet` — *partial: `ComplexRedundantLet` (`x.let { f(it) }`); `SimpleRedundantLet` (`x.let { it.f() }`, `x?.let { it.f() }`)*
+- [~] [P1] `ScopeFunctionConversion` (`let` ↔ `also` ↔ `run` ↔ `apply`), `ComplexRedundantLet`, `SimpleRedundantLet` — *partial: `ComplexRedundantLet` (`x.let { f(it) }`); `SimpleRedundantLet` (`x.let { it.f() }`, `x?.let { it.f() }`, `x?.let { it }`)*
 - [~] [P1] `UnnecessaryVariable`, `UnnecessaryOptInAnnotation` — *partial: `UnnecessaryVariable` (`val x = e; return x`)*
 - [~] [P1] `KotlinConstantConditions` (always true/false) — *partial: literal conditions (not `while (true)`) and comparisons of integer literals*
-- [~] [P1] `ConvertSecondaryConstructorToPrimary`, `ConvertTryFinallyToUseCall` — *partial: `ConvertTryFinallyToUseCall` (`val r = …` then `try { } finally { r.close() }`)*
+- [x] [P1] `ConvertSecondaryConstructorToPrimary`, `ConvertTryFinallyToUseCall` — *`ConvertSecondaryConstructorToPrimary` when the only constructor assigns each parameter to a same-named, same-typed property and delegates to no superclass constructor; `ConvertTryFinallyToUseCall` (`val r = …` then `try { } finally { r.close() }`)*
 - [~] [P1] `ControlFlowWithEmptyBody`, `EmptyRange` — *partial: `EmptyRange` (integer literals, with a `downTo` fix); `ControlFlowWithEmptyBody`*
 - [x] [P2] `DestructuringWrongName`, `UnusedDataClassCopyResult`
 - [~] [P2] `ReplaceCollectionCountWithSize`, `PlatformExtensionReceiverOfInline` — *partial: `ReplaceCollectionCountWithSize`*
@@ -300,6 +300,9 @@ Delivery: [P0] `textDocument/publishDiagnostics` (push) **and/or** [P1] `textDoc
 - [x] [P1] `DelegationToVarProperty`
 - [x] [P1] `WrapUnaryOperator` (`-1.inc()` precedence)
 - [x] [P1] `NestedLambdaShadowedImplicitParameter` (nested `it`) — *when the enclosing lambda's `it` is used too; not for `it.let`/`also`/`takeIf`/`takeUnless`*
+- [x] [P1] `SortModifiers`, `IntroduceWhenSubject` (`when { x == 1 -> …; x in r -> … }`), `ReplaceRangeStartEndInclusiveWithFirstLast`, `ConvertObjectToDataObject` (sealed subtypes not inheriting a custom `toString`/`equals`/`hashCode`), `SafeCastWithReturn`; `NullableBooleanElvis` and `ConvertPairConstructorToToFunction` as code actions
+- [x] [P1] `RemoveRedundantSpreadOperator` (`*arrayOf(…)`), `RemoveRedundantCallsOfConversionMethods` (`toString()` on `String`, `toInt()` on `Int`…), `WhenWithOnlyElse`, `RemoveExplicitSuperQualifier` (single supertype), `ExplicitThis` (off by default)
+- [x] [P1] `UnusedUnaryOperator` (`+ x` / `- x` statement on numbers, with a fix joining it to the previous line)
 - [~] [P1] `ReplaceArrayEqualityOpWithArraysEquals`, `CopyWithoutNamedArguments` — *partial: `CopyWithoutNamedArguments` (and the compiler's `ARRAY_EQUALITY_OPERATOR_CAN_BE_REPLACED_WITH_EQUALS`)*
 - [~] [P1] `UnusedResultOfAsync` / `DeferredResultUnused`, `SuspendFunctionOnCoroutineScope`, `RedundantRunBlocking` — *partial: `DeferredResultUnused` (with "Replace with 'launch'")*
 - [~] [P1] `RunBlockingInSuspendFunction`, `BlockingMethodInNonBlockingContext` (`Thread.sleep` in coroutine) — *partial: `BlockingMethodInNonBlockingContext` (`Thread.sleep`); `RunBlockingInSuspendFunction`*

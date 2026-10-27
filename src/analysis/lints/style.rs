@@ -29,6 +29,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 boolean_constants(cx, &n, out);
                 ignore_case_equals(cx, &n, out);
                 string_template(cx, &n, out);
+                safe_cast_with_return(cx, &n, out);
+                nullable_boolean_elvis(cx, &n, out);
                 until_to_range_until(cx, &n, out);
                 two_comparisons(cx, &n, out);
             }
@@ -46,12 +48,17 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 substring(cx, &n, out);
                 simplifiable_call(cx, &n, out);
                 associate_function(cx, &n, out);
+                range_first_last(cx, &n, out);
             }
-            SyntaxKind::MODIFIER_LIST => protected_in_final(cx, &n, out),
+            SyntaxKind::MODIFIER_LIST => {
+                protected_in_final(cx, &n, out);
+                sort_modifiers(cx, &n, out);
+            }
             SyntaxKind::CALL_EXPR => {
                 readln(cx, &n, out);
                 property_access(cx, &n, out);
                 enum_map(cx, &n, out);
+                pair_constructor(cx, &n, out);
                 if n.parent().is_none_or(|p| p.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || p.first_child().as_ref() == Some(&n)) {
                     lambda_to_reference(cx, &n, out);
                 }
@@ -68,8 +75,15 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 lift_return_or_assignment(cx, &n, out);
                 if_empty(cx, &n, out);
             }
-            SyntaxKind::CLASS => primary_constructor_property(cx, &n, out),
-            SyntaxKind::WHEN_EXPR => lift_return_or_assignment(cx, &n, out),
+            SyntaxKind::CLASS => {
+                primary_constructor_property(cx, &n, out);
+                secondary_to_primary(cx, &n, out);
+            }
+            SyntaxKind::OBJECT_DECLARATION => data_object(cx, &n, out),
+            SyntaxKind::WHEN_EXPR => {
+                lift_return_or_assignment(cx, &n, out);
+                when_subject(cx, &n, out);
+            }
             SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR => empty_bodies(&n, out),
             SyntaxKind::BLOCK => {
                 fold_initializer(cx, &n, out);
@@ -410,14 +424,6 @@ fn operator_assignment(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         let fix = Fix::replace("Replace with operator-assignment", n.text_range(), format!("{} {op} {}", target.text(), r.text()));
         out.report(&OPERATOR_ASSIGNMENT, n.text_range(), format!("Replaceable with '{op}'"), Some(fix));
     }
-}
-
-/// The value of statement `n` is not used: it is not the last statement of a block whose
-/// value counts (lambdas, `if`/`when` branches, `try`).
-fn value_unused(n: &SyntaxNode) -> bool {
-    let Some(block) = n.parent().filter(|p| p.kind() == SyntaxKind::BLOCK) else { return false };
-    block.last_child().as_ref() != Some(n)
-        || block.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::FUN | SyntaxKind::CLASS_INITIALIZER | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::BODY))
 }
 
 /// Plain positional value arguments of a call (no lambdas, names, spreads or type arguments).
@@ -1931,4 +1937,258 @@ fn try_finally_to_use(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
         let fix = Fix::replace("Convert to 'use' call", TextRange::new(decl.text_range().start(), t.text_range().end()), format!("{receiver}.use {{ {name} ->{inner}}}"));
         out.report(&TRY_FINALLY_TO_USE, t.first_token().map_or(t.text_range(), |k| k.text_range()), "try-finally can be replaced with 'use()'", Some(fix));
     }
+}
+
+/// Kotlin's recommended modifier order.
+const MODIFIER_ORDER: &[&str] = &[
+    "public", "protected", "private", "internal", "expect", "actual", "final", "open", "abstract", "sealed", "const", "external", "override", "lateinit", "tailrec", "vararg",
+    "suspend", "inner", "enum", "annotation", "fun", "companion", "inline", "value", "infix", "operator", "data",
+];
+
+/// `override open protected fun` → `protected open override fun`.
+fn sort_modifiers(cx: &Cx, list: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&SORT_MODIFIERS) {
+        return;
+    }
+    let mods: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::MODIFIER).collect();
+    let Some(ranks) = mods.iter().map(|m| MODIFIER_ORDER.iter().position(|o| m.text() == *o)).collect::<Option<Vec<_>>>() else { return };
+    if ranks.is_sorted() {
+        return;
+    }
+    let (Some(first), Some(last)) = (mods.first(), mods.last()) else { return };
+    let range = TextRange::new(first.text_range().start(), last.text_range().end());
+    // Only modifiers and spaces in between (no annotations or comments to move).
+    let plain = list.children_with_tokens().filter(|e| range.contains_range(e.text_range())).all(|e| e.kind() == SyntaxKind::MODIFIER || e.kind() == SyntaxKind::WHITESPACE);
+    let mut sorted: Vec<(usize, String)> = ranks.into_iter().zip(mods.iter().map(|m| m.text().to_string())).collect();
+    sorted.sort_by_key(|(r, _)| *r);
+    let text = sorted.into_iter().map(|(_, m)| m).collect::<Vec<_>>().join(" ");
+    out.report(&SORT_MODIFIERS, range, "Non-canonical modifier order", plain.then(|| Fix::replace("Sort modifiers", range, text)));
+}
+
+/// `when { x == 1 -> …; x is T -> …; x in r -> … }` → `when (x) { 1 -> …; is T -> …; in r -> … }`.
+fn when_subject(cx: &Cx, w: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&INTRODUCE_WHEN_SUBJECT) || w.children().any(|c| c.kind() == SyntaxKind::WHEN_SUBJECT) || has_comments(w) {
+        return;
+    }
+    let Some(kw) = ast::token(w, SyntaxKind::WHEN_KW) else { return };
+    let mut subject: Option<String> = None;
+    let mut edits = Vec::new();
+    for entry in w.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY) {
+        if ast::token(&entry, SyntaxKind::ELSE_KW).is_some() {
+            continue;
+        }
+        let conds: Vec<SyntaxNode> = entry.children().filter(|c| c.kind() == SyntaxKind::WHEN_CONDITION).collect();
+        let [cond] = conds.as_slice() else { return };
+        let Some(test) = cond.first_child() else { return };
+        // (tested value, the branch condition with a subject)
+        let (value, arm) = match test.kind() {
+            SyntaxKind::IS_EXPR => {
+                let (Some(v), Some(op)) = (test.first_child(), test.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE)) else { return };
+                (v, test.text().to_string()[usize::from(op.text_range().start() - test.text_range().start())..].to_string())
+            }
+            SyntaxKind::BINARY_EXPR => {
+                let (Some(op), Some((l, r))) = (binary_op(&test), binary_operands(&test)) else { return };
+                match op.kind() {
+                    SyntaxKind::EQ2 if r.kind() == SyntaxKind::LITERAL && l.kind() != SyntaxKind::LITERAL => (l, r.text().to_string()),
+                    SyntaxKind::EQ2 if l.kind() == SyntaxKind::LITERAL => (r, l.text().to_string()),
+                    SyntaxKind::EQ2 => (l, r.text().to_string()),
+                    SyntaxKind::IN_KW | SyntaxKind::NOT_IN_KW => (l, format!("{} {}", op.text(), r.text())),
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+        // A stable value read the same way in every branch.
+        let stable = value.descendants().all(|d| matches!(d.kind(), SyntaxKind::NAME_REF | SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::THIS_EXPR));
+        let text = value.text().to_string();
+        if !stable || subject.get_or_insert_with(|| text.clone()) != &text {
+            return;
+        }
+        edits.push(Edit { range: cond.text_range(), text: arm });
+    }
+    let Some(subject) = subject else { return };
+    if edits.len() < 2 {
+        return;
+    }
+    edits.insert(0, Edit { range: TextRange::empty(kw.text_range().end()), text: format!(" ({subject})") });
+    out.report(&INTRODUCE_WHEN_SUBJECT, kw.text_range(), format!("'when' with subject should be used ('{subject}')"), Some(Fix::new(format!("Introduce '{subject}' as subject of 'when'"), edits)));
+}
+
+/// `class A { val x: Int; constructor(x: Int) { this.x = x } }` → `class A(val x: Int)`.
+fn secondary_to_primary(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&SECONDARY_TO_PRIMARY) || class.children().any(|c| c.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR) || ast::token(class, SyntaxKind::INTERFACE_KW).is_some() {
+        return;
+    }
+    if ["enum", "annotation", "data", "value", "inline", "expect", "external"].iter().any(|m| has_modifier(class, m)) {
+        return;
+    }
+    let Some(body) = class.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY) else { return };
+    let ctors: Vec<SyntaxNode> = body.children().filter(|c| c.kind() == SyntaxKind::SECONDARY_CONSTRUCTOR).collect();
+    let [ctor] = ctors.as_slice() else { return };
+    // Delegation to a superclass constructor would move into the supertype list.
+    if ctor.children().any(|c| matches!(c.kind(), SyntaxKind::MODIFIER_LIST | SyntaxKind::CONSTRUCTOR_DELEGATION_CALL)) || has_comments(ctor) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    if let Some(list) = class.children().find(|c| c.kind() == SyntaxKind::SUPER_TYPE_LIST) {
+        for entry in list.children() {
+            let Some(tr) = entry.children().find_map(ast::TypeRef::cast) else { return };
+            let t = e.resolve_syntax_type(&tr);
+            let interface = fq_of(&t).and_then(|fq| e.classifier(fq)).is_some_and(|c| c.symbol().kind == SymbolKind::Interface);
+            if entry.kind() != SyntaxKind::SUPER_TYPE_ENTRY || !interface {
+                return;
+            }
+        }
+    }
+    let Some(params) = ctor.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER_LIST) else { return };
+    let params: Vec<SyntaxNode> = params.children().filter(|c| c.kind() == SyntaxKind::VALUE_PARAMETER).collect();
+    let Some(block) = ctor.children().find(|c| c.kind() == SyntaxKind::BLOCK) else { return };
+    let statements: Vec<SyntaxNode> = block.children().collect();
+    if params.is_empty() || statements.len() != params.len() {
+        return;
+    }
+    let props: Vec<SyntaxNode> = body.children().filter(|c| c.kind() == SyntaxKind::PROPERTY).collect();
+    let mut edits = Vec::new();
+    let mut new_params = Vec::new();
+    for (param, st) in params.iter().zip(&statements) {
+        // `this.x = x` / `x = x`, in parameter order.
+        let Some((target, value)) = binary_operands(st).filter(|_| assignment_op(st).is_some_and(|o| o.kind() == SyntaxKind::EQ)) else { return };
+        let target = match target.kind() {
+            SyntaxKind::DOT_QUALIFIED_EXPR if target.first_child().is_some_and(|t| t.kind() == SyntaxKind::THIS_EXPR && t.text() == "this") => match target.last_child() {
+                Some(n) if n.kind() == SyntaxKind::NAME_REF => n,
+                _ => return,
+            },
+            SyntaxKind::NAME_REF => target,
+            _ => return,
+        };
+        let Some(name) = name_token(param).map(|t| t.text().to_string()) else { return };
+        if param.children().any(|c| matches!(c.kind(), SyntaxKind::MODIFIER_LIST)) || value.kind() != SyntaxKind::NAME_REF || value.text() != name.as_str() || target.text() != name.as_str() {
+            return;
+        }
+        let Some(prop) = props.iter().find(|p| name_token(p).is_some_and(|t| t.text() == name)) else { return };
+        let decl = ast::PropertyDecl::cast(prop.clone()).unwrap();
+        let (Some(pt), Some(param_type)) = (decl.type_ref(), param.children().find(|c| c.kind() == SyntaxKind::TYPE_REFERENCE)) else { return };
+        if pt.syntax().text() != param_type.text()
+            || decl.has_initializer()
+            || decl.has_delegate()
+            || decl.accessors().next().is_some()
+            || decl.receiver().is_some()
+            || has_modifier(prop, "lateinit")
+            || has_comments(prop)
+            || prop.children_with_tokens().any(|t| t.kind() == SyntaxKind::KDOC)
+        {
+            return;
+        }
+        let modifiers = prop.children().find(|c| c.kind() == SyntaxKind::MODIFIER_LIST).map(|m| format!("{} ", m.text())).unwrap_or_default();
+        let keyword = if decl.is_var() { "var" } else { "val" };
+        let rest = &param.text().to_string()[usize::from(name_token(param).unwrap().text_range().start() - param.text_range().start())..];
+        new_params.push(format!("{modifiers}{keyword} {rest}"));
+        edits.push(Edit { range: deletion_range(cx.text, prop.text_range()), text: String::new() });
+    }
+    let Some(after) = class.children().find(|c| c.kind() == SyntaxKind::TYPE_PARAMETER_LIST).map(|l| l.text_range().end()).or_else(|| name_token(class).map(|t| t.text_range().end())) else { return };
+    // Between blank lines, take one of them along.
+    let mut gone = deletion_range(cx.text, ctor.text_range());
+    let before = cx.text[..usize::from(gone.start())].trim_end_matches([' ', '\t']);
+    let rest = &cx.text[usize::from(gone.end())..];
+    let blank_after = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+    if before.ends_with("\n\n") && rest[blank_after..].starts_with('\n') {
+        gone = TextRange::new(gone.start(), gone.end() + TextSize::from(blank_after as u32 + 1));
+    }
+    edits.push(Edit { range: gone, text: String::new() });
+    edits.push(Edit { range: TextRange::empty(after), text: format!("({})", new_params.join(", ")) });
+    edits.sort_by_key(|e| e.range.start());
+    let Some(kw) = ctor.first_token() else { return };
+    out.report(&SECONDARY_TO_PRIMARY, kw.text_range(), "Secondary constructor should be converted to a primary one", Some(Fix::new("Convert to primary constructor", edits)));
+}
+
+/// `range.start` / `range.endInclusive` on an integer or char range.
+fn range_first_last(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let mut parts = n.children();
+    let (Some(recv), Some(sel), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    let replacement = match (sel.kind(), sel.text().to_string().as_str()) {
+        (SyntaxKind::NAME_REF, "start") => "first",
+        (SyntaxKind::NAME_REF, "endInclusive") => "last",
+        _ => return,
+    };
+    if !cx.on(&RANGE_FIRST_LAST) {
+        return;
+    }
+    let Some(e) = cx.engine() else { return };
+    let ranges = ["kotlin.ranges.IntRange", "kotlin.ranges.LongRange", "kotlin.ranges.CharRange", "kotlin.ranges.UIntRange", "kotlin.ranges.ULongRange"];
+    if !e.type_of(&recv).is_some_and(|t| matches!(&t, TypeRef::Named { nullable: false, fq: Some(fq), .. } if ranges.contains(&&**fq))) {
+        return;
+    }
+    out.report(&RANGE_FIRST_LAST, sel.text_range(), format!("Could be replaced with unboxed '{replacement}'"), Some(Fix::replace(format!("Replace with '{replacement}'"), sel.text_range(), replacement)));
+}
+
+/// `object A : Sealed()` → `data object A : Sealed()` (a readable `toString`).
+fn data_object(cx: &Cx, o: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&DATA_OBJECT) || ["data", "companion", "expect", "actual"].iter().any(|m| has_modifier(o, m)) || o.ancestors().skip(1).any(|a| a.kind() == SyntaxKind::OBJECT_LITERAL) {
+        return;
+    }
+    let body = o.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY);
+    if body.is_some_and(|b| b.children().any(|m| m.kind() == SyntaxKind::FUN && name_token(&m).is_some_and(|t| matches!(t.text(), "toString" | "equals" | "hashCode")))) {
+        return;
+    }
+    let (Some(e), Some(name), Some(kw)) = (cx.engine(), name_token(o), ast::token(o, SyntaxKind::OBJECT_KW)) else { return };
+    let defs = e.resolve_name_text(o, &ast::ident_text(&name));
+    let Some(Def::Symbol { sym, .. }) = defs.iter().find(|d| matches!(d, Def::Symbol { sym, .. } if sym.kind == SymbolKind::Object)) else { return };
+    let closure = e.supertype_closure(&TypeRef::named(&sym.fq_name));
+    let sealed = closure.iter().filter_map(fq_of).filter(|fq| *fq != sym.fq_name).filter_map(|fq| e.classifier(fq)).any(|c| c.symbol().modifiers.has(Modifiers::SEALED));
+    // A generated `toString`/`equals`/`hashCode` would replace a supertype's.
+    let own = TypeRef::named(&sym.fq_name);
+    let inherited = ["toString", "equals", "hashCode"].iter().any(|m| e.members_named(&own, m).iter().any(|(s, _)| !s.fq_name.starts_with("kotlin.Any.")));
+    if sealed && !inherited {
+        out.report(&DATA_OBJECT, name.text_range(), "'sealed' subtype object should be a 'data object'", Some(Fix::replace("Convert to 'data object'", TextRange::empty(kw.text_range().start()), "data ")));
+    }
+}
+
+/// `x as? T ?: return` as a statement → `if (x !is T) return`.
+fn safe_cast_with_return(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if binary_op(n).is_none_or(|o| o.kind() != SyntaxKind::ELVIS) || !cx.on(&SAFE_CAST_WITH_RETURN) || !value_unused(n) || has_comments(n) {
+        return;
+    }
+    let Some((cast, ret)) = binary_operands(n) else { return };
+    if ret.kind() != SyntaxKind::RETURN_EXPR || cast.kind() != SyntaxKind::BINARY_WITH_TYPE || !cast.children_with_tokens().any(|t| t.kind() == SyntaxKind::AS_SAFE_KW || t.as_node().is_some_and(|o| o.kind() == SyntaxKind::OPERATION_REFERENCE && o.first_token().is_some_and(|t| t.kind() == SyntaxKind::AS_SAFE_KW))) {
+        return;
+    }
+    let (Some(value), Some(ty)) = (cast.first_child().filter(|v| v.kind() == SyntaxKind::NAME_REF), cast.children().find(|c| c.kind() == SyntaxKind::TYPE_REFERENCE)) else { return };
+    let fix = Fix::replace("Replace with 'if' type check", n.text_range(), format!("if ({} !is {}) {}", value.text(), ty.text(), ret.text()));
+    out.report(&SAFE_CAST_WITH_RETURN, n.text_range(), "Should be replaced with 'if' type check", Some(fix));
+}
+
+/// `b ?: false` → `b == true`, `b ?: true` → `b != false` for a `Boolean?`.
+fn nullable_boolean_elvis(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if binary_op(n).is_none_or(|o| o.kind() != SyntaxKind::ELVIS) || !cx.on(&NULLABLE_BOOLEAN_ELVIS) || has_comments(n) {
+        return;
+    }
+    let Some((l, r)) = binary_operands(n) else { return };
+    let check = match r.text().to_string().as_str() {
+        "false" if r.kind() == SyntaxKind::LITERAL => "== true",
+        "true" if r.kind() == SyntaxKind::LITERAL => "!= false",
+        _ => return,
+    };
+    let Some(e) = cx.engine() else { return };
+    if !e.type_of(&l).is_some_and(|t| matches!(&t, TypeRef::Named { nullable: true, fq: Some(fq), .. } if &**fq == "kotlin.Boolean")) {
+        return;
+    }
+    let text = in_context(n, 2, format!("{} {check}", operand_of(&l, 2)));
+    out.report(&NULLABLE_BOOLEAN_ELVIS, n.text_range(), "Equality check can be used instead of elvis for nullable boolean check", Some(Fix::replace("Replace with equality check", n.text_range(), text)));
+}
+
+/// `Pair(a, b)` → `a to b`.
+fn pair_constructor(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && c.text() == "Pair") else { return };
+    if !cx.on(&PAIR_CONSTRUCTOR) || call.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(call)) || has_comments(call) {
+        return;
+    }
+    let Some(args) = plain_arguments(call) else { return };
+    let [a, b] = args.as_slice() else { return };
+    let Some(e) = cx.engine() else { return };
+    let defs = e.resolve_name_ref(&callee);
+    if defs.is_empty() || !defs.iter().all(|d| matches!(d, Def::Symbol { sym, .. } if sym.fq_name.starts_with("kotlin.Pair"))) {
+        return;
+    }
+    let text = in_context(call, 6, format!("{} to {}", operand_of(a, 6), operand_of(b, 6)));
+    out.report(&PAIR_CONSTRUCTOR, callee.text_range(), "Replace 'Pair' constructor with 'to' function", Some(Fix::replace("Replace with infix 'to'", call.text_range(), text)));
 }

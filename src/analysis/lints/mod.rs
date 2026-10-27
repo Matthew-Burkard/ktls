@@ -383,6 +383,11 @@ rules! {
     COMPLEX_REDUNDANT_LET = "ComplexRedundantLet", Redundancy, Info, false, [], "'x.let { f(it) }' instead of 'f(x)'";
     REDUNDANT_WITH = "RedundantWith", Redundancy, Warning, true, [], "'with(x) { … }' whose block never uses 'x'";
     REDUNDANT_SAM_CONSTRUCTOR = "RedundantSamConstructor", Redundancy, Warning, true, [], "'Runnable { … }' passed where a lambda converts anyway";
+    REDUNDANT_SPREAD = "RemoveRedundantSpreadOperator", Redundancy, Warning, true, [], "'*arrayOf(…)' passed to a vararg parameter";
+    REDUNDANT_CONVERSION = "RemoveRedundantCallsOfConversionMethods", Redundancy, Warning, true, [], "'toString()' on a String, 'toInt()' on an Int and similar";
+    WHEN_WITH_ONLY_ELSE = "WhenWithOnlyElse", Redundancy, Warning, false, [], "'when' with only an 'else' branch";
+    EXPLICIT_SUPER_QUALIFIER = "RemoveExplicitSuperQualifier", Redundancy, Warning, true, [], "'super<T>' in a class with a single supertype";
+    EXPLICIT_THIS = "ExplicitThis", Redundancy, Off, true, [], "'this.' qualifier that the name does not need";
     USELESS_CALL_ON_NOT_NULL = "UselessCallOnNotNull", Redundancy, Warning, true, [], "'orEmpty()', 'isNullOrEmpty()' or 'isNullOrBlank()' on a value that is never null";
 
     USE_EXPRESSION_BODY = "UseExpressionBody", Style, Action, false, [], "Block body consisting of a single 'return'";
@@ -452,6 +457,15 @@ rules! {
     DESTRUCTURING_WRONG_NAME = "DestructuringWrongName", Bugs, Warning, false, [], "Destructured variable named like a different component of the data class";
     RUN_BLOCKING_IN_SUSPEND = "RunBlockingInSuspendFunction", Bugs, Warning, false, [], "'runBlocking' inside a suspend function";
     DEFERRED_RESULT_UNUSED = "DeferredResultUnused", Bugs, Warning, false, [], "'async { … }' whose Deferred result is never used";
+    SORT_MODIFIERS = "SortModifiers", Style, Info, false, [], "Modifiers not in the recommended order ('private open override', not 'override open private')";
+    INTRODUCE_WHEN_SUBJECT = "IntroduceWhenSubject", Style, Info, false, [], "'when' without a subject whose branches all test the same value";
+    SECONDARY_TO_PRIMARY = "ConvertSecondaryConstructorToPrimary", Style, Info, false, [], "Only constructor is a secondary one that just assigns properties";
+    RANGE_FIRST_LAST = "ReplaceRangeStartEndInclusiveWithFirstLast", Style, Info, false, [], "'range.start'/'range.endInclusive' instead of 'first'/'last'";
+    DATA_OBJECT = "ConvertObjectToDataObject", Style, Info, false, [], "'object' in a sealed hierarchy that could be a 'data object' (readable 'toString')";
+    SAFE_CAST_WITH_RETURN = "SafeCastWithReturn", Style, Info, false, [], "'x as? T ?: return' instead of 'if (x !is T) return'";
+    NULLABLE_BOOLEAN_ELVIS = "NullableBooleanElvis", Style, Action, false, [], "'b ?: false' instead of 'b == true'";
+    PAIR_CONSTRUCTOR = "ConvertPairConstructorToToFunction", Style, Action, false, [], "'Pair(a, b)' instead of 'a to b'";
+    UNUSED_UNARY_OPERATOR = "UnusedUnaryOperator", Bugs, Warning, false, [], "'-x' / '+x' statement whose value is unused (usually a line broken before a binary operator)";
     OVERRIDING_DEPRECATED_MEMBER = "OverridingDeprecatedMember", Bugs, Warning, false, [], "Override of a deprecated member that is not deprecated itself";
     SUSPICIOUS_VAR_PROPERTY = "SuspiciousVarProperty", Bugs, Warning, false, [], "'var' with an initializer whose getter ignores the backing field";
     HAS_PLATFORM_TYPE = "HasPlatformType", Bugs, Warning, false, [], "Public declaration whose inferred type comes from Java (unknown nullability)";
@@ -1040,6 +1054,52 @@ pub(crate) fn assignment_op(n: &SyntaxNode) -> Option<SyntaxToken> {
 /// The operator token of a binary expression (inside its `OPERATION_REFERENCE`).
 pub(crate) fn binary_op(n: &SyntaxNode) -> Option<SyntaxToken> {
     n.children().find(|c| c.kind() == SyntaxKind::OPERATION_REFERENCE)?.first_token()
+}
+
+/// How tightly a binary operator binds (higher binds tighter); `None` for assignments.
+pub(crate) fn binary_precedence(op: &SyntaxToken) -> Option<u8> {
+    Some(match op.kind() {
+        SyntaxKind::STAR | SyntaxKind::SLASH | SyntaxKind::PERCENT => 9,
+        SyntaxKind::PLUS | SyntaxKind::MINUS => 8,
+        SyntaxKind::RANGE | SyntaxKind::RANGE_UNTIL => 7,
+        SyntaxKind::IDENT => 6,
+        SyntaxKind::ELVIS => 5,
+        SyntaxKind::IN_KW | SyntaxKind::NOT_IN_KW => 4,
+        SyntaxKind::LT | SyntaxKind::GT | SyntaxKind::LT_EQ | SyntaxKind::GT_EQ => 3,
+        SyntaxKind::EQ2 | SyntaxKind::EQ3 | SyntaxKind::NOT_EQ | SyntaxKind::NOT_EQ2 => 2,
+        SyntaxKind::AMP2 => 1,
+        SyntaxKind::PIPE2 => 0,
+        _ => return None,
+    })
+}
+
+/// Replacement text for `n` that is a binary expression of precedence `prec`: in
+/// parentheses where `n`'s parent binds at least as tightly.
+pub(crate) fn in_context(n: &SyntaxNode, prec: u8, text: String) -> String {
+    let wrap = n.parent().is_some_and(|p| match p.kind() {
+        SyntaxKind::PREFIX_EXPR | SyntaxKind::POSTFIX_EXPR | SyntaxKind::INDEX_EXPR | SyntaxKind::BINARY_WITH_TYPE | SyntaxKind::IS_EXPR => true,
+        SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR | SyntaxKind::CALL_EXPR => p.first_child().as_ref() == Some(n),
+        SyntaxKind::BINARY_EXPR => assignment_op(&p).is_none() && binary_op(&p).and_then(|o| binary_precedence(&o)).is_none_or(|q| q >= prec),
+        _ => false,
+    });
+    if wrap { format!("({text})") } else { text }
+}
+
+/// An operand of a binary operator of precedence `prec`, in parentheses unless it binds
+/// more tightly.
+pub(crate) fn operand_of(n: &SyntaxNode, prec: u8) -> String {
+    let tight = is_primary(n)
+        || n.kind() == SyntaxKind::PREFIX_EXPR
+        || n.kind() == SyntaxKind::BINARY_EXPR && assignment_op(n).is_none() && binary_op(n).and_then(|o| binary_precedence(&o)).is_some_and(|q| q > prec);
+    if tight { n.text().to_string() } else { format!("({})", n.text()) }
+}
+
+/// The value of statement `n` is not used: it is not the last statement of a block whose
+/// value counts (lambdas, `if`/`when` branches, `try`).
+pub(crate) fn value_unused(n: &SyntaxNode) -> bool {
+    let Some(block) = n.parent().filter(|p| p.kind() == SyntaxKind::BLOCK) else { return false };
+    block.last_child().as_ref() != Some(n)
+        || block.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::FUN | SyntaxKind::CLASS_INITIALIZER | SyntaxKind::PROPERTY_ACCESSOR | SyntaxKind::SECONDARY_CONSTRUCTOR | SyntaxKind::BODY))
 }
 
 /// Operands of a binary expression.

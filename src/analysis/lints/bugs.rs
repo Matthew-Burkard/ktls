@@ -48,7 +48,10 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             SyntaxKind::OBJECT_DECLARATION => serializable_object(cx, &n, out),
             SyntaxKind::LAMBDA_EXPR => callable_reference_in_lambda(cx, &n, out),
             SyntaxKind::DELEGATED_SUPER_TYPE_ENTRY => delegation_to_var(cx, &n, out),
-            SyntaxKind::PREFIX_EXPR => wrap_unary(cx, &n, out),
+            SyntaxKind::PREFIX_EXPR => {
+                wrap_unary(cx, &n, out);
+                unused_unary(cx, &n, out);
+            }
             SyntaxKind::NAME_REF if n.text() == "GlobalScope" => global_scope(cx, &n, out),
             SyntaxKind::PROPERTY_ACCESSOR => recursive_accessor(cx, &n, out),
             SyntaxKind::NAME_REF if n.text() == "it" => nested_it(cx, &n, out),
@@ -765,4 +768,26 @@ fn callable_reference_in_lambda(cx: &Cx, l: &SyntaxNode, out: &mut Sink) {
     let fix = Fix::replace("Replace the lambda with the reference", TextRange::new(start, arg.text_range().end()), format!("({})", body.text()));
     let only_lambda = arg.parent().is_some_and(|c| c.children().find(|x| x.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_none());
     out.report(&CALLABLE_REFERENCE_IN_LAMBDA, body.text_range(), "Suspicious callable reference as the only lambda element", only_lambda.then_some(fix));
+}
+
+/// `val total = a` followed by the line `+ b`: a separate statement whose value is lost.
+fn unused_unary(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let Some(op) = binary_op(n).filter(|o| matches!(o.kind(), SyntaxKind::MINUS | SyntaxKind::PLUS)) else { return };
+    if !cx.on(&UNUSED_UNARY_OPERATOR) || !value_unused(n) {
+        return;
+    }
+    let Some(operand) = n.children().find(|c| c.kind() != SyntaxKind::OPERATION_REFERENCE) else { return };
+    // Numbers only: DSLs give `unaryPlus` side effects (`+"text"` in kotlinx.html).
+    let numbers = ["kotlin.Int", "kotlin.Long", "kotlin.Short", "kotlin.Byte", "kotlin.Float", "kotlin.Double", "kotlin.UInt", "kotlin.ULong"];
+    let Some(e) = cx.engine() else { return };
+    if !e.type_of(&operand).as_ref().and_then(fq_of).is_some_and(|fq| numbers.contains(&fq)) {
+        return;
+    }
+    // Offer to join it to the previous statement when only whitespace separates them.
+    let fix = n.prev_sibling().and_then(|prev| {
+        let gap = TextRange::new(prev.text_range().end(), n.text_range().start());
+        let between = &cx.text[usize::from(gap.start())..usize::from(gap.end())];
+        (between.trim().is_empty() && between.contains('\n')).then(|| Fix::replace("Join with the previous line", gap, " "))
+    });
+    out.report(&UNUSED_UNARY_OPERATOR, n.text_range(), format!("Unused unary operator '{}': the line before probably continues here", op.text()), fix);
 }

@@ -163,8 +163,8 @@ fun use(p: Point, xs: List<Int>, m: Map<String, Int>): Int {
 }
 "#,
     );
-    // Code actions (`until` → `..<`) are offered, not reported.
-    let found: Vec<_> = found.into_iter().filter(|f| !f.starts_with("ReplaceUntilWithRangeUntil")).collect();
+    // Code actions (`until` → `..<`, `Pair(a, b)` → `a to b`) are offered, not reported.
+    let found: Vec<_> = found.into_iter().filter(|f| !f.starts_with("ReplaceUntilWithRangeUntil") && !f.starts_with("ConvertPairConstructorToToFunction")).collect();
     assert!(found.is_empty(), "{found:#?}");
 }
 
@@ -242,6 +242,132 @@ fun shared(x: Int) = x
     assert_eq!(fixed("fun f() {\n    val x = 1\n    println()\n}\n", "UNUSED_VARIABLE"), "fun f() {\n    println()\n}\n");
     assert_eq!(fixed("fun f() {\n    val x = compute()\n}\nfun compute() = 1\n", "UNUSED_VARIABLE"), "fun f() {\n    compute()\n}\nfun compute() = 1\n");
     assert_eq!(fixed("fun f(): Int {\n    var x = 1\n    return x\n}\n", "CanBeVal"), "fun f(): Int {\n    val x = 1\n    return x\n}\n");
+}
+
+#[test]
+fn more_idioms() {
+    let found = lint(
+        r#"package a
+
+fun use(vararg x: Any?) = x.size
+open class A { protected open fun m() {} }
+class B : A() { final override protected fun m() { super<A>.m() } }
+fun subject(x: Int, r: IntRange) = when { x == 1 -> "a"; x in r -> "b"; else -> "c" }
+fun spread() = use(*arrayOf(1, 2))
+fun conversions(s: String, i: Int) = use(s.toString(), i.toInt())
+fun onlyElse(x: Int) = when (x) { else -> 1 }
+fun elvis(b: Boolean?) = if (b ?: false) 1 else 2
+fun pair() = Pair(1, 2)
+class Secondary { val x: Int; constructor(x: Int) { this.x = x } }
+fun bounds(r: IntRange) = r.start + r.endInclusive
+sealed class Shape { object Empty : Shape() }
+fun unary(): Int {
+    val a = 1
+        + 2
+    return a
+}
+fun cast(x: Any) {
+    x as? String ?: return
+    use(x)
+}
+fun let(s: String?) = s?.let { it }
+"#,
+    );
+    for expected in [
+        "SortModifiers: final override protected",
+        "RemoveExplicitSuperQualifier: <A>",
+        "IntroduceWhenSubject: when",
+        "RemoveRedundantSpreadOperator: *arrayOf",
+        "RemoveRedundantCallsOfConversionMethods: .toString()",
+        "RemoveRedundantCallsOfConversionMethods: .toInt()",
+        "WhenWithOnlyElse: when",
+        "NullableBooleanElvis: b ?: false",
+        "ConvertPairConstructorToToFunction: Pair",
+        "ConvertSecondaryConstructorToPrimary: constructor",
+        "ReplaceRangeStartEndInclusiveWithFirstLast: start",
+        "ReplaceRangeStartEndInclusiveWithFirstLast: endInclusive",
+        "ConvertObjectToDataObject: Empty",
+        "UnusedUnaryOperator: + 2",
+        "SafeCastWithReturn: x as? String ?: return",
+        "SimpleRedundantLet: let",
+    ] {
+        has(&found, expected);
+    }
+    assert!(!found.iter().any(|f| f.starts_with("ExplicitThis")), "{found:#?}");
+
+    assert_eq!(fixed("class B : A() { override protected fun m() {} }\nopen class A { protected open fun m() {} }\n", "SortModifiers"), "class B : A() { protected override fun m() {} }\nopen class A { protected open fun m() {} }\n");
+    assert_eq!(
+        fixed("fun f(x: Int, r: IntRange) = when {\n    x == 1 -> 0\n    null == x -> 1\n    x !in r -> 2\n    x is Int -> 3\n    else -> 4\n}\n", "IntroduceWhenSubject"),
+        "fun f(x: Int, r: IntRange) = when (x) {\n    1 -> 0\n    null -> 1\n    !in r -> 2\n    is Int -> 3\n    else -> 4\n}\n"
+    );
+    assert_eq!(fixed("fun use(vararg x: Int) = x\nfun f() = use(*intArrayOf(1, 2))\n", "RemoveRedundantSpreadOperator"), "fun use(vararg x: Int) = x\nfun f() = use(1, 2)\n");
+    assert_eq!(fixed("fun f(s: String) = s.toString().length\n", "RemoveRedundantCallsOfConversionMethods"), "fun f(s: String) = s.length\n");
+    assert_eq!(fixed("fun f(x: Int) = when (x) { else -> x + 1 }\n", "WhenWithOnlyElse"), "fun f(x: Int) = x + 1\n");
+    assert_eq!(fixed("fun f(b: Boolean?) = !(b ?: true)\n", "NullableBooleanElvis"), "fun f(b: Boolean?) = !(b != false)\n");
+    assert_eq!(fixed("fun f(b: Boolean?) = b ?: false\n", "NullableBooleanElvis"), "fun f(b: Boolean?) = b == true\n");
+    assert_eq!(fixed("fun f(a: Int?) = Pair(a ?: 0, 2).first\n", "ConvertPairConstructorToToFunction"), "fun f(a: Int?) = ((a ?: 0) to 2).first\n");
+    assert_eq!(
+        fixed("class C : Runnable {\n    private val x: Int\n    var y: String\n\n    constructor(x: Int, y: String = \"\") {\n        this.x = x\n        y = y\n    }\n\n    override fun run() {}\n}\n", "ConvertSecondaryConstructorToPrimary"),
+        "class C(private val x: Int, var y: String = \"\") : Runnable {\n\n    override fun run() {}\n}\n"
+    );
+    assert_eq!(fixed("fun f(r: IntRange) = r.start\n", "ReplaceRangeStartEndInclusiveWithFirstLast"), "fun f(r: IntRange) = r.first\n");
+    assert_eq!(fixed("sealed interface S\nobject O : S\n", "ConvertObjectToDataObject"), "sealed interface S\ndata object O : S\n");
+    assert_eq!(fixed("fun f(): Int {\n    val a = 1\n        - 2\n    return a\n}\n", "UnusedUnaryOperator"), "fun f(): Int {\n    val a = 1 - 2\n    return a\n}\n");
+    assert_eq!(fixed("fun f(x: Any) {\n    x as? String ?: return\n}\n", "SafeCastWithReturn"), "fun f(x: Any) {\n    if (x !is String) return\n}\n");
+    assert_eq!(fixed("fun f(s: String?) = s?.let { it }\n", "SimpleRedundantLet"), "fun f(s: String?) = s\n");
+
+    // Not reported.
+    let found = lint(
+        r#"package a
+
+fun use(vararg x: Any?) = x.size
+annotation class Marker
+open class Base { open fun m() {} }
+interface I { fun m() {} }
+class Two : Base(), I { @Marker protected override fun m() { super<Base>.m() } }
+fun f() = 1
+fun mixed(x: Int, y: Int) = when { x == 1 -> "a"; y == 2 -> "b"; else -> "c" }
+fun calls(x: Int) = when { f() == 1 -> "a"; f() == 2 -> "b"; else -> "c" }
+fun one(x: Int) = when { x == 1 -> "a"; else -> "c" }
+fun spreads(a: Array<Int>) = use(*a)
+fun nullable(s: String?) = s?.toString()
+fun twoBranches(x: Int) = when (x) { 1 -> 0; else -> 1 }
+fun nonNull(b: Boolean) = b && true
+fun named() = Pair(first = 1, second = 2)
+class Delegating : Base { val x: Int; constructor(x: Int) : super() { this.x = x } }
+class Initialized { val x: Int = 0; constructor(x: Int) { println(x) } }
+open class Plain
+object NotSealed : Plain()
+sealed class Shape { object Empty : Shape() { override fun toString() = "Empty" } }
+sealed class Named { override fun toString() = "named" }
+object Inherits : Named()
+fun lambda(): Int = run {
+    val a = 1
+    -a
+}
+fun strings(s: String) { +s }
+operator fun String.unaryPlus() = this
+fun used(x: Any): Int {
+    val y = x as? String ?: return 0
+    return y.length
+}
+fun lets(s: String?) = s?.let { it.length + 1 }
+"#,
+    );
+    let unexpected = [
+        "SortModifiers", "RemoveExplicitSuperQualifier", "IntroduceWhenSubject", "RemoveRedundantSpreadOperator", "RemoveRedundantCallsOfConversionMethods", "WhenWithOnlyElse",
+        "NullableBooleanElvis", "ConvertPairConstructorToToFunction", "ConvertSecondaryConstructorToPrimary", "ConvertObjectToDataObject", "UnusedUnaryOperator", "SafeCastWithReturn",
+        "SimpleRedundantLet",
+    ];
+    let bad: Vec<_> = found.iter().filter(|f| unexpected.iter().any(|u| f.starts_with(&format!("{u}:")))).collect();
+    assert!(bad.is_empty(), "{bad:#?}");
+
+    // `ExplicitThis` is off unless configured.
+    let mut f = Fixture::new();
+    f.host.set_lint_config(LintConfig { enabled: true, rules: HashMap::from([("ExplicitThis".to_string(), Level::Info)]) });
+    let (lints, text) = f.run("src/main/kotlin/a/A.kt", "package a\nclass C(x: Int) {\n    val x = x\n    val y = 1\n    fun f() = this.y\n    fun g(y: Int) = this.y + y\n    fun h() = this.f()\n}\n");
+    let found: Vec<_> = lints.iter().filter(|l| l.rule.id == "ExplicitThis").map(|l| &text[usize::from(l.range.start())..usize::from(l.range.end()) + 1]).collect();
+    assert_eq!(found, ["this.y", "this.f"]);
 }
 
 #[test]

@@ -65,7 +65,12 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                         redundant_let(cx, &n, out);
                         complex_let(cx, &n, out);
                         useless_on_collection(cx, &n, out);
+                        conversion_call(cx, &n, out);
+                        explicit_this(cx, &n, out);
                     }
+                    SyntaxKind::VALUE_ARGUMENT => redundant_spread(cx, &n, out),
+                    SyntaxKind::WHEN_EXPR => when_with_only_else(cx, &n, out),
+                    SyntaxKind::SUPER_EXPR => super_qualifier(cx, &n, out),
                     SyntaxKind::SAFE_QUALIFIED_EXPR => redundant_let(cx, &n, out),
                     SyntaxKind::PROPERTY => explicit_type(cx, &n, out),
                     SyntaxKind::USER_TYPE => type_qualifier(cx, &n, out),
@@ -1074,6 +1079,13 @@ fn redundant_let(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         }
     };
     let Some(body) = lambda.children().find(|c| c.kind() == SyntaxKind::BLOCK).and_then(|b| only_statement(&b)) else { return };
+    // `x?.let { it }` is `x`.
+    if body.kind() == SyntaxKind::NAME_REF && body.text() == param.as_str() {
+        if stdlib(cx, &callee) {
+            out.report(&SIMPLE_REDUNDANT_LET, callee.text_range(), "Redundant 'let' call could be removed", Some(Fix::replace("Remove 'let' call", n.text_range(), recv.text().to_string())));
+        }
+        return;
+    }
     // `it.f(…)` / `it?.f(…)` (one call or property), with `it` used nowhere else.
     if !matches!(body.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) {
         return;
@@ -1365,4 +1377,158 @@ fn sam_constructor(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
         }
         out.report(&REDUNDANT_SAM_CONSTRUCTOR, sam.text_range(), "Redundant SAM constructor", Some(Fix::replace("Remove redundant SAM constructor", inner.text_range(), lambda.text().to_string())));
     }
+}
+
+/// `f(*arrayOf(a, b))` → `f(a, b)`.
+fn redundant_spread(cx: &Cx, arg: &SyntaxNode, out: &mut Sink) {
+    let Some(star) = ast::token(arg, SyntaxKind::STAR) else { return };
+    if !cx.on(&REDUNDANT_SPREAD) || arg.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME) || has_comments(arg) {
+        return;
+    }
+    let Some(call) = arg.children().find(|c| c.kind() == SyntaxKind::CALL_EXPR) else { return };
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let name = callee.text().to_string();
+    let factories = ["arrayOf", "intArrayOf", "longArrayOf", "shortArrayOf", "byteArrayOf", "charArrayOf", "floatArrayOf", "doubleArrayOf", "booleanArrayOf"];
+    if !factories.contains(&name.as_str()) || call.children().any(|c| matches!(c.kind(), SyntaxKind::TYPE_ARGUMENT_LIST | SyntaxKind::LAMBDA_ARGUMENT)) {
+        return;
+    }
+    let Some(list) = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) else { return };
+    let args: Vec<SyntaxNode> = list.children().filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT).collect();
+    // Elements must stay positional (a name would bind to the outer call's parameters).
+    if args.is_empty() || args.iter().any(|a| a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME)) || !stdlib(cx, &callee) {
+        return;
+    }
+    let text = args.iter().map(|a| a.text().to_string()).collect::<Vec<_>>().join(", ");
+    let at = TextRange::new(star.text_range().start(), callee.text_range().end());
+    out.report(&REDUNDANT_SPREAD, at, "Remove redundant spread operator", Some(Fix::replace("Remove redundant spread operator", arg.text_range(), text)));
+}
+
+/// `s.toString()` on a `String`, `i.toInt()` on an `Int`.
+fn conversion_call(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&REDUNDANT_CONVERSION) {
+        return;
+    }
+    let mut parts = n.children();
+    let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    let Some(callee) = call.first_child().filter(|c| call.kind() == SyntaxKind::CALL_EXPR && c.kind() == SyntaxKind::NAME_REF) else { return };
+    let fq = match callee.text().to_string().as_str() {
+        "toString" => "kotlin.String",
+        "toInt" => "kotlin.Int",
+        "toLong" => "kotlin.Long",
+        "toShort" => "kotlin.Short",
+        "toByte" => "kotlin.Byte",
+        "toFloat" => "kotlin.Float",
+        "toDouble" => "kotlin.Double",
+        "toChar" => "kotlin.Char",
+        "toUInt" => "kotlin.UInt",
+        "toULong" => "kotlin.ULong",
+        _ => return,
+    };
+    if call.children().any(|c| matches!(c.kind(), SyntaxKind::TYPE_ARGUMENT_LIST | SyntaxKind::LAMBDA_ARGUMENT))
+        || call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_none_or(|l| l.children().next().is_some())
+        || recv.kind() == SyntaxKind::SUPER_EXPR
+        || has_comments(n)
+    {
+        return;
+    }
+    // The certain type: a Java `String` (platform type) may be null.
+    let Some(e) = cx.engine() else { return };
+    if !matches!(crate::analysis::lints::certain_type(e, &recv, true), Some(crate::symbols::TypeRef::Named { nullable: false, fq: Some(ref f), .. }) if &**f == fq) {
+        return;
+    }
+    if !e.type_of(&recv).is_some_and(|t| matches!(t, crate::symbols::TypeRef::Named { nullable: false, fq: Some(ref f), .. } if &**f == fq)) {
+        return;
+    }
+    let at = TextRange::new(recv.text_range().end(), n.text_range().end());
+    out.report(&REDUNDANT_CONVERSION, at, format!("Redundant '{}' call", callee.text()), Some(Fix::delete(format!("Remove redundant '{}' call", callee.text()), at)));
+}
+
+/// `when (x) { else -> y }` → `y`.
+fn when_with_only_else(cx: &Cx, w: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&WHEN_WITH_ONLY_ELSE) {
+        return;
+    }
+    let entries: Vec<SyntaxNode> = w.children().filter(|c| c.kind() == SyntaxKind::WHEN_ENTRY).collect();
+    let [entry] = entries.as_slice() else { return };
+    if ast::token(entry, SyntaxKind::ELSE_KW).is_none() {
+        return;
+    }
+    let Some(when_kw) = ast::token(w, SyntaxKind::WHEN_KW) else { return };
+    // The subject is evaluated anyway: keep the fix to subjects without side effects.
+    let subject = w.children().find(|c| c.kind() == SyntaxKind::WHEN_SUBJECT);
+    let plain_subject = subject.as_ref().is_none_or(|s| s.children().next().is_some_and(|c| matches!(c.kind(), SyntaxKind::NAME_REF | SyntaxKind::THIS_EXPR | SyntaxKind::LITERAL)));
+    let body = entry.children().find(|c| c.kind() == SyntaxKind::BODY).and_then(|b| b.first_child());
+    let fix = match body {
+        Some(b) if plain_subject && !has_comments(w) => {
+            if b.kind() != SyntaxKind::BLOCK {
+                Some(b.text().to_string())
+            } else if super::value_unused(w) {
+                // A statement: the block's statements in its place.
+                let inner = b.text().to_string();
+                let inner = inner.trim().strip_prefix('{').and_then(|t| t.strip_suffix('}')).map(|t| t.trim().to_string());
+                inner.filter(|t| !t.is_empty() && !t.contains('\n'))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+    .map(|text| Fix::replace("Remove 'when'", w.text_range(), text));
+    out.report(&WHEN_WITH_ONLY_ELSE, when_kw.text_range(), "'when' has only 'else' branch and can be simplified", fix);
+}
+
+/// `super<A>.f()` in a class whose only supertype is `A`.
+fn super_qualifier(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    let (Some(lt), Some(gt)) = (ast::token(n, SyntaxKind::LT), ast::token(n, SyntaxKind::GT)) else { return };
+    if !cx.on(&EXPLICIT_SUPER_QUALIFIER) || n.children().any(|c| c.kind() == SyntaxKind::LABEL) || ast::token(n, SyntaxKind::AT).is_some() {
+        return;
+    }
+    let Some(class) = n.ancestors().find(|a| matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::OBJECT_LITERAL)) else { return };
+    let list = if class.kind() == SyntaxKind::OBJECT_LITERAL { class.descendants().find(|d| d.kind() == SyntaxKind::SUPER_TYPE_LIST) } else { class.children().find(|c| c.kind() == SyntaxKind::SUPER_TYPE_LIST) };
+    let Some(list) = list else { return };
+    if list.children().count() != 1 {
+        return;
+    }
+    let at = TextRange::new(lt.text_range().start(), gt.text_range().end());
+    out.report(&EXPLICIT_SUPER_QUALIFIER, at, "Explicit supertype qualification is redundant", Some(Fix::delete("Remove explicit supertype qualification", at)));
+}
+
+/// `this.x` where `x` alone means the same.
+fn explicit_this(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
+    use crate::analysis::ide::infer::Def;
+    if !cx.on(&EXPLICIT_THIS) {
+        return;
+    }
+    let mut parts = n.children();
+    let (Some(this), Some(sel), None) = (parts.next(), parts.next(), parts.next()) else { return };
+    if this.kind() != SyntaxKind::THIS_EXPR || this.children().next().is_some() || this.text() != "this" {
+        return;
+    }
+    let name_ref = match sel.kind() {
+        SyntaxKind::NAME_REF => sel.clone(),
+        SyntaxKind::CALL_EXPR => match sel.first_child() {
+            Some(c) if c.kind() == SyntaxKind::NAME_REF => c,
+            _ => return,
+        },
+        _ => return,
+    };
+    let Some(e) = cx.engine() else { return };
+    let key = |d: &Def| match d {
+        Def::Symbol { sym, .. } => Some((sym.fq_name.clone(), sym.kind)),
+        _ => None,
+    };
+    let qualified: Option<Vec<_>> = e.resolve_name_ref(&name_ref).iter().map(key).collect();
+    let bare: Option<Vec<_>> = e.resolve_name_text(n, &name_ref.text().to_string()).iter().map(key).collect();
+    let (Some(mut qualified), Some(mut bare)) = (qualified, bare) else { return };
+    // A call resolves among functions only; the bare name also finds properties.
+    if sel.kind() == SyntaxKind::CALL_EXPR {
+        bare.retain(|(_, k)| *k == crate::symbols::SymbolKind::Function);
+    }
+    qualified.sort();
+    bare.sort();
+    if qualified.is_empty() || qualified != bare {
+        return;
+    }
+    let at = TextRange::new(this.text_range().start(), name_ref.text_range().start());
+    out.report(&EXPLICIT_THIS, at, "Redundant explicit 'this'", Some(Fix::delete("Remove redundant 'this'", at)));
 }
