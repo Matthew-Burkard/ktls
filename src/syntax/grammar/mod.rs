@@ -499,6 +499,10 @@ fn object_declaration(p: &mut Parser, m: Marker) -> CompletedMarker {
     if p.at(LT) {
         types::type_parameter_list(p);
     }
+    // Not allowed (CONSTRUCTOR_IN_OBJECT), but parsed like Kotlin does.
+    if primary_constructor_ahead(p) && !p.nl_before() {
+        primary_constructor(p);
+    }
     if p.at(COLON) {
         super_type_list(p);
     }

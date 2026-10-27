@@ -128,6 +128,7 @@ rules! {
     SPREAD_OF_NULLABLE = "SPREAD_OF_NULLABLE", Compiler, Error, false, [], "Spread ('*') of a nullable array";
     LATEINIT_INTRINSIC_CALL_ON_NON_LATEINIT = "LATEINIT_INTRINSIC_CALL_ON_NON_LATEINIT", Compiler, Error, false, [], "'isInitialized' on a property that is not 'lateinit'";
     NO_SET_METHOD = "NO_SET_METHOD", Compiler, Error, false, [], "Indexed assignment on a read-only collection or a type without 'set'";
+    NO_GET_METHOD = "NO_GET_METHOD", Compiler, Error, false, [], "Indexed access on a type without a 'get' operator";
     INVISIBLE_SETTER = "INVISIBLE_SETTER", Compiler, Error, false, [], "Assignment to a property whose setter is not visible here";
     CYCLIC_CONSTRUCTOR_DELEGATION_CALL = "CYCLIC_CONSTRUCTOR_DELEGATION_CALL", Compiler, Error, false, [], "Secondary constructors that delegate to each other in a cycle";
     EXPLICIT_DELEGATION_CALL_REQUIRED = "EXPLICIT_DELEGATION_CALL_REQUIRED", Compiler, Error, false, [], "Secondary constructor without 'this(…)' or 'super(…)' where one is required";

@@ -1,5 +1,5 @@
 //! Operators applied to operands their functions do not accept: `1 + "a"`, `true + 1`,
-//! `-"a"`, `1 < "a"`.
+//! `-"a"`, `1 < "a"`, `"a"++`, `1 in 2`.
 
 use super::super::*;
 use super::certain_type;
@@ -9,7 +9,7 @@ use crate::symbols::{Modifiers, Origin, Symbol, SymbolKind, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
-    for n in cx.root.descendants().filter(|n| matches!(n.kind(), SyntaxKind::BINARY_EXPR | SyntaxKind::PREFIX_EXPR)) {
+    for n in cx.root.descendants().filter(|n| matches!(n.kind(), SyntaxKind::BINARY_EXPR | SyntaxKind::PREFIX_EXPR | SyntaxKind::POSTFIX_EXPR)) {
         if in_error(&n) || super::certain::in_unknown_lambda(e, &n) {
             continue;
         }
@@ -58,6 +58,9 @@ fn binary(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
             _ => return,
         };
         let (Some(l), Some(r)) = (n.first_child(), n.children().last()) else { return };
+        if matches!(op.kind(), SyntaxKind::PLUS_EQ | SyntaxKind::MINUS_EQ) {
+            collection_element(e, n, &op, &l, &r, out);
+        }
         applicable(e, n, &op, &l, &r, names, out);
         return;
     }
@@ -71,10 +74,16 @@ fn binary(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
         SyntaxKind::RANGE => "rangeTo",
         SyntaxKind::RANGE_UNTIL => "rangeUntil",
         SyntaxKind::LT | SyntaxKind::GT | SyntaxKind::LT_EQ | SyntaxKind::GT_EQ => "compareTo",
+        SyntaxKind::IN_KW | SyntaxKind::NOT_IN_KW => "contains",
         _ => return,
     };
     let Some((l, r)) = binary_operands(n) else { return };
-    applicable(e, n, &op, &l, &r, &[name], out);
+    // `x in c` calls `c.contains(x)`.
+    if name == "contains" {
+        applicable(e, n, &op, &r, &l, &[name], out);
+    } else {
+        applicable(e, n, &op, &l, &r, &[name], out);
+    }
 }
 
 /// Operator `op` on `l` and `r`, calling a function of one of `names`: unresolved when
@@ -120,12 +129,52 @@ fn applicable(e: &Engine, n: &SyntaxNode, op: &SyntaxToken, l: &SyntaxNode, r: &
     out.report(&NONE_APPLICABLE, op.text_range(), format!("None of the following candidates is applicable for operator '{}':\n{}{more}", op.text(), signatures.join("\n")), None);
 }
 
-/// `-x` / `+x` on a type without `unaryMinus` / `unaryPlus`.
+/// `list += "s"` on a `MutableList<Int>`: the standard `plusAssign` / `minusAssign` of
+/// mutable collections take an element of their type, or a collection, array or sequence.
+fn collection_element(e: &Engine, n: &SyntaxNode, op: &SyntaxToken, l: &SyntaxNode, r: &SyntaxNode, out: &mut Sink) {
+    let Some(lt) = certain_type(e, l, true) else { return };
+    if !matches!(lt, TypeRef::Named { nullable: false, .. }) || has_type_param(&lt) || e.type_of(l).as_ref().map(strip).and_then(fq_of) != fq_of(&lt) {
+        return;
+    }
+    let Some(element) = e.supertype_closure(&lt).into_iter().find_map(|st| match st {
+        TypeRef::Named { fq: Some(fq), args, .. } if &*fq == "kotlin.collections.MutableCollection" => match args.as_slice() {
+            [crate::symbols::TypeArg::Type { ty, .. }] => Some(ty.clone()),
+            _ => None,
+        },
+        _ => None,
+    }) else {
+        return;
+    };
+    if has_type_param(&element) || !matches!(element, TypeRef::Named { fq: Some(_), .. }) {
+        return;
+    }
+    // Only the standard library's operators: no other `plusAssign` / `plus` is in scope.
+    let name = if op.kind() == SyntaxKind::PLUS_EQ { "plusAssign" } else { "minusAssign" };
+    let all: Vec<(Symbol, Subst)> = e.members_named(&lt, name).into_iter().chain(e.member_extensions(n, &lt, name)).chain(e.extensions(&lt, name)).collect();
+    if all.is_empty() || all.iter().any(|(s, _)| !s.fq_name.starts_with("kotlin.collections.")) {
+        return;
+    }
+    let Some(rt) = certain_type(e, r, true) else { return };
+    let Some(rfq) = fq_of(&rt) else { return };
+    let collection = ["kotlin.collections.Iterable", "kotlin.Array", "kotlin.sequences.Sequence"].iter().any(|c| e.conforms(&rt, c) != Some(false))
+        || rfq.starts_with("kotlin.") && rfq.ends_with("Array");
+    if collection {
+        return;
+    }
+    if type_mismatch(e, r, &element, &super::certain::shown(&element)).is_some() {
+        let shown = super::certain::shown(&rt);
+        out.report(&NONE_APPLICABLE, op.text_range(), format!("None of the following candidates is applicable for operator '{}': '{shown}' is not an element of '{}'.", op.text(), super::certain::shown(&lt)), None);
+    }
+}
+
+/// `-x` / `+x` / `x++` / `x--` on a type without `unaryMinus` / `unaryPlus` / `inc` / `dec`.
 fn prefix(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
     let Some(op) = binary_op(n) else { return };
     let name = match op.kind() {
         SyntaxKind::MINUS => "unaryMinus",
         SyntaxKind::PLUS => "unaryPlus",
+        SyntaxKind::PLUS2 => "inc",
+        SyntaxKind::MINUS2 => "dec",
         _ => return,
     };
     let Some(x) = n.children().find(|c| c.kind() != SyntaxKind::OPERATION_REFERENCE) else { return };

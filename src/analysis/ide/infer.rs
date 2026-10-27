@@ -1167,6 +1167,11 @@ impl<'s> Engine<'s> {
     // ------------------------------------------------------ resolution
 
     /// Implicit receivers at `at`: lambda receivers and enclosing classes, innermost first.
+    /// The FQ name of a class or object declaration (`None` for local ones).
+    pub fn declared_fq(&self, decl: &SyntaxNode) -> Option<String> {
+        scope_at(decl, &self.package(), &mut self.locals_cache.borrow_mut()).enclosing.last().cloned()
+    }
+
     pub fn implicit_receivers(&self, at: &SyntaxNode) -> Vec<(TypeRef, Option<Classifier>)> {
         let mut out = Vec::new();
         let package = self.package();
@@ -2637,7 +2642,7 @@ impl<'s> Engine<'s> {
 
     /// Supertype closure of `t` without `t` itself, or `None` if some supertype declared in
     /// sources does not resolve (members would be unknown).
-    fn known_supertypes(&self, t: &TypeRef) -> Option<Vec<TypeRef>> {
+    pub fn known_supertypes(&self, t: &TypeRef) -> Option<Vec<TypeRef>> {
         let closure = self.supertype_closure(t);
         for st in &closure {
             let fq = fq_of(st)?;

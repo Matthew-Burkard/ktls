@@ -1,6 +1,8 @@
 //! Checks on how declarations are used: instantiating abstract classes and interfaces,
-//! access to invisible declarations, infix calls of non-`infix` functions, and
+//! access to invisible declarations and private constructors, infix calls of non-`infix` functions, and
 //! assignments to something that is not a variable.
+
+use std::collections::HashSet;
 
 use super::super::*;
 use crate::analysis::ide::infer::{Def, Engine, fq_of};
@@ -21,8 +23,14 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             continue;
         }
         match n.kind() {
-            SyntaxKind::CALL_EXPR => instantiation(e, &n, out),
-            SyntaxKind::NAME_REF => visibility(cx, e, &n, out),
+            SyntaxKind::CALL_EXPR => {
+                instantiation(e, &n, out);
+                private_constructor(cx, e, &n, out);
+            }
+            SyntaxKind::NAME_REF => {
+                visibility(cx, e, &n, out);
+                outer_instance_member(e, &n, out);
+            }
             SyntaxKind::OPERATION_REFERENCE => {
                 infix(e, &n, out);
                 operator(cx, e, &n, out);
@@ -148,21 +156,8 @@ fn hidden(e: &Engine, s: &Symbol, at: &SyntaxNode) -> Option<String> {
                 if *file != e.path {
                     return Some(match class { Some(_) => format!("private in '{class_name}'"), None => "private in file".into() });
                 }
-                // Same file: visible inside the outermost class around the declaration.
                 class.as_ref()?;
-                let mut outer = container.clone();
-                while let Some((p, _)) = outer.rsplit_once('.') {
-                    if e.classifier(p).is_some_and(|c| matches!(c.symbol().origin, Origin::Source { .. })) {
-                        outer = p.to_string();
-                    } else {
-                        break;
-                    }
-                }
-                let range = match e.classifier(&outer)?.symbol().origin.clone() {
-                    Origin::Source { range, .. } => range,
-                    _ => return None,
-                };
-                (!range.contains_range(at.text_range())).then(|| format!("private in '{class_name}'"))
+                outside_class(e, &container, at)?.then(|| format!("private in '{class_name}'"))
             }
             // Library private members of Kotlin classes (not top-level, whose facade is unknown).
             _ => class.is_some().then(|| format!("private in '{class_name}'")),
@@ -178,6 +173,125 @@ fn hidden(e: &Engine, s: &Symbol, at: &SyntaxNode) -> Option<String> {
         }
         Visibility::Internal => matches!(s.origin, Origin::Library { .. }).then(|| format!("internal in '{}'", if class.is_some() { class_name } else { container })),
         _ => None,
+    }
+}
+
+/// Whether `at` (in the current file) is outside the outermost class around project class
+/// `container`, where its private members are visible.
+fn outside_class(e: &Engine, container: &str, at: &SyntaxNode) -> Option<bool> {
+    let mut outer = container.to_string();
+    while let Some((p, _)) = outer.rsplit_once('.') {
+        if e.classifier(p).is_some_and(|c| matches!(c.symbol().origin, Origin::Source { .. })) {
+            outer = p.to_string();
+        } else {
+            break;
+        }
+    }
+    let range = match e.classifier(&outer)?.symbol().origin.clone() {
+        Origin::Source { range, .. } => range,
+        _ => return None,
+    };
+    Some(!range.contains_range(at.text_range()))
+}
+
+/// `x` in `class O { val x = 1; class N { fun f() = x } }`: a nested (not `inner`) class or
+/// an object has no outer instance whose members it could use.
+fn outer_instance_member(e: &Engine, nr: &SyntaxNode, out: &mut Sink) {
+    let Some(tok) = nr.first_token().filter(|t| t.kind() == SyntaxKind::IDENT) else { return };
+    let expr = nr.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR && p.first_child().as_ref() == Some(nr)).unwrap_or_else(|| nr.clone());
+    let qualified = expr.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(&expr));
+    if qualified || nr.ancestors().any(|a| matches!(a.kind(), SyntaxKind::CALLABLE_REFERENCE | SyntaxKind::IMPORT_DIRECTIVE | SyntaxKind::PACKAGE_DIRECTIVE | SyntaxKind::KDOC | SyntaxKind::USER_TYPE)) {
+        return;
+    }
+    // Classes whose instance is out of reach: those around a nested class or object member.
+    let mut cut = false;
+    let mut unreachable: HashSet<String> = HashSet::new();
+    for anc in nr.ancestors().skip(1) {
+        if !matches!(anc.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION) {
+            continue;
+        }
+        let Some(fq) = e.declared_fq(&anc) else { return };
+        if cut && anc.kind() == SyntaxKind::CLASS {
+            unreachable.insert(fq);
+        }
+        let member = anc.parent().is_some_and(|p| p.kind() == SyntaxKind::CLASS_BODY);
+        if member && !has_modifier(&anc, "inner") {
+            cut = true;
+        } else if !member {
+            // Local classes see everything around them, but nothing beyond a cut stays.
+            if cut {
+                break;
+            }
+        }
+    }
+    if unreachable.is_empty() || super::certain::in_unknown_lambda(e, nr) {
+        return;
+    }
+    let defs = e.resolve_name_ref(nr);
+    if defs.is_empty() {
+        return;
+    }
+    let mut owners = Vec::new();
+    for d in &defs {
+        let Def::Symbol { sym, .. } = d else { return };
+        if !matches!(sym.kind, SymbolKind::Property | SymbolKind::Function) || sym.receiver.is_some() || sym.modifiers.has(Modifiers::STATIC) {
+            return;
+        }
+        let Some((owner, _)) = sym.fq_name.rsplit_once('.') else { return };
+        let Some(c) = e.classifier(owner) else { return };
+        if c.symbol().kind == SymbolKind::Object {
+            return;
+        }
+        owners.push(owner.to_string());
+    }
+    // No receiver still in reach has those members (through inheritance, say).
+    for (t, c) in e.implicit_receivers(nr) {
+        if c.as_ref().is_some_and(|c| unreachable.contains(&c.symbol().fq_name)) {
+            continue;
+        }
+        if e.known_supertypes(&t).is_none() {
+            return;
+        }
+        if e.supertype_closure(&t).iter().any(|st| fq_of(st).is_some_and(|f| owners.iter().any(|o| o == f))) {
+            return;
+        }
+    }
+    let name = ast::ident_text(&tok);
+    out.report(&UNRESOLVED_REFERENCE_EXPR, tok.text_range(), format!("Unresolved reference '{name}': a nested class or object has no instance of the outer class (make the class 'inner'?)."), None);
+}
+
+/// `P()` where every constructor of project class `P` is private.
+fn private_constructor(cx: &Cx, e: &Engine, call: &SyntaxNode, out: &mut Sink) {
+    let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
+    let defs = e.resolve_name_ref(&callee);
+    let classes: HashSet<String> = defs
+        .iter()
+        .filter_map(|d| match d {
+            Def::Symbol { sym, .. } if sym.kind == SymbolKind::Constructor => Some(sym.fq_name.trim_end_matches(".<init>").to_string()),
+            Def::Symbol { sym, .. } if sym.kind == SymbolKind::Class => Some(sym.fq_name.clone()),
+            _ => None,
+        })
+        .collect();
+    if classes.len() != 1 || defs.is_empty() || defs.iter().any(|d| !matches!(d, Def::Symbol { sym, .. } if sym.kind == SymbolKind::Constructor || sym.kind == SymbolKind::Class)) {
+        return;
+    }
+    let fq = classes.into_iter().next().unwrap();
+    let Some(c) = e.classifier(&fq) else { return };
+    let Origin::Source { file, .. } = &c.symbol().origin else { return };
+    if !file.extension().is_some_and(|x| x == "kt" || x == "kts") {
+        return;
+    }
+    let ctors = e.constructors(&fq);
+    if ctors.is_empty() || ctors.iter().any(|k| k.visibility != Visibility::Private) {
+        return;
+    }
+    // A function of the same name, or the companion's `invoke`, is called instead.
+    if e.top_level_named(&c.symbol().name).iter().any(|s| s.kind == SymbolKind::Function) || e.all_static_members(&c).1.iter().any(|(m, _)| m.name == "invoke") {
+        return;
+    }
+    let outside = if *file != cx.path { true } else { outside_class(e, &fq, call) == Some(true) };
+    if outside {
+        out.report(&INVISIBLE_REFERENCE, callee.text_range(), format!("Cannot access '<init>': it is private in '{}'.", c.symbol().name), None);
     }
 }
 

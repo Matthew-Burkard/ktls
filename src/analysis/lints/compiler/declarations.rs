@@ -1,7 +1,7 @@
 //! Declaration-level compiler checks: modifiers, bodies, initialization, class structure,
 //! supertypes, abstract members, `override`, redeclarations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::super::*;
 use crate::analysis::diagnostics::{LocalsCache, scope_at};
@@ -27,6 +27,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 implementations(cx, &n, out);
             }
             SyntaxKind::CLASS_BODY | SyntaxKind::KOTLIN_FILE => redeclarations(&n, out),
+            SyntaxKind::VALUE_PARAMETER_LIST => duplicate_parameters(&n, out),
             _ => {}
         }
         if matches!(n.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::TYPEALIAS) {
@@ -702,13 +703,24 @@ fn decl_symbol(cx: &Cx, name: &SyntaxToken, wanted: impl Fn(&crate::symbols::Sym
     walk(&summary.decls, name.text_range(), wanted).cloned()
 }
 
+/// `fun f(a: Int, a: Int)`: two parameters with one name.
+fn duplicate_parameters(list: &SyntaxNode, out: &mut Sink) {
+    let mut seen: HashSet<String> = HashSet::new();
+    for p in list.children().filter(|p| p.kind() == SyntaxKind::VALUE_PARAMETER) {
+        let Some(name) = ast::token(&p, SyntaxKind::IDENT) else { continue };
+        let n = ast::ident_text(&name);
+        if n != "_" && !seen.insert(n.clone()) {
+            out.report(&REDECLARATION_LOCAL, name.text_range(), format!("Conflicting declarations: value parameter '{n}'."), None);
+        }
+    }
+}
+
 /// Two properties or classes with one name, or two functions with one signature, in the
 /// same class body or file.
 fn redeclarations(container: &SyntaxNode, out: &mut Sink) {
     let mut props: HashMap<String, SyntaxToken> = HashMap::new();
     let mut classes: HashMap<String, SyntaxToken> = HashMap::new();
     let mut funs: HashMap<(String, String), SyntaxToken> = HashMap::new();
-    let top = container.kind() == SyntaxKind::KOTLIN_FILE;
     for d in container.children() {
         if ["expect", "actual"].iter().any(|m| has_modifier(&d, m)) {
             continue;
@@ -727,8 +739,8 @@ fn redeclarations(container: &SyntaxNode, out: &mut Sink) {
                     props.insert(key, name);
                 }
             }
-            // Top-level classes are checked across the module elsewhere.
-            SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::TYPEALIAS if !top => {
+            // Top-level classes are also checked across the module's other files elsewhere.
+            SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::TYPEALIAS => {
                 if let Some(prev) = classes.get(&n) {
                     for t in [prev, &name] {
                         out.report(&REDECLARATION_LOCAL, t.text_range(), format!("Redeclaration: '{n}'."), None);

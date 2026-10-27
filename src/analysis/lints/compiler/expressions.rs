@@ -49,6 +49,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 getter_value(e, &n, out);
             }
             SyntaxKind::ENUM_ENTRY => enum_entry_arguments(e, &n, out),
+            SyntaxKind::SUPER_TYPE_CALL_ENTRY => supertype_arguments(e, &n, out),
             SyntaxKind::RETURN_EXPR => literal_return(e, &n, out),
             SyntaxKind::FUN => literal_expression_body(e, &n, out),
             _ => {}
@@ -189,7 +190,20 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
         let error = levels.iter().all(|l| *l == Some(super::markers::Level::Error));
         out.report(if error { &DEPRECATION_ERROR } else { &DEPRECATION }, tok.text_range(), format!("'{name}' is deprecated."), None);
     }
-    if !defs.is_empty() || !cx.on(&UNRESOLVED_REFERENCE_EXPR) || in_unknown_lambda(e, nr) || in_context_scope(nr) {
+    if !cx.on(&UNRESOLVED_REFERENCE_EXPR) || in_unknown_lambda(e, nr) || in_context_scope(nr) {
+        return;
+    }
+    // `C.m()` for an instance member `m` of project class `C`.
+    if !defs.is_empty() {
+        if member
+            && let Some(Qualifier::Static(c)) = outer.first_child().map(|r| e.resolve_qualifier(&r))
+            && c.symbol().kind != SymbolKind::Object
+            && static_name_missing(e, &c, &name, true)
+            && !companion_member(e, &c, nr, &name)
+            && super::markers::source_decl(cx, c.symbol()).and_then(|d| modifiers(&d)).is_none_or(|m| m.annotations().next().is_none())
+        {
+            out.report(&UNRESOLVED_REFERENCE_EXPR, tok.text_range(), format!("Unresolved reference '{name}': it is a member of instances of '{}', which has no companion object member of that name.", c.symbol().name), None);
+        }
         return;
     }
     if member {
@@ -205,7 +219,7 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
         if let Qualifier::Static(c) = e.resolve_qualifier(&recv) {
             // Compiler plugins add members to annotated classes (`@Serializable`: `serializer()`).
             let annotated = super::markers::source_decl(cx, c.symbol()).and_then(|d| modifiers(&d)).is_some_and(|m| m.annotations().next().is_some());
-            if !annotated && static_name_missing(e, &c, &name) {
+            if !annotated && static_name_missing(e, &c, &name, false) {
                 let kind = if c.symbol().kind == SymbolKind::Enum { "enum class" } else { "class" };
                 out.report(&UNRESOLVED_REFERENCE_EXPR, tok.text_range(), format!("Unresolved reference '{name}' in {kind} '{}'.", c.symbol().name), None);
             }
@@ -244,8 +258,9 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
 }
 
 /// `name` is nothing reachable through project classifier `c`: no nested classifier, enum
-/// entry, object or companion member, or extension on the companion.
-fn static_name_missing(e: &Engine, c: &crate::analysis::resolve::Classifier, name: &str) -> bool {
+/// entry, object or companion member, or extension on the companion. With `instance`, it
+/// must be an instance member instead (otherwise it may be one).
+fn static_name_missing(e: &Engine, c: &crate::analysis::resolve::Classifier, name: &str, instance: bool) -> bool {
     let sym = c.symbol();
     if !matches!(sym.origin, Origin::Source { .. }) || !matches!(sym.kind, SymbolKind::Class | SymbolKind::Enum | SymbolKind::Object | SymbolKind::Interface) {
         return false;
@@ -258,8 +273,9 @@ fn static_name_missing(e: &Engine, c: &crate::analysis::resolve::Classifier, nam
     if nested.iter().any(|(n, _)| n == name) || members.iter().any(|(m, _)| m.name == name) {
         return false;
     }
-    // Members with other visibility, and extensions on the object or companion.
-    if !e.members_named(&TypeRef::named(&sym.fq_name), name).is_empty() {
+    // Instance members (or ones with other visibility), and extensions on the object or
+    // companion.
+    if e.members_named(&TypeRef::named(&sym.fq_name), name).is_empty() == instance {
         return false;
     }
     let companion = if sym.kind == SymbolKind::Object { Some(sym.clone()) } else { e.res.find_classifier(&format!("{}.Companion", sym.fq_name)).map(|c| c.symbol().clone()) };
@@ -270,6 +286,18 @@ fn static_name_missing(e: &Engine, c: &crate::analysis::resolve::Classifier, nam
         }
     }
     true
+}
+
+/// Whether a companion (or other nested object) of `c` has a member `name`, inherited or
+/// a member extension in scope at `at` (`companion object : IntEntityClass<N>(…)` and
+/// `EntityClass.via` declared in `Entity`), or its members are not all known.
+fn companion_member(e: &Engine, c: &crate::analysis::resolve::Classifier, at: &SyntaxNode, name: &str) -> bool {
+    let (nested, _) = e.all_static_members(c);
+    let objects = nested.into_iter().map(|(_, fq)| fq).chain(std::iter::once(format!("{}.Companion", c.symbol().fq_name)));
+    objects.filter(|fq| e.classifier(fq).is_some_and(|o| o.symbol().kind == SymbolKind::Object)).any(|fq| {
+        let t = TypeRef::named(&fq);
+        e.known_supertypes(&t).is_none() || !e.members_named(&t, name).is_empty() || !e.member_extensions(at, &t, name).is_empty() || !e.extensions(&t, name).is_empty()
+    })
 }
 
 /// Kotlin built-in types mapped to JVM classes (`MutableMap` → `java.util.Map`) also expose
@@ -414,14 +442,30 @@ fn val_target(cx: &Cx, e: &Engine, target: &SyntaxNode) -> Option<(String, Optio
 }
 
 fn assignment(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
-    // Compound assignments may call `plusAssign` on a mutable value instead.
-    if !assignment_op(n).is_some_and(|op| op.kind() == SyntaxKind::EQ) || !cx.on(&VAL_REASSIGNMENT) {
+    let Some(op) = assignment_op(n) else { return };
+    if !cx.on(&VAL_REASSIGNMENT) {
         return;
     }
     let Some(target) = n.first_child() else { return };
+    // Compound assignments may call `plusAssign` on a mutable value instead; values of
+    // built-in and read-only collection types have none, so `x += 1` reassigns.
+    if op.kind() != SyntaxKind::EQ && !without_assign_operators(e, &target) {
+        return;
+    }
     if let Some((name, fix)) = val_target(cx, e, &target) {
         out.report(&VAL_REASSIGNMENT, target.text_range(), format!("'val' cannot be reassigned: '{name}'."), fix);
     }
+}
+
+/// Whether `x`'s certain type has no `plusAssign`-like operators: numbers, `String`, `Char`,
+/// `Boolean` and read-only collections.
+fn without_assign_operators(e: &Engine, x: &SyntaxNode) -> bool {
+    let Some(TypeRef::Named { fq: Some(fq), .. }) = super::certain_type(e, x, true) else { return false };
+    matches!(
+        &*fq,
+        "kotlin.Int" | "kotlin.Long" | "kotlin.Short" | "kotlin.Byte" | "kotlin.Double" | "kotlin.Float" | "kotlin.String" | "kotlin.Char" | "kotlin.Boolean"
+            | "kotlin.collections.List" | "kotlin.collections.Set" | "kotlin.collections.Map" | "kotlin.sequences.Sequence"
+    )
 }
 
 fn increment(cx: &Cx, e: &Engine, n: &SyntaxNode, out: &mut Sink) {
@@ -975,14 +1019,14 @@ fn function_supertype(e: &Engine, t: &TypeRef, depth: u32) -> bool {
     depth < 8 && c.symbol().supertypes.iter().any(|s| function_supertype(e, &e.resolve_declared(c.symbol(), s), depth + 1))
 }
 
-/// `x(…)` where `x` is a local or parameter of a class type without `invoke`, or an
+/// `x(…)` where `x` is a local, parameter or property of a class type without `invoke`, or an
 /// object (`O()`: objects have no constructors).
 fn value_invoked(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
     let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
     if call.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(call)) {
         return;
     }
-    if in_unknown_lambda(e, call) || in_context_scope(call) || e.call_candidates(&callee).is_some_and(|c| !c.is_empty()) {
+    if in_unknown_lambda(e, call) || in_context_scope(call) || e.call_candidates(&callee).is_some_and(|c| c.iter().any(|(s, _)| s.kind != SymbolKind::Property)) {
         return;
     }
     // A function of that name is called instead when the value cannot be invoked: members
@@ -995,19 +1039,47 @@ fn value_invoked(e: &Engine, call: &SyntaxNode, out: &mut Sink) {
     {
         return;
     }
-    let t = match e.resolve_name_ref(&callee).as_slice() {
+    // A property that cannot be invoked is no call candidate.
+    let mut defs = e.resolve_name_ref(&callee);
+    if defs.is_empty() {
+        defs = e.resolve_name_text(&callee, &name);
+    }
+    let t = match defs.as_slice() {
         [Def::Local(l)] if matches!(l.kind, LocalKind::Parameter | LocalKind::Val | LocalKind::Var) => match super::certain::certain_type(e, &callee, true) {
             Some(t @ TypeRef::Named { fq: Some(_), nullable: false, .. }) => t,
             _ => return,
         },
         [Def::Symbol { sym, .. }] if sym.kind == SymbolKind::Object => TypeRef::named(&sym.fq_name),
+        // Top-level and member properties.
+        [Def::Symbol { sym, .. }] if sym.kind == SymbolKind::Property && sym.receiver.is_none() => match property_type(e, sym) {
+            Some(t @ TypeRef::Named { fq: Some(_), nullable: false, .. }) => t,
+            _ => return,
+        },
         _ => return,
     };
     let Some(fq) = fq_of(&t) else { return };
-    if e.classifier(fq).is_none() || invocable(e, &t, call) {
+    // Type aliases may name function types.
+    if e.classifier(fq).is_none_or(|c| c.symbol().kind == SymbolKind::TypeAlias) || invocable(e, &t, call) {
         return;
     }
     out.report(&FUNCTION_EXPECTED, callee.text_range(), format!("Expression '{}' of type '{}' cannot be invoked as a function.", callee.text(), super::certain::shown(&t)), None);
+}
+
+/// The declared type of a property, or the certain type of its initializer in this file.
+fn property_type(e: &Engine, sym: &Symbol) -> Option<TypeRef> {
+    if let Some(t) = &sym.ty {
+        return Some(e.resolve_declared(sym, t));
+    }
+    let Origin::Source { file, name_range, .. } = &sym.origin else { return None };
+    if *file != e.path {
+        return None;
+    }
+    let root = e.snap.file(file)?.parse().syntax();
+    let decl = crate::syntax::covering(&root, *name_range)?.ancestors().find(|a| a.kind() == SyntaxKind::PROPERTY)?;
+    if decl.children().any(|c| matches!(c.kind(), SyntaxKind::PROPERTY_DELEGATE | SyntaxKind::PROPERTY_ACCESSOR)) {
+        return None;
+    }
+    super::certain::certain_type(e, &initializer(&decl)?, true)
 }
 
 /// `f(…)` where `f` is a local or parameter of function type (`(Int) -> String`): the
@@ -1059,18 +1131,44 @@ fn enum_entry_arguments(e: &Engine, entry: &SyntaxNode, out: &mut Sink) {
     let Some(fq) = e.classifier_named(entry, &[ast::ident_text(&class_name).as_str()]) else { return };
     let ctors = e.constructors(&fq);
     let [ctor] = ctors.as_slice() else { return };
-    let list = entry.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST);
+    let at = name_token(entry).map_or(entry.text_range(), |t| t.text_range());
+    constructor_arguments(e, ctor, class_name.text(), entry, at, out);
+}
+
+/// `class B : A()` where `A` is a project class with a single constructor.
+fn supertype_arguments(e: &Engine, entry: &SyntaxNode, out: &mut Sink) {
+    let Some(tr) = entry.children().find_map(ast::TypeRef::cast) else { return };
+    let t = e.resolve_syntax_type(&tr);
+    let Some(fq) = fq_of(&t) else { return };
+    let Some(c) = e.classifier(fq) else { return };
+    let Origin::Source { file, name_range, .. } = &c.symbol().origin else { return };
+    // Secondary constructors may be missing from the members.
+    let Some(f) = e.snap.file(file) else { return };
+    let root = f.parse().syntax();
+    let Some(decl) = crate::syntax::covering(&root, *name_range).and_then(|n| n.ancestors().find(|a| a.kind() == SyntaxKind::CLASS)) else { return };
+    if decl.children().filter(|c| c.kind() == SyntaxKind::CLASS_BODY).any(|b| b.children().any(|m| m.kind() == SyntaxKind::SECONDARY_CONSTRUCTOR)) {
+        return;
+    }
+    let ctors = e.constructors(fq);
+    let [ctor] = ctors.as_slice() else { return };
+    constructor_arguments(e, ctor, &c.symbol().name, entry, tr.syntax().text_range(), out);
+}
+
+/// The positional arguments of `call` (with a `VALUE_ARGUMENT_LIST` child, or none) to
+/// constructor `ctor`; `at` is reported when there is no argument list.
+fn constructor_arguments(e: &Engine, ctor: &Symbol, class_name: &str, call: &SyntaxNode, at: TextRange, out: &mut Sink) {
+    let list = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST);
     let args: Vec<SyntaxNode> = list.iter().flat_map(|l| l.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect::<Vec<_>>()).collect();
     if args.iter().any(|a| a.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME) || ast::token(a, SyntaxKind::STAR).is_some()) {
         return;
     }
     let vararg = ctor.params.iter().any(|p| p.vararg);
     if let Some(extra) = args.get(ctor.params.len()).filter(|_| !vararg) {
-        out.report(&TOO_MANY_ARGUMENTS, extra.text_range(), format!("Too many arguments for constructor of '{}'.", class_name.text()), None);
+        out.report(&TOO_MANY_ARGUMENTS, extra.text_range(), format!("Too many arguments for constructor of '{class_name}'."), None);
         return;
     }
     if let Some(p) = ctor.params.iter().skip(args.len()).find(|p| !p.has_default && !p.vararg) {
-        let at = list.as_ref().and_then(|l| l.last_token()).map_or_else(|| name_token(entry).map_or(entry.text_range(), |t| t.text_range()), |t| t.text_range());
+        let at = list.as_ref().and_then(|l| l.last_token()).map_or(at, |t| t.text_range());
         out.report(&NO_VALUE_FOR_PARAMETER, at, format!("No value passed for parameter '{}'.", p.name), None);
         return;
     }
@@ -1244,6 +1342,25 @@ fn argument_mismatches(e: &Engine, sym: &Symbol, subst: &crate::analysis::ide::i
         }
         let Some(value) = a.children().filter(|c| c.kind() != SyntaxKind::VALUE_ARGUMENT_NAME).last() else { continue };
         let t = crate::analysis::ide::infer::substitute(&e.resolve_declared(sym, &param.ty), &subst);
+        // `fun <T : Number> f(v: T)`: whatever `T` becomes, the value must fit its bounds.
+        if let TypeRef::TypeParam { name: tp, .. } = &t
+            && let Some(tp) = sym.type_params.iter().find(|p| p.name == *tp)
+        {
+            for b in &tp.bounds {
+                // Only the class: smart casts to non-null are not all modeled.
+                let bound = e.resolve_declared(sym, b).nullable(true);
+                if has_type_param(&bound) || !matches!(bound, TypeRef::Named { fq: Some(_), .. }) {
+                    continue;
+                }
+                if let Some((rule, message, _, convert)) = type_mismatch(e, &value, &bound, &bound.display()) {
+                    let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ARGUMENT_TYPE_MISMATCH } else { rule };
+                    // The parameter's type stays `T`.
+                    out.push(ArgMismatch { value, rule, message, to: String::new(), convert, param: String::new() });
+                    break;
+                }
+            }
+            continue;
+        }
         // Java parameters (platform types) accept null; generic ones need inference.
         if matches!(t, TypeRef::Platform(_)) || has_type_param(&t) {
             continue;
@@ -1591,13 +1708,82 @@ fn literal_initializer(e: &Engine, n: &SyntaxNode, out: &mut Sink) {
             out.report_fixes(rule, value.text_range(), msg, fixes);
         } else {
             inferred_from_expected(e, &value, &e.resolve_syntax_type(&ty), out);
+            callable_reference(e, &value, &e.resolve_syntax_type(&ty), out);
         }
     }
 }
 
-/// `val xs: List<Int> = listOf("a")`: a generic call whose result type takes its type
-/// arguments from the expected type, with arguments for those type parameters that do not
-/// fit them (`out` and invariant positions only).
+/// `val f: (String) -> Int = ::g` where no function `g` takes those parameters and
+/// returns that type.
+fn callable_reference(e: &Engine, value: &SyntaxNode, expected: &TypeRef, out: &mut Sink) {
+    if value.kind() != SyntaxKind::CALLABLE_REFERENCE || value.first_child().is_some_and(|c| c.kind() != SyntaxKind::NAME_REF) || value.children().count() != 1 {
+        return;
+    }
+    let TypeRef::Function { receiver: None, params, ret, suspend: false, .. } = expected else { return };
+    let concrete = |t: &TypeRef| matches!(t, TypeRef::Named { fq: Some(_), .. }) && !has_type_param(t);
+    if !params.iter().all(concrete) || !concrete(ret) {
+        return;
+    }
+    let Some(nr) = value.first_child() else { return };
+    let defs = e.resolve_name_ref(&nr);
+    if defs.is_empty() {
+        return;
+    }
+    // `a` may stand where `b` is expected (`None`: not known).
+    let fits = |a: &TypeRef, b: &TypeRef| -> Option<bool> {
+        let (TypeRef::Named { nullable: an, .. }, TypeRef::Named { nullable: bn, .. }) = (a, b) else { return None };
+        if *an && !bn {
+            return Some(false);
+        }
+        e.conforms(a, fq_of(b)?)
+    };
+    let mut shown = None;
+    for d in &defs {
+        let Def::Symbol { sym, .. } = d else { return };
+        // Defaults and varargs adapt references; generic functions are inferred.
+        if sym.kind != SymbolKind::Function || sym.receiver.is_some() || !sym.type_params.is_empty() || sym.modifiers.has(Modifiers::SUSPEND) || sym.params.iter().any(|p| p.has_default || p.vararg) {
+            return;
+        }
+        let ps: Vec<TypeRef> = sym.params.iter().map(|p| e.resolve_declared(sym, &p.ty)).collect();
+        if !ps.iter().all(concrete) {
+            return;
+        }
+        let mut ok = ps.len() == params.len();
+        for (want, have) in params.iter().zip(&ps) {
+            if !ok {
+                break;
+            }
+            let Some(f) = fits(want, have) else { return };
+            ok &= f;
+        }
+        // Any result may be dropped for `Unit`; without a declared return type, an
+        // expression body decides it.
+        let unit = fq_of(ret) == Some("kotlin.Unit");
+        let r = match &sym.ty {
+            Some(t) => e.resolve_declared(sym, t),
+            None if unit || !ok => TypeRef::named("kotlin.Unit"),
+            None => return,
+        };
+        if ok && !unit {
+            if !concrete(&r) {
+                return;
+            }
+            let Some(f) = fits(&r, ret) else { return };
+            ok &= f;
+        }
+        if ok {
+            return;
+        }
+        let result = if sym.ty.is_some() { super::certain::shown(&r) } else { "…".into() };
+        shown.get_or_insert_with(|| format!("KFunction{}<{}>", ps.len(), ps.iter().map(super::certain::shown).chain(std::iter::once(result)).collect::<Vec<_>>().join(", ")));
+    }
+    let Some(actual) = shown else { return };
+    out.report(&INITIALIZER_TYPE_MISMATCH, value.text_range(), format!("Type mismatch: expected '{}', actual '{actual}'.", super::certain::shown(expected)), None);
+}
+
+/// `val xs: List<Int> = listOf("a")`, `fun f(): List<Int> = listOf("a")`: a generic call
+/// whose result type takes its type arguments from the expected type, with arguments for
+/// those type parameters that do not fit them (`out` and invariant positions only).
 fn inferred_from_expected(e: &Engine, call: &SyntaxNode, expected: &TypeRef, out: &mut Sink) {
     let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && call.kind() == SyntaxKind::CALL_EXPR) else { return };
     // Explicit type arguments decide on their own.
@@ -1655,16 +1841,35 @@ fn bound_argument_mismatches(e: &Engine, sym: &Symbol, args: &[SyntaxNode], expe
     let mut found = Vec::new();
     for (i, a) in args.iter().enumerate() {
         let param = vararg.filter(|v| i >= *v).and_then(|v| sym.params.get(v)).or_else(|| sym.params.get(i))?;
-        let TypeRef::TypeParam { name, nullable } = &param.ty else { continue };
-        let Some(want) = bound.get(name) else { continue };
-        let want = if *nullable { want.clone().nullable(true) } else { want.clone() };
         let Some(value) = a.children().last() else { continue };
-        if let Some((rule, message, _, convert)) = type_mismatch(e, &value, &want, &super::certain::shown(&want)) {
-            let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ARGUMENT_TYPE_MISMATCH } else { rule };
-            found.push((value, rule, message, convert));
+        // `K` / `V` directly, or inside `Pair<K, V>` written as `k to v`.
+        let checks: Vec<(SyntaxNode, TypeRef)> = match e.resolve_declared(sym, &param.ty) {
+            TypeRef::TypeParam { .. } => vec![(value, param.ty.clone())],
+            TypeRef::Named { fq: Some(fq), args: pair, nullable: false, .. } if &*fq == "kotlin.Pair" => {
+                let Some((l, r)) = infix_to(&value) else { continue };
+                let types: Vec<TypeRef> = pair.into_iter().filter_map(|a| if let crate::symbols::TypeArg::Type { ty, .. } = a { Some(ty) } else { None }).collect();
+                let [lt, rt] = <[TypeRef; 2]>::try_from(types).ok()?;
+                vec![(l, lt), (r, rt)]
+            }
+            _ => continue,
+        };
+        for (value, ty) in checks {
+            let TypeRef::TypeParam { name, nullable } = ty else { continue };
+            let Some(want) = bound.get(&name) else { continue };
+            let want = if nullable { want.clone().nullable(true) } else { want.clone() };
+            if let Some((rule, message, _, convert)) = type_mismatch(e, &value, &want, &super::certain::shown(&want)) {
+                let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &ARGUMENT_TYPE_MISMATCH } else { rule };
+                found.push((value, rule, message, convert));
+            }
         }
     }
     Some(found)
+}
+
+/// The operands of `a to b`.
+fn infix_to(n: &SyntaxNode) -> Option<(SyntaxNode, SyntaxNode)> {
+    binary_op(n).filter(|op| op.kind() == SyntaxKind::IDENT && op.text() == "to")?;
+    binary_operands(n)
 }
 
 /// Lambdas passed to a call: their parameters against the function type every candidate
@@ -1788,6 +1993,8 @@ fn literal_return(e: &Engine, ret: &SyntaxNode, out: &mut Sink) {
         if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "return type") {
             let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
             out.report_fixes(rule, value.text_range(), msg, fixes);
+        } else {
+            inferred_from_expected(e, &value, &e.resolve_syntax_type(&ty), out);
         }
     }
 }
@@ -1800,6 +2007,8 @@ fn literal_expression_body(e: &Engine, f: &SyntaxNode, out: &mut Sink) {
         if let Some((rule, msg, fixes)) = mismatch(e, &value, &ty, "return type") {
             let rule = if std::ptr::eq(rule, &INITIALIZER_TYPE_MISMATCH) { &RETURN_TYPE_MISMATCH } else { rule };
             out.report_fixes(rule, value.text_range(), msg, fixes);
+        } else {
+            inferred_from_expected(e, &value, &e.resolve_syntax_type(&ty), out);
         }
     }
 }

@@ -3535,3 +3535,99 @@ enum class E(val x: Int, val y: String = "") { A(1), B(2, "b") }
     let found: Vec<String> = compiler(ok).into_iter().filter(|f| !f.starts_with("UNUSED_") && !f.starts_with("ASSIGNED_BUT_NEVER")).collect();
     assert!(found.is_empty(), "{found:#?}");
 }
+
+#[test]
+fn receivers_constructors_and_references() {
+    let text = r#"package a
+
+fun reassigns() { val x = 1; x += 1; val l = listOf(1); l += 2; var s = "a"; s++ }
+fun operators() = (1 in 2) to 1[0]
+open class A(val x: Int)
+class B : A()
+class P private constructor()
+fun creates() = P()
+fun generic(): List<String> = listOf(1)
+val m: Map<String, Int> = mapOf(1 to 2)
+fun indexed() { val m = mutableMapOf<String, Int>(); m["a"] = "b"; val l = mutableListOf<Int>(); l += "s" }
+class Twice
+class Twice
+fun params(a: Int, a: Int) {}
+class Outer { val x = 1; fun y() = 2; class Nested { fun f() = x }; companion object { fun g() = y() } }
+class C { fun m() {} }
+fun statics() { C.m() }
+val top = 1
+fun invokes() { top() }
+fun <T : Number> bounded(t: T) {}
+fun bounds() = bounded("a")
+fun g(x: Int) = x
+val ref: (String) -> Int = ::g
+object O(val x: Int)
+"#;
+    let found = compiler(text);
+    for expected in [
+        "VAL_REASSIGNMENT: x",
+        "VAL_REASSIGNMENT: l",
+        "UNRESOLVED_REFERENCE: ++",
+        "UNRESOLVED_REFERENCE: in",
+        "NO_GET_METHOD: 1[0]",
+        "NO_VALUE_FOR_PARAMETER: )",
+        "INVISIBLE_REFERENCE: P",
+        "ARGUMENT_TYPE_MISMATCH: 1",
+        "ARGUMENT_TYPE_MISMATCH: \"b\"",
+        "NONE_APPLICABLE: +=",
+        "REDECLARATION: Twice",
+        "REDECLARATION: a",
+        "UNRESOLVED_REFERENCE: x",
+        "UNRESOLVED_REFERENCE: y",
+        "UNRESOLVED_REFERENCE: m",
+        "FUNCTION_EXPECTED: top",
+        "ARGUMENT_TYPE_MISMATCH: \"a\"",
+        "INITIALIZER_TYPE_MISMATCH: ::g",
+        "CONSTRUCTOR_IN_OBJECT: (val x: Int)",
+    ] {
+        has(&found, expected);
+    }
+    // `listOf(1)` returned as `List<String>` and the key of `mapOf(1 to 2)`.
+    assert_eq!(found.iter().filter(|f| *f == "ARGUMENT_TYPE_MISMATCH: 1").count(), 2, "{found:#?}");
+
+    let ok = r#"package a
+
+fun reassigns() { var x = 1; x += 1; val l = mutableListOf(1); l += 2; l += listOf(3); l -= 1; var i = 0; i++ }
+fun operators(s: String) = ('a' in s) to s[0] to (1 in 1..2)
+open class A(val x: Int, val y: Int = 0)
+class B(x: Int) : A(x)
+open class G<T>(val t: T)
+class H : G<String>("s")
+class P private constructor() { companion object { fun make() = P() } }
+fun generic(): List<Any> = listOf(1)
+val m: Map<String, Any> = mapOf("a" to 1)
+fun indexed() { val m = mutableMapOf<String, Int>(); m["a"] = 1; val h = HashMap<String, Int>(); h["b"] = 2; val l = mutableListOf<Any>(); l += "s" }
+class Twice
+fun Twice(x: Int) = x
+fun params(a: Int, b: Int) {}
+class Outer {
+    val x = 1
+    inner class Inner { fun f() = x }
+    fun local() { class L { fun f() = x } }
+    fun anonymous() = object : Runnable { override fun run() { println(x) } }
+    companion object { const val K = 1 }
+    class Nested { fun f() = K }
+}
+open class Base { val z = 1 }
+class Out { val z = 2; class In : Base() { fun f() = z } }
+object Single { val x = 1; class In { fun f() = x } }
+class C { companion object { fun m() {} } }
+fun statics() { C.m() }
+val fn: () -> Int = { 1 }
+val lambda = { 1 }
+fun invokes() { fn(); lambda() }
+fun <T : Number> bounded(t: T) {}
+fun <T : Comparable<T>> sorted(t: T) {}
+fun bounds() { bounded(1); bounded(2.0); sorted("a") }
+fun g(x: Int) = x
+val ref: (Int) -> Int = ::g
+val unit: (Int) -> Unit = ::g
+"#;
+    let found: Vec<String> = compiler(ok).into_iter().filter(|f| !f.starts_with("UNUSED_") && !f.starts_with("ASSIGNED_BUT_NEVER")).collect();
+    assert!(found.is_empty(), "{found:#?}");
+}
