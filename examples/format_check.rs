@@ -3,10 +3,10 @@
 //!
 //! cargo run --release --example format_check -- <dir> [show-diffs] [indent-width]
 
-use kotlin_lsp::analysis::ide::format::format;
-use kotlin_lsp::syntax::parse;
+use ktls::analysis::ide::format::format;
+use ktls::syntax::parse;
 
-fn apply(text: &str, edits: &[(kotlin_lsp::syntax::TextRange, String)]) -> String {
+fn apply(text: &str, edits: &[(ktls::syntax::TextRange, String)]) -> String {
     let mut edits = edits.to_vec();
     edits.sort_by_key(|(r, _)| std::cmp::Reverse(r.start()));
     let mut out = text.to_string();

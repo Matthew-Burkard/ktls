@@ -60,9 +60,16 @@ pub fn short_hash(s: &str) -> String {
     sha1_smol::Sha1::from(s).digest().to_string()[..12].to_string()
 }
 
-/// Default cache directory (`$XDG_CACHE_HOME/kotlin-lsp-rust`).
+/// Default cache directory (`$XDG_CACHE_HOME/ktls`).
 pub fn default_cache_dir() -> PathBuf {
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("kotlin-lsp-rust")
+    let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("ktls");
+    // Keep the cache of the server's former name.
+    let old = base.join("kotlin-lsp-rust");
+    if !dir.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &dir);
+    }
+    dir
 }
 
 #[cfg(test)]

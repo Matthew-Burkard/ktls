@@ -1,4 +1,4 @@
-//! Minimal stderr logger (`KOTLIN_LSP_LOG=error|warn|info|debug|trace`).
+//! Minimal stderr logger (`KTLS_LOG=error|warn|info|debug|trace`).
 
 use std::io::Write;
 
@@ -22,7 +22,7 @@ impl log::Log for StderrLogger {
 }
 
 pub fn init() {
-    let level = match std::env::var("KOTLIN_LSP_LOG").unwrap_or_default().to_lowercase().as_str() {
+    let level = match std::env::var("KTLS_LOG").unwrap_or_default().to_lowercase().as_str() {
         "error" => log::LevelFilter::Error,
         "warn" => log::LevelFilter::Warn,
         "debug" => log::LevelFilter::Debug,

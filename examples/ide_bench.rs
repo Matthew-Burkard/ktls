@@ -4,14 +4,14 @@
 
 use std::sync::Arc;
 
-use kotlin_lsp::analysis::ide::{hierarchy, imports, inlay, semantic, signature};
-use kotlin_lsp::analysis::{AnalysisHost, Language, Workspace};
-use kotlin_lsp::project::{self, LoadOptions};
-use kotlin_lsp::syntax::{TextRange, TextSize};
+use ktls::analysis::ide::{hierarchy, imports, inlay, semantic, signature};
+use ktls::analysis::{AnalysisHost, Language, Workspace};
+use ktls::project::{self, LoadOptions};
+use ktls::syntax::{TextRange, TextSize};
 
 fn main() {
     let dir = std::path::PathBuf::from(std::env::args().nth(1).expect("usage: ide_bench <dir>")).canonicalize().unwrap();
-    let opts = LoadOptions::new(kotlin_lsp::util::default_cache_dir());
+    let opts = LoadOptions::new(ktls::util::default_cache_dir());
     let projects: Vec<_> = project::discover(&[dir]).into_iter().map(|(r, bs)| project::load(&r, bs, &opts)).collect();
     let mut host = AnalysisHost::default();
     host.set_workspace(Workspace::new(projects, project::jdk::find(None, None)));
@@ -26,7 +26,7 @@ fn main() {
     let text = "package zz.probe\n\nfun probe(xs: List<String>) {\n    val d = Duration.ZERO\n    runBlocking { }\n    xs.joinToString(\", \", )\n    println(xs.indexOf())\n}\n";
     host.set_file(probe.clone(), Arc::from(text), Some(1));
     let snap = host.snapshot();
-    println!("probe {} {:?}", probe.display(), kotlin_lsp::analysis::diagnostics::coverage(&snap, &probe));
+    println!("probe {} {:?}", probe.display(), ktls::analysis::diagnostics::coverage(&snap, &probe));
     for (label, needle) in [("Duration", "Duration"), ("runBlocking", "runBlocking")] {
         let at = TextSize::from(text.find(needle).unwrap() as u32 + 1);
         let t = std::time::Instant::now();
@@ -44,7 +44,7 @@ fn main() {
     for (label, needle) in [("runBl", "runBlocking"), ("runBl again", "runBlocking"), ("xs.joinTo", "joinToString")] {
         let at = TextSize::from((text.find(needle).unwrap() + 5) as u32);
         let t = std::time::Instant::now();
-        let c = kotlin_lsp::analysis::ide::completion::complete(&snap, &probe, at, kotlin_lsp::analysis::ide::completion::Options { snippets: true });
+        let c = ktls::analysis::ide::completion::complete(&snap, &probe, at, ktls::analysis::ide::completion::Options { snippets: true });
         println!("complete {label}: {:?} {} items", t.elapsed(), c.map_or(0, |c| c.items.len()));
     }
     for fq in std::env::args().skip(2) {
@@ -88,7 +88,7 @@ fn main() {
         total += toks.len();
         let f = snap.file(p).unwrap();
         let root = f.parse().syntax();
-        idents += root.descendants_with_tokens().filter(|t| t.kind() == kotlin_lsp::syntax::SyntaxKind::IDENT).count();
+        idents += root.descendants_with_tokens().filter(|t| t.kind() == ktls::syntax::SyntaxKind::IDENT).count();
     }
     println!("semantic tokens for {} files in {:?} (slowest {:?} {:?}); {total} tokens, {idents} identifiers", kotlin.len(), t.elapsed(), slowest.0, slowest.1);
     for p in kotlin.iter().take(200) {

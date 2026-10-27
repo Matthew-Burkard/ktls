@@ -2,15 +2,15 @@
 //!
 //! cargo run --release --example index_classpath -- <dir> [fq.name.to.show ...]
 
-use kotlin_lsp::classpath::ClasspathIndex;
-use kotlin_lsp::project::{self, LoadOptions, SourceKind};
-use kotlin_lsp::symbols::SymbolKind;
+use ktls::classpath::ClasspathIndex;
+use ktls::project::{self, LoadOptions, SourceKind};
+use ktls::symbols::SymbolKind;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = std::path::PathBuf::from(&args[0]).canonicalize().unwrap();
     let show: Vec<&String> = args.iter().skip(1).collect();
-    let opts = LoadOptions::new(kotlin_lsp::util::default_cache_dir());
+    let opts = LoadOptions::new(ktls::util::default_cache_dir());
     let jdk = project::jdk::find(None, None);
     println!("JDK: {:?}", jdk.as_ref().map(|j| (&j.home, &j.version)));
     for (root, bs) in project::discover(&[dir]) {
@@ -68,8 +68,8 @@ fn main() {
                 error_types
             );
             // Signature plus deprecation and annotations.
-            let describe = |s: &kotlin_lsp::symbols::Symbol| {
-                use kotlin_lsp::symbols::Modifiers;
+            let describe = |s: &ktls::symbols::Symbol| {
+                use ktls::symbols::Modifiers;
                 let mut d = s.signature();
                 if s.modifiers.has(Modifiers::DEPRECATED) {
                     d.push_str(if s.modifiers.has(Modifiers::DEPRECATED_ERROR) { "  [deprecated: error]" } else { "  [deprecated]" });

@@ -116,7 +116,7 @@ impl RepoSystem {
             .timeout_global(Some(Duration::from_secs(60)))
             .timeout_connect(Some(Duration::from_secs(10)))
             .http_status_as_error(true)
-            .user_agent("kotlin-lsp-rust/0.1")
+            .user_agent("ktls/0.1")
             .build()
             .into();
         RepoSystem {

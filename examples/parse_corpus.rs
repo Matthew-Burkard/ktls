@@ -36,7 +36,7 @@ fn main() {
     let mut reported = 0;
     for (name, text) in &files {
         bytes += text.len();
-        let parse = kotlin_lsp::syntax::parse(text, name.ends_with(".kts"));
+        let parse = ktls::syntax::parse(text, name.ends_with(".kts"));
         assert_eq!(parse.syntax().text().to_string(), *text, "not lossless: {name}");
         if !parse.errors().is_empty() {
             bad += 1;

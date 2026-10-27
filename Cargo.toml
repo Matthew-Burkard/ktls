@@ -1,14 +1,14 @@
 [package]
-name = "kotlin-lsp-rust"
+name = "ktls"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "kotlin_lsp"
+name = "ktls"
 path = "src/lib.rs"
 
 [[bin]]
-name = "kotlin-lsp"
+name = "ktls"
 path = "src/main.rs"
 
 [dependencies]

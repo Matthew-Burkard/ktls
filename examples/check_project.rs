@@ -4,9 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use kotlin_lsp::analysis::diagnostics::{Coverage, file_diagnostics};
-use kotlin_lsp::analysis::{AnalysisHost, Language, Workspace};
-use kotlin_lsp::project::{self, LoadOptions};
+use ktls::analysis::diagnostics::{Coverage, file_diagnostics};
+use ktls::analysis::{AnalysisHost, Language, Workspace};
+use ktls::project::{self, LoadOptions};
 use rayon::prelude::*;
 
 fn main() {
@@ -16,7 +16,7 @@ fn main() {
     // Only show diagnostics with this code.
     let only = args.get(2).cloned();
     let t = std::time::Instant::now();
-    let opts = LoadOptions::new(kotlin_lsp::util::default_cache_dir());
+    let opts = LoadOptions::new(ktls::util::default_cache_dir());
     let projects: Vec<_> = project::discover(&[dir]).into_iter().map(|(r, bs)| project::load(&r, bs, &opts)).collect();
     for p in &projects {
         for m in &p.modules {

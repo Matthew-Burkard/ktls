@@ -1,6 +1,6 @@
-# Kotlin LSP Rust
+# ktls
 
-Vibe coded kotlin-lsp in rust.
+Vibe coded Kotlin language server in Rust.
 
 A Kotlin language server written in Rust. This is the core infrastructure: protocol
 handling, an error-tolerant parser, Gradle/Maven import with native dependency
@@ -20,20 +20,20 @@ See [FEATURES.md](FEATURES.md) for the full feature catalog and what is implemen
 
 ```sh
 cargo build --release
-./target/release/kotlin-lsp        # speaks LSP over stdio
-KOTLIN_LSP_LOG=debug ./target/release/kotlin-lsp   # logs go to stderr
+./target/release/ktls        # speaks LSP over stdio
+KTLS_LOG=debug ./target/release/ktls   # logs go to stderr
 ```
 
 Neovim (0.11+):
 
 ```lua
-vim.lsp.config('kotlin_rust', {
-  cmd = { '/path/to/kotlin-lsp' },
+vim.lsp.config('ktls', {
+  cmd = { '/path/to/ktls' },
   filetypes = { 'kotlin' },
   root_markers = { 'settings.gradle.kts', 'settings.gradle', 'build.gradle.kts', 'build.gradle', 'pom.xml' },
   init_options = { kotlin = { project = { allowBuildToolExecution = false } } },
 })
-vim.lsp.enable('kotlin_rust')
+vim.lsp.enable('ktls')
 ```
 
 ## Configuration
@@ -43,7 +43,7 @@ Passed as `initializationOptions` or via `workspace/configuration` (section `kot
 | Setting | Default | Meaning |
 |---|---|---|
 | `jdkHome` | auto | JDK to index (otherwise `JAVA_HOME`, `java` on `PATH`, `/usr/lib/jvm`, SDKMAN, `~/.gradle/jdks`) |
-| `cacheDir` | `$XDG_CACHE_HOME/kotlin-lsp-rust` | Downloaded artifacts and cached project models |
+| `cacheDir` | `$XDG_CACHE_HOME/ktls` | Downloaded artifacts and cached project models |
 | `project.gradleMode` | `auto` | `static` (read build scripts), `tooling` (ask Gradle), `auto` (tooling when allowed and a wrapper exists) |
 | `project.allowBuildToolExecution` | `false` | Allow running the project's `gradlew`. Off by default because it executes code from the project |
 | `project.offline` | `false` | Use only local caches (`~/.m2`, Gradle's `files-2.1`, our cache) |

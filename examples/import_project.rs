@@ -6,16 +6,16 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = std::path::PathBuf::from(args.iter().find(|a| !a.starts_with("--")).expect("usage: import_project <dir>"));
     let dir = dir.canonicalize().unwrap();
-    let mut opts = kotlin_lsp::project::LoadOptions::new(kotlin_lsp::util::default_cache_dir());
+    let mut opts = ktls::project::LoadOptions::new(ktls::util::default_cache_dir());
     opts.offline = args.iter().any(|a| a == "--offline");
     opts.allow_tooling = args.iter().any(|a| a == "--tooling");
-    opts.gradle_mode = if opts.allow_tooling { kotlin_lsp::project::GradleMode::Tooling } else { kotlin_lsp::project::GradleMode::Static };
+    opts.gradle_mode = if opts.allow_tooling { ktls::project::GradleMode::Tooling } else { ktls::project::GradleMode::Static };
     opts.progress = Some(std::sync::Arc::new(|m: &str| eprintln!("  .. {m}")));
     let show_deps = args.iter().any(|a| a == "--deps");
 
     let start = std::time::Instant::now();
-    for (root, bs) in kotlin_lsp::project::discover(&[dir]) {
-        let p = kotlin_lsp::project::load(&root, bs, &opts);
+    for (root, bs) in ktls::project::discover(&[dir]) {
+        let p = ktls::project::load(&root, bs, &opts);
         println!("project {} ({:?}, {:?}) in {:?}", p.root.display(), p.build_system, p.source, start.elapsed());
         for prob in &p.problems {
             println!("  ! {prob}");
@@ -27,8 +27,8 @@ fn main() {
                 m.complete,
                 m.kotlin,
                 m.dependencies.len(),
-                m.classpath(kotlin_lsp::project::SourceKind::Main).len(),
-                m.classpath(kotlin_lsp::project::SourceKind::Test).len()
+                m.classpath(ktls::project::SourceKind::Main).len(),
+                m.classpath(ktls::project::SourceKind::Test).len()
             );
             for r in &m.source_roots {
                 println!("    src {:?} {} {}", r.kind, r.source_set, r.path.display());

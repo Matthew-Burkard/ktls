@@ -216,7 +216,7 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
             pull,
             init.capabilities.text_document.as_ref().and_then(|t| t.rename.as_ref()).and_then(|r| r.prepare_support).unwrap_or(false),
         ),
-        server_info: Some(ServerInfo { name: "kotlin-lsp-rust".into(), version: Some(env!("CARGO_PKG_VERSION").into()) }),
+        server_info: Some(ServerInfo { name: "ktls".into(), version: Some(env!("CARGO_PKG_VERSION").into()) }),
     };
     let mut result = serde_json::to_value(result)?;
     // Not modelled by lsp-types' ServerCapabilities.
@@ -283,7 +283,7 @@ impl Server {
 
     fn request<R: lsp_types::request::Request>(&mut self, params: R::Params, purpose: Outgoing) {
         self.next_id += 1;
-        let id = RequestId::from(format!("kotlin-lsp-{}", self.next_id));
+        let id = RequestId::from(format!("ktls-{}", self.next_id));
         self.outgoing.insert(id.clone(), purpose);
         self.send(Request::new(id, R::METHOD.to_string(), params));
     }

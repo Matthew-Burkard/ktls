@@ -226,7 +226,7 @@ pub fn load(root: &Path, opts: &LoadOptions) -> anyhow::Result<Project> {
     let gradle = gradle_command(root)?;
     let work = opts.cache_dir.join("gradle-import");
     std::fs::create_dir_all(&work)?;
-    let script = work.join("kotlin-lsp-init.gradle");
+    let script = work.join("ktls-init.gradle");
     std::fs::write(&script, INIT_SCRIPT)?;
     let out_file = work.join(format!("model-{}.json", crate::util::short_hash(&root.display().to_string())));
     let _ = std::fs::remove_file(&out_file);
