@@ -398,10 +398,10 @@ fn unused_declaration(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     if n.kind() == SyntaxKind::PROPERTY && ast::PropertyDecl::cast(n.clone()).unwrap().is_destructuring() {
         return;
     }
-    let scope = if local { n.parent().unwrap() } else { cx.root.clone() };
+    let scope = if local { n.parent().unwrap() } else { private_scope(cx, n) };
     let after = if local { n.text_range().end() } else { TextSize::from(0) };
     // Recursive uses inside the declaration itself do not count.
-    let used = idents(&scope).any(|t| t.text_range().start() >= after && !n.text_range().contains_range(t.text_range()) && ast::ident_text(&t) == name);
+    let used = idents(&scope).any(|t| t.text_range().start() >= after && !n.text_range().contains_range(t.text_range()) && ast::ident_text(&t) == name && !is_declared_name(&t));
     if used || named_in_annotation(&cx.root, &name) {
         return;
     }
@@ -416,6 +416,23 @@ fn unused_declaration(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     };
     let fix = Fix::delete(format!("Remove '{name}'"), deletion_range(cx.text, n.text_range()));
     out.report(&UNUSED_SYMBOL, name_tok.text_range(), format!("{what} '{name}' is never used"), Some(fix));
+}
+
+/// Where a private declaration can be used: the file for top-level ones, otherwise the
+/// top-level declaration around it (companions and outer classes see nested private members
+/// only in some cases; the whole top-level declaration covers all of them).
+fn private_scope(cx: &Cx, n: &SyntaxNode) -> SyntaxNode {
+    n.ancestors().skip(1).find(|a| a.parent().is_some_and(|p| p.kind() == SyntaxKind::KOTLIN_FILE)).unwrap_or_else(|| cx.root.clone())
+}
+
+/// The name of a declaration (another class's property, a parameter), not a use.
+fn is_declared_name(t: &SyntaxToken) -> bool {
+    t.parent().is_some_and(|p| {
+        matches!(
+            p.kind(),
+            SyntaxKind::PROPERTY | SyntaxKind::FUN | SyntaxKind::VALUE_PARAMETER | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::TYPEALIAS
+        ) && name_token(&p).as_ref() == Some(t)
+    })
 }
 
 /// Frameworks refer to members by name in annotation arguments
@@ -446,7 +463,7 @@ fn unused_constructor_property(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
     }
     let Some(tok) = vp.name_token() else { return };
     let name = ast::ident_text(&tok);
-    if idents(&cx.root).any(|t| t != tok && ast::ident_text(&t) == name) || named_in_annotation(&cx.root, &name) {
+    if idents(&private_scope(cx, &class)).any(|t| t != tok && ast::ident_text(&t) == name && !is_declared_name(&t)) || named_in_annotation(&cx.root, &name) {
         return;
     }
     out.report(&UNUSED_SYMBOL, tok.text_range(), format!("Private property '{name}' is never used"), None);
