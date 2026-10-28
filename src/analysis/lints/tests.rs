@@ -261,6 +261,29 @@ class Rice(private val id: Int, private val used: Int) {
     has(&found, "UnusedSymbol: logger");
     assert_eq!(found.iter().filter(|f| f.starts_with("UnusedSymbol")).count(), 3, "{found:#?}");
 
+    // Only annotations of frameworks that use members by reflection keep them.
+    let found = lint(
+        r#"import org.springframework.stereotype.Service
+import kotlinx.serialization.Serializable
+@Service
+class Rice(private val unusedDep: Int) {
+    private val warnMe: String = ""
+    @Value("x") private val injected: String = ""
+}
+@Serializable
+class Dto(private val wire: Int) {
+    private val field: String = ""
+}
+class Reflected {
+    private fun byName() {}
+    fun f() = Reflected::class.java.getDeclaredMethod("byName")
+}
+"#,
+    );
+    has(&found, "UnusedSymbol: unusedDep");
+    has(&found, "UnusedSymbol: warnMe");
+    assert_eq!(found.iter().filter(|f| f.starts_with("UnusedSymbol")).count(), 2, "{found:#?}");
+
     assert_eq!(fixed("package a\n\nimport kotlin.math.max\nfun f() = 1\n", "UnusedImport"), "package a\n\nfun f() = 1\n");
     assert_eq!(fixed("fun f() {\n    val x = 1\n    println()\n}\n", "UNUSED_VARIABLE"), "fun f() {\n    println()\n}\n");
     assert_eq!(fixed("fun f() {\n    val x = compute()\n}\nfun compute() = 1\n", "UNUSED_VARIABLE"), "fun f() {\n    compute()\n}\nfun compute() = 1\n");

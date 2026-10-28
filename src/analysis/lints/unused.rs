@@ -391,8 +391,7 @@ fn unused_declaration(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     if SERIALIZATION_NAMES.contains(&name.as_str()) || name == "main" || name == "_" {
         return;
     }
-    // Members of annotated classes may be used by frameworks (serialization, DI, ORM).
-    if n.ancestors().skip(1).any(|a| matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION) && has_annotations(&a)) {
+    if n.ancestors().skip(1).any(|a| matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION) && reflective(&a)) {
         return;
     }
     if n.kind() == SyntaxKind::PROPERTY && ast::PropertyDecl::cast(n.clone()).unwrap().is_destructuring() {
@@ -404,7 +403,7 @@ fn unused_declaration(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     let used = idents(&scope).any(|t| {
         t.text_range().start() >= after && !n.text_range().contains_range(t.text_range()) && ast::ident_text(&t) == name && !is_declared_name(&t) && !refers_elsewhere(cx, &t, name_tok.text_range(), true)
     });
-    if used || named_in_annotation(&cx.root, &name) {
+    if used || named_in_string(&cx.root, &name) {
         return;
     }
     let what = match n.kind() {
@@ -418,6 +417,25 @@ fn unused_declaration(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     };
     let fix = Fix::delete(format!("Remove '{name}'"), deletion_range(cx.text, n.text_range()));
     out.report(&UNUSED_SYMBOL, name_tok.text_range(), format!("{what} '{name}' is never used"), Some(fix));
+}
+
+/// Class annotations of frameworks that read or write members by reflection (serialization,
+/// ORM, configuration binding). Others (`@Service`, `@Component`) leave private members unused.
+const REFLECTIVE_ANNOTATIONS: &[&str] = &[
+    "Serializable", "Entity", "Embeddable", "MappedSuperclass", "Table", "Document", "Node", "RelationshipProperties", "RedisHash",
+    "JsonAutoDetect", "JsonClass", "JsonSerializable", "XmlRootElement", "XmlAccessorType", "XmlType", "Root", "Parcelize",
+    "ConfigurationProperties", "DynamoDbBean", "DynamoDBTable", "Keep",
+];
+
+/// Whether the members of `class` may be used by a framework through reflection.
+fn reflective(class: &SyntaxNode) -> bool {
+    modifiers(class).is_some_and(|l| {
+        l.annotations().any(|a| {
+            let name = a.type_ref().map(|t| t.syntax().text().to_string()).unwrap_or_default();
+            let name = name.split('<').next().unwrap_or_default();
+            REFLECTIVE_ANNOTATIONS.contains(&name.rsplit('.').next().unwrap_or_default())
+        })
+    })
 }
 
 /// Where a private declaration can be used: the file for top-level ones, otherwise the
@@ -461,13 +479,12 @@ fn refers_elsewhere(cx: &Cx, t: &SyntaxToken, decl: TextRange, named_args: bool)
         })
 }
 
-/// Frameworks refer to members by name in annotation arguments
-/// (`@MethodSource("cases")`, `@EnabledIf("available")`, `@EnabledIf("Class#method")`).
-fn named_in_annotation(root: &SyntaxNode, name: &str) -> bool {
+/// Members named in strings are used by reflection (`getDeclaredMethod("name")`) or by
+/// frameworks through annotation arguments (`@MethodSource("cases")`, `@EnabledIf("Class#method")`).
+fn named_in_string(root: &SyntaxNode, name: &str) -> bool {
     tokens(root).any(|t| {
         t.kind() == SyntaxKind::STRING_TEXT
-            && t.text().rsplit(['#', '.']).next() == Some(name)
-            && t.parent_ancestors().any(|a| a.kind() == SyntaxKind::ANNOTATION)
+            && (t.text() == name || t.text().rsplit(['#', '.']).next() == Some(name) && t.parent_ancestors().any(|a| a.kind() == SyntaxKind::ANNOTATION))
     })
 }
 
@@ -484,13 +501,13 @@ fn unused_constructor_property(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
     if !p.ancestors().any(|a| a.kind() == SyntaxKind::PRIMARY_CONSTRUCTOR) {
         return;
     }
-    if has_annotations(&class) || ["data", "value", "inline", "expect", "actual", "annotation"].iter().any(|m| has_modifier(&class, m)) {
+    if reflective(&class) || ["data", "value", "inline", "expect", "actual", "annotation"].iter().any(|m| has_modifier(&class, m)) {
         return;
     }
     let Some(tok) = vp.name_token() else { return };
     let name = ast::ident_text(&tok);
     let used = idents(&private_scope(cx, &class)).any(|t| t != tok && ast::ident_text(&t) == name && !is_declared_name(&t) && !refers_elsewhere(cx, &t, tok.text_range(), false));
-    if used || named_in_annotation(&cx.root, &name) {
+    if used || named_in_string(&cx.root, &name) {
         return;
     }
     out.report(&UNUSED_SYMBOL, tok.text_range(), format!("Private property '{name}' is never used"), None);
