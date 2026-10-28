@@ -63,6 +63,9 @@ pub struct Server {
     tasks_rx: Receiver<Task>,
     host: AnalysisHost,
     docs: HashMap<PathBuf, OpenDoc>,
+    /// Open documents whose file was moved or deleted on disk (`git mv`) and not edited since:
+    /// left out of the analysis so they do not redeclare what the new file declares.
+    detached: HashSet<PathBuf>,
     config: Config,
     encoding: Encoding,
     caps: ClientCapabilities,
@@ -242,6 +245,7 @@ pub fn run(connection: Connection) -> anyhow::Result<()> {
             host
         },
         docs: HashMap::new(),
+        detached: HashSet::new(),
         config,
         encoding,
         caps: init.capabilities,
@@ -722,6 +726,7 @@ impl Server {
                 let Ok(p) = serde_json::from_value::<lsp_types::DidOpenTextDocumentParams>(n.params) else { return };
                 let Some(path) = uri_to_path(&p.text_document.uri) else { return };
                 self.docs.insert(path.clone(), OpenDoc { version: p.text_document.version, text: p.text_document.text.clone() });
+                self.detached.remove(&path);
                 self.host.set_file(path.clone(), p.text_document.text.into(), Some(p.text_document.version));
                 self.state_changed();
                 self.schedule_diagnostics(&path, Duration::ZERO);
@@ -732,6 +737,7 @@ impl Server {
                 let Some(doc) = self.docs.get_mut(&path) else { return };
                 line_index::apply_changes(&mut doc.text, p.content_changes, self.encoding);
                 doc.version = p.text_document.version;
+                self.detached.remove(&path);
                 let text: Arc<str> = doc.text.as_str().into();
                 self.host.set_file(path.clone(), text, Some(p.text_document.version));
                 self.state_changed();
@@ -747,6 +753,7 @@ impl Server {
                 let Ok(p) = serde_json::from_value::<lsp_types::DidCloseTextDocumentParams>(n.params) else { return };
                 let Some(path) = uri_to_path(&p.text_document.uri) else { return };
                 self.docs.remove(&path);
+                self.detached.remove(&path);
                 // Fall back to the on-disk contents.
                 match std::fs::read_to_string(&path) {
                     Ok(text) => self.host.set_file(path.clone(), text.into(), None),
@@ -852,7 +859,22 @@ impl Server {
                 self.reload_due = Some(Instant::now() + Duration::from_millis(1500));
                 continue;
             }
-            if self.docs.contains_key(&path) || crate::analysis::Language::of(&path).is_none() {
+            if crate::analysis::Language::of(&path).is_none() {
+                continue;
+            }
+            // Open documents keep their editor contents, unless their file is gone.
+            if let Some(doc) = self.docs.get(&path) {
+                if !path.exists() && self.detached.insert(path.clone()) {
+                    self.host.remove_file(&path);
+                    self.diagnostics_due.remove(&path);
+                    if !self.pull_diagnostics() {
+                        self.publish(&path, None, Vec::new());
+                    }
+                    sources_changed = true;
+                } else if path.exists() && self.detached.remove(&path) {
+                    self.host.set_file(path.clone(), doc.text.as_str().into(), Some(doc.version));
+                    sources_changed = true;
+                }
                 continue;
             }
             if self.loading {
@@ -1023,7 +1045,7 @@ impl Server {
     }
 
     fn schedule_diagnostics(&mut self, path: &Path, delay: Duration) {
-        if self.pull_diagnostics() || !self.config.diagnostics.enabled {
+        if self.pull_diagnostics() || !self.config.diagnostics.enabled || self.detached.contains(path) {
             return;
         }
         let due = Instant::now() + delay;

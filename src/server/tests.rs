@@ -321,6 +321,19 @@ fn external_changes_and_cross_file_refresh() {
     refreshed(&mut c);
     assert_eq!(errors(&mut c, &app), vec!["Unresolved reference 'lib'."]);
 
+    // An open file moved on disk (`git mv`) while its buffer stays open: no redeclaration.
+    let moved = project.join("src/main/kotlin/demo/Moved.kt");
+    let moved_text = "package demo\n\nclass Moved\n";
+    write(&moved, moved_text);
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": path_to_uri(&moved).as_str(), "languageId": "kotlin", "version": 1, "text": moved_text } }));
+    refreshed(&mut c);
+    let target = project.join("src/main/kotlin/demo/Moved2.kt");
+    std::fs::rename(&moved, &target).unwrap();
+    refreshed(&mut c);
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": path_to_uri(&target).as_str(), "languageId": "kotlin", "version": 1, "text": moved_text } }));
+    assert!(errors(&mut c, &target).is_empty());
+    assert!(errors(&mut c, &moved).is_empty());
+
     // A deleted file.
     std::fs::remove_file(project.join("src/main/kotlin/demo/Helper.kt")).unwrap();
     refreshed(&mut c);
