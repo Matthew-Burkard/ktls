@@ -238,6 +238,29 @@ fun shared(x: Int) = x
     has(&found, "UnusedSymbol: usedInCompanion");
     assert_eq!(found.iter().filter(|f| f.starts_with("UnusedSymbol")).count(), 4, "{found:#?}");
 
+    // The name used for something else in the same class: another object's member, a named
+    // argument, a local.
+    let found = lint(
+        r#"data class Person(val name: String, val id: Int)
+fun make(name: String) = name
+class Rice(private val id: Int, private val used: Int) {
+    private val name: String = ""
+    private val logger = "x"
+    private val kept = 1
+    private val viaThis = 2
+    fun f(p: Person) = p.name + p.id
+    fun g() = make(name = "a")
+    fun h() { val logger = 3; println(logger) }
+    fun k() = kept + this.viaThis
+    init { println(used) }
+}
+"#,
+    );
+    has(&found, "UnusedSymbol: id");
+    has(&found, "UnusedSymbol: name");
+    has(&found, "UnusedSymbol: logger");
+    assert_eq!(found.iter().filter(|f| f.starts_with("UnusedSymbol")).count(), 3, "{found:#?}");
+
     assert_eq!(fixed("package a\n\nimport kotlin.math.max\nfun f() = 1\n", "UnusedImport"), "package a\n\nfun f() = 1\n");
     assert_eq!(fixed("fun f() {\n    val x = 1\n    println()\n}\n", "UNUSED_VARIABLE"), "fun f() {\n    println()\n}\n");
     assert_eq!(fixed("fun f() {\n    val x = compute()\n}\nfun compute() = 1\n", "UNUSED_VARIABLE"), "fun f() {\n    compute()\n}\nfun compute() = 1\n");

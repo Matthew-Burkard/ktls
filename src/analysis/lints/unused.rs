@@ -401,7 +401,9 @@ fn unused_declaration(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     let scope = if local { n.parent().unwrap() } else { private_scope(cx, n) };
     let after = if local { n.text_range().end() } else { TextSize::from(0) };
     // Recursive uses inside the declaration itself do not count.
-    let used = idents(&scope).any(|t| t.text_range().start() >= after && !n.text_range().contains_range(t.text_range()) && ast::ident_text(&t) == name && !is_declared_name(&t));
+    let used = idents(&scope).any(|t| {
+        t.text_range().start() >= after && !n.text_range().contains_range(t.text_range()) && ast::ident_text(&t) == name && !is_declared_name(&t) && !refers_elsewhere(cx, &t, name_tok.text_range(), true)
+    });
     if used || named_in_annotation(&cx.root, &name) {
         return;
     }
@@ -435,6 +437,30 @@ fn is_declared_name(t: &SyntaxToken) -> bool {
     })
 }
 
+/// An occurrence of a declaration's name that is certainly something else: a named argument
+/// (`f(name = 1)`, unless it may name the constructor parameter `decl` itself) or a reference
+/// that is not a call and resolves only to other declarations (`other.name`, a local `name`).
+fn refers_elsewhere(cx: &Cx, t: &SyntaxToken, decl: TextRange, named_args: bool) -> bool {
+    let Some(p) = t.parent() else { return false };
+    if p.kind() == SyntaxKind::VALUE_ARGUMENT_NAME {
+        return named_args;
+    }
+    // Calls may pick another overload (or a property of the same name) than the compiler.
+    if p.kind() != SyntaxKind::NAME_REF || p.parent().is_some_and(|c| c.kind() == SyntaxKind::CALL_EXPR && c.first_child().as_ref() == Some(&p)) {
+        return false;
+    }
+    let Some(e) = cx.engine() else { return false };
+    let defs = e.resolve_name_ref(&p);
+    !defs.is_empty()
+        && defs.iter().all(|d| match d {
+            crate::analysis::ide::infer::Def::Symbol { sym, .. } => {
+                !matches!(&sym.origin, crate::symbols::Origin::Source { file, name_range, .. } if file.as_path() == cx.path && *name_range == decl)
+            }
+            crate::analysis::ide::infer::Def::Local(l) => l.name_range != decl,
+            crate::analysis::ide::infer::Def::Package(_) => true,
+        })
+}
+
 /// Frameworks refer to members by name in annotation arguments
 /// (`@MethodSource("cases")`, `@EnabledIf("available")`, `@EnabledIf("Class#method")`).
 fn named_in_annotation(root: &SyntaxNode, name: &str) -> bool {
@@ -463,7 +489,8 @@ fn unused_constructor_property(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
     }
     let Some(tok) = vp.name_token() else { return };
     let name = ast::ident_text(&tok);
-    if idents(&private_scope(cx, &class)).any(|t| t != tok && ast::ident_text(&t) == name && !is_declared_name(&t)) || named_in_annotation(&cx.root, &name) {
+    let used = idents(&private_scope(cx, &class)).any(|t| t != tok && ast::ident_text(&t) == name && !is_declared_name(&t) && !refers_elsewhere(cx, &t, tok.text_range(), false));
+    if used || named_in_annotation(&cx.root, &name) {
         return;
     }
     out.report(&UNUSED_SYMBOL, tok.text_range(), format!("Private property '{name}' is never used"), None);
