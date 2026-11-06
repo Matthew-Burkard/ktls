@@ -163,6 +163,7 @@ pub fn load(root: &Path, opts: &LoadOptions) -> Project {
         });
     }
 
+    problems.extend(loader.repo.access_problems());
     Project {
         root: root.to_path_buf(),
         build_system: BuildSystem::Maven,

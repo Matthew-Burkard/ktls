@@ -280,7 +280,7 @@ src/
     maven.rs   reactor, effective POMs (pom.rs: parents, profiles, interpolation, BOM imports)
     resolver.rs transitive resolution: Maven nearest-wins + scope mediation, Gradle highest-wins,
                Gradle Module Metadata variants/available-at/constraints, exclusions, ranges
-    repo.rs    ~/.m2, Gradle cache, file: repos, downloads (mirrors from settings.xml)
+    repo.rs    ~/.m2, Gradle cache, file: repos, downloads (mirrors, server credentials)
   classpath/   class file reader, generic signatures, JDK jimage reader, Kotlin metadata
                protobuf decoding (+ .kotlin_builtins), lazy per-class/per-package index
   analysis/    file summaries (Kotlin + Java), source index, name resolution, diagnostics,
@@ -295,6 +295,13 @@ src/
 * **Dependencies without running the build.** Build scripts are interpreted statically and
   dependencies are resolved natively against Maven repositories, so opening a project never
   executes its code. With `allowBuildToolExecution`, Gradle itself reports the exact classpaths.
+* **Private repositories.** Credentials come from what the build already uses: Gradle
+  `credentials { username = …; password = … }` blocks (values from `gradle.properties`,
+  `ORG_GRADLE_PROJECT_*` or environment variables), `credentials(PasswordCredentials::class)` /
+  `credentials(HttpHeaderCredentials::class)` with the repository `name` convention, and Maven
+  `<server>` entries in `~/.m2/settings.xml` (matched by repository or mirror id; `${env.X}` works,
+  encrypted passwords don't). Credentials are only sent to their repository's host and are never
+  written to the model cache.
 * **Laziness.** Indexing a classpath only reads zip directories and jimage tables; class files are
   decoded on first use. Identical classpaths are shared between modules.
 * **No false alarms.** Semantic diagnostics run only for modules whose dependencies resolved

@@ -182,6 +182,7 @@ impl LoadOptions {
             gradle_user_home: None,
             offline: true,
             mirrors: Vec::new(),
+            servers: Default::default(),
             negative_ttl: std::time::Duration::from_secs(60),
         });
         o

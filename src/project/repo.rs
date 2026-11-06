@@ -13,11 +13,60 @@ use serde::{Deserialize, Serialize};
 
 use super::coords::{Coordinate, ModuleId, Version};
 
+/// How to authenticate to a repository.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum Credentials {
+    /// HTTP basic authentication (Gradle `PasswordCredentials`, Maven `<server>` username/password).
+    Basic { username: String, password: String },
+    /// An arbitrary header (Gradle `HttpHeaderCredentials`, Maven `<httpHeaders>`), e.g. a bearer token.
+    Header { name: String, value: String },
+}
+
+impl Credentials {
+    /// The request header carrying these credentials.
+    fn header(&self) -> (String, String) {
+        match self {
+            Credentials::Basic { username, password } => ("Authorization".into(), format!("Basic {}", base64(format!("{username}:{password}").as_bytes()))),
+            Credentials::Header { name, value } => (name.clone(), value.clone()),
+        }
+    }
+}
+
+/// Never print secrets (models and repositories are logged).
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Credentials::Basic { username, .. } => write!(f, "Basic({username}, ***)"),
+            Credentials::Header { name, .. } => write!(f, "Header({name}: ***)"),
+        }
+    }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8) | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Repository {
     pub id: String,
     /// Base URL, always ending in `/`. `file:` URLs are supported.
     pub url: String,
+    /// Credentials declared with the repository (Gradle `credentials { }`). Never written to
+    /// the model cache; Maven `<server>` credentials are looked up by `id` at request time.
+    #[serde(skip)]
+    pub credentials: Option<Credentials>,
 }
 
 impl Repository {
@@ -26,7 +75,12 @@ impl Repository {
         if !url.ends_with('/') {
             url.push('/');
         }
-        Repository { id: id.into(), url }
+        Repository { id: id.into(), url, credentials: None }
+    }
+
+    pub fn with_credentials(mut self, credentials: Option<Credentials>) -> Self {
+        self.credentials = credentials;
+        self
     }
 
     pub fn maven_central() -> Self {
@@ -56,10 +110,19 @@ pub struct RepoConfig {
     pub maven_local: Option<PathBuf>,
     pub gradle_user_home: Option<PathBuf>,
     pub offline: bool,
-    /// `mirrorOf` → URL from `~/.m2/settings.xml`.
-    pub mirrors: Vec<(String, String)>,
+    /// Mirrors from `~/.m2/settings.xml`.
+    pub mirrors: Vec<Mirror>,
+    /// Maven `<server>` credentials by repository / mirror id.
+    pub servers: HashMap<String, Credentials>,
     /// How long a failed remote lookup is remembered.
     pub negative_ttl: Duration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mirror {
+    pub id: String,
+    pub mirror_of: String,
+    pub url: String,
 }
 
 impl RepoConfig {
@@ -67,34 +130,75 @@ impl RepoConfig {
         let home = dirs::home_dir();
         let m2 = home.as_ref().map(|h| h.join(".m2"));
         let settings = m2.as_ref().map(|m| m.join("settings.xml")).and_then(|p| std::fs::read_to_string(p).ok());
-        let (mut maven_local, mirrors) = settings.as_deref().map(parse_maven_settings).unwrap_or_default();
-        if maven_local.is_none() {
-            maven_local = m2.map(|m| m.join("repository"));
-        }
+        let MavenSettings { local_repository, mirrors, servers } = settings.as_deref().map(parse_maven_settings).unwrap_or_default();
+        let maven_local = local_repository.or_else(|| m2.map(|m| m.join("repository")));
         let gradle_user_home = std::env::var_os("GRADLE_USER_HOME")
             .map(PathBuf::from)
             .or_else(|| home.map(|h| h.join(".gradle")));
-        RepoConfig { cache_dir, maven_local, gradle_user_home, offline, mirrors, negative_ttl: Duration::from_secs(6 * 3600) }
+        RepoConfig { cache_dir, maven_local, gradle_user_home, offline, mirrors, servers, negative_ttl: Duration::from_secs(6 * 3600) }
     }
 }
 
-/// Extract `<localRepository>` and `<mirrors>` from a Maven settings.xml.
-fn parse_maven_settings(xml: &str) -> (Option<PathBuf>, Vec<(String, String)>) {
-    let tree = super::xml::parse(xml);
-    let Some(root) = tree else { return (None, Vec::new()) };
-    let local = root.child_text("localRepository").map(|s| {
-        let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
-        PathBuf::from(s.replace("${user.home}", &home))
-    });
+#[derive(Default)]
+struct MavenSettings {
+    local_repository: Option<PathBuf>,
+    mirrors: Vec<Mirror>,
+    servers: HashMap<String, Credentials>,
+}
+
+/// Extract `<localRepository>`, `<mirrors>` and `<servers>` from a Maven settings.xml.
+fn parse_maven_settings(xml: &str) -> MavenSettings {
+    let Some(root) = super::xml::parse(xml) else { return MavenSettings::default() };
+    let home = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
+    // `${user.home}` and `${env.NAME}`, the interpolations commonly used for secrets.
+    let interpolate = |s: &str| -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(start) = rest.find("${") {
+            out.push_str(&rest[..start]);
+            let Some(len) = rest[start..].find('}') else { break };
+            let key = &rest[start + 2..start + len];
+            match key.strip_prefix("env.") {
+                Some(var) => out.push_str(&std::env::var(var).unwrap_or_default()),
+                None if key == "user.home" => out.push_str(&home),
+                None => out.push_str(&rest[start..start + len + 1]),
+            }
+            rest = &rest[start + len + 1..];
+        }
+        out.push_str(rest);
+        out.trim().to_string()
+    };
+    let local_repository = root.child_text("localRepository").map(|s| PathBuf::from(interpolate(s)));
     let mirrors = root
         .child("mirrors")
         .map(|m| {
             m.children_named("mirror")
-                .filter_map(|m| Some((m.child_text("mirrorOf")?.to_string(), m.child_text("url")?.to_string())))
+                .filter_map(|m| {
+                    let mirror_of = m.child_text("mirrorOf")?.to_string();
+                    let url = m.child_text("url")?.to_string();
+                    Some(Mirror { id: m.child_text("id").unwrap_or(&mirror_of).to_string(), mirror_of, url })
+                })
                 .collect()
         })
         .unwrap_or_default();
-    (local, mirrors)
+    let mut servers = HashMap::new();
+    for s in root.child("servers").into_iter().flat_map(|s| s.children_named("server")) {
+        let Some(id) = s.child_text("id") else { continue };
+        let header = s.path(&["configuration", "httpHeaders"]).and_then(|h| {
+            h.children_named("property").find_map(|p| Some((interpolate(p.child_text("name")?), interpolate(p.child_text("value")?))))
+        });
+        let credentials = match (s.child_text("username").map(interpolate), s.child_text("password").map(interpolate), header) {
+            (_, Some(password), _) if password.starts_with('{') && password.ends_with('}') => {
+                log::warn!("settings.xml server {id}: encrypted passwords are not supported");
+                continue;
+            }
+            (Some(username), Some(password), _) => Credentials::Basic { username, password },
+            (_, _, Some((name, value))) => Credentials::Header { name, value },
+            _ => continue,
+        };
+        servers.insert(id.to_string(), credentials);
+    }
+    MavenSettings { local_repository, mirrors, servers }
 }
 
 pub type ProgressFn = Arc<dyn Fn(&str) + Send + Sync>;
@@ -108,6 +212,16 @@ pub struct RepoSystem {
     versions_memo: Mutex<HashMap<(ModuleId, Vec<Repository>), Vec<String>>>,
     downloads: AtomicUsize,
     progress: Option<ProgressFn>,
+    /// Repositories that refused a request (401/403): id → (status, credentials were sent).
+    denied: Mutex<std::collections::BTreeMap<String, (u16, bool)>>,
+}
+
+/// Outcome of a remote request.
+enum Fetch {
+    Downloaded,
+    NotFound,
+    /// 401/403: an authentication problem, not proof the file doesn't exist.
+    Denied(u16),
 }
 
 impl RepoSystem {
@@ -127,6 +241,7 @@ impl RepoSystem {
             versions_memo: Mutex::new(HashMap::new()),
             downloads: AtomicUsize::new(0),
             progress,
+            denied: Mutex::new(Default::default()),
         }
     }
 
@@ -134,20 +249,48 @@ impl RepoSystem {
         self.downloads.load(Ordering::Relaxed)
     }
 
-    fn effective_url(&self, repo: &Repository) -> String {
-        for (mirror_of, url) in &self.config.mirrors {
-            let applies = mirror_of == "*"
-                || mirror_of.split(',').any(|m| m.trim() == repo.id)
-                || (mirror_of.starts_with("external:") && !repo.url.contains("localhost") && !repo.url.starts_with("file:"));
+    /// Repositories that refused access, as user-facing problems.
+    pub fn access_problems(&self) -> Vec<String> {
+        self.denied
+            .lock()
+            .iter()
+            .map(|(id, (status, sent))| {
+                if *sent {
+                    format!("Repository {id} rejected the configured credentials (HTTP {status})")
+                } else {
+                    format!("Repository {id} requires authentication (HTTP {status}): add credentials to the build script, gradle.properties or ~/.m2/settings.xml")
+                }
+            })
+            .collect()
+    }
+
+    /// The URL to request for `repo` (applying mirrors) and the credentials to send.
+    fn endpoint<'a>(&'a self, repo: &'a Repository) -> (String, Option<&'a Credentials>) {
+        for m in &self.config.mirrors {
+            let applies = m.mirror_of == "*"
+                || m.mirror_of.split(',').any(|id| id.trim() == repo.id)
+                || (m.mirror_of.starts_with("external:") && !repo.url.contains("localhost") && !repo.url.starts_with("file:"));
             if applies {
-                let mut u = url.clone();
+                let mut u = m.url.clone();
                 if !u.ends_with('/') {
                     u.push('/');
                 }
-                return u;
+                return (u, self.config.servers.get(&m.id));
             }
         }
-        repo.url.clone()
+        (repo.url.clone(), repo.credentials.as_ref().or_else(|| self.config.servers.get(&repo.id)))
+    }
+
+    /// Download `rel` from `repo` into `dest`, remembering authentication failures.
+    fn fetch(&self, repo: &Repository, rel: &str, dest: &Path) -> anyhow::Result<Fetch> {
+        let (base, credentials) = self.endpoint(repo);
+        let url = format!("{base}{rel}");
+        let result = self.download(&url, dest, credentials);
+        if let Ok(Fetch::Denied(status)) = result {
+            log::warn!("{url}: HTTP {status} ({})", if credentials.is_some() { "credentials rejected" } else { "no credentials configured" });
+            self.denied.lock().insert(repo.id.clone(), (status, credentials.is_some()));
+        }
+        result
     }
 
     /// Locate (downloading if necessary) a file of `coord`.
@@ -229,20 +372,20 @@ impl RepoSystem {
                 return None;
             }
         }
-        let mut transport_error = false;
+        let mut uncertain = false;
         for repo in repos.iter().filter(|r| r.local_dir().is_none()) {
-            let url = format!("{}{}", self.effective_url(repo), rel);
-            match self.download(&url, &cached) {
-                Ok(true) => return Some(cached),
-                Ok(false) => continue,
+            match self.fetch(repo, rel, &cached) {
+                Ok(Fetch::Downloaded) => return Some(cached),
+                Ok(Fetch::NotFound) => continue,
+                Ok(Fetch::Denied(_)) => uncertain = true,
                 Err(e) => {
-                    log::warn!("download failed {url}: {e}");
-                    transport_error = true;
+                    log::warn!("download failed {}{rel}: {e}", repo.url);
+                    uncertain = true;
                 }
             }
         }
-        // Only remember definite misses (404s), never network failures.
-        if transport_error {
+        // Only remember definite misses (404s), never network or authentication failures.
+        if uncertain {
             return None;
         }
         if let Some(parent) = marker.parent() {
@@ -252,11 +395,12 @@ impl RepoSystem {
         None
     }
 
-    /// Ok(false) for "not found", Err for transport problems.
-    fn download(&self, url: &str, dest: &Path) -> anyhow::Result<bool> {
-        let resp = match self.agent.get(url).call() {
+    /// Err for transport problems.
+    fn download(&self, url: &str, dest: &Path, credentials: Option<&Credentials>) -> anyhow::Result<Fetch> {
+        let resp = match self.get(url, credentials) {
             Ok(r) => r,
-            Err(ureq::Error::StatusCode(404 | 403 | 410)) => return Ok(false),
+            Err(ureq::Error::StatusCode(404 | 410)) => return Ok(Fetch::NotFound),
+            Err(ureq::Error::StatusCode(s @ (401 | 403))) => return Ok(Fetch::Denied(s)),
             Err(e) => return Err(e.into()),
         };
         if let Some(p) = &self.progress {
@@ -283,7 +427,30 @@ impl RepoSystem {
         }
         std::fs::rename(&tmp, dest)?;
         self.downloads.fetch_add(1, Ordering::Relaxed);
-        Ok(true)
+        Ok(Fetch::Downloaded)
+    }
+
+    /// GET `url`. With credentials, redirects are followed here so the credential header (which
+    /// may be a custom one, unlike `Authorization` that ureq guards) is only sent to the original
+    /// host: Artifactory and Nexus commonly redirect downloads to blob storage elsewhere.
+    fn get(&self, url: &str, credentials: Option<&Credentials>) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+        let Some(c) = credentials else { return self.agent.get(url).call() };
+        let (name, value) = c.header();
+        let origin: ureq::http::Uri = url.parse().map_err(|_| ureq::Error::BadUri(url.to_string()))?;
+        let mut current = origin.clone();
+        for _ in 0..10 {
+            let mut req = self.agent.get(&current).config().max_redirects(0).max_redirects_will_error(false).build();
+            if may_send_credentials(&origin, &current) {
+                req = req.header(&name, &value);
+            }
+            let resp = req.call()?;
+            if !resp.status().is_redirection() {
+                return Ok(resp);
+            }
+            let location = resp.headers().get("location").and_then(|l| l.to_str().ok()).ok_or(ureq::Error::RedirectFailed)?;
+            current = redirect_target(&current, location).ok_or(ureq::Error::RedirectFailed)?;
+        }
+        Err(ureq::Error::TooManyRedirects)
     }
 
     /// Resolve the timestamped file version of a remote SNAPSHOT.
@@ -329,7 +496,7 @@ impl RepoSystem {
             let cached = self.config.cache_dir.join(format!("metadata/{}/{rel}", sanitize(&repo.id)));
             let fresh = cached.is_file() && is_recent(&cached, Duration::from_secs(3600));
             if !self.config.offline && !fresh {
-                let _ = self.download(&format!("{}{}", self.effective_url(repo), rel), &cached);
+                let _ = self.fetch(repo, &rel, &cached);
             }
             let path = cached.is_file().then_some(cached);
             if let Some(xml) = path.and_then(|p| std::fs::read_to_string(p).ok())
@@ -343,6 +510,28 @@ impl RepoSystem {
         self.versions_memo.lock().insert(key, versions.clone());
         versions
     }
+}
+
+/// Credentials go only to the host they were configured for, and never over a downgrade to http.
+fn may_send_credentials(origin: &ureq::http::Uri, target: &ureq::http::Uri) -> bool {
+    origin.host() == target.host() && origin.port_u16() == target.port_u16() && (target.scheme_str() == Some("https") || origin.scheme_str() == target.scheme_str())
+}
+
+/// Resolve a `Location` header (absolute, or relative to the current URL's origin or path).
+fn redirect_target(current: &ureq::http::Uri, location: &str) -> Option<ureq::http::Uri> {
+    if location.contains("://") {
+        return location.parse().ok();
+    }
+    let origin = format!("{}://{}", current.scheme_str()?, current.authority()?);
+    let path = if let Some(rest) = location.strip_prefix("//") {
+        return format!("{}://{rest}", current.scheme_str()?).parse().ok();
+    } else if location.starts_with('/') {
+        location.to_string()
+    } else {
+        let dir = current.path().rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        format!("{dir}/{location}")
+    };
+    format!("{origin}{path}").parse().ok()
 }
 
 fn sanitize(s: &str) -> String {
@@ -369,6 +558,7 @@ mod tests {
                 gradle_user_home: Some(dir.join("gradle")),
                 offline,
                 mirrors: vec![],
+                servers: HashMap::new(),
                 negative_ttl: Duration::from_secs(60),
             },
             None,
@@ -408,10 +598,129 @@ mod tests {
 
     #[test]
     fn settings_xml() {
-        let (local, mirrors) = parse_maven_settings(
+        let s = parse_maven_settings(
             "<settings><localRepository>/opt/m2</localRepository><mirrors><mirror><id>m</id><mirrorOf>*</mirrorOf><url>https://nexus/repo</url></mirror></mirrors></settings>",
         );
-        assert_eq!(local, Some(PathBuf::from("/opt/m2")));
-        assert_eq!(mirrors, vec![("*".to_string(), "https://nexus/repo".to_string())]);
+        assert_eq!(s.local_repository, Some(PathBuf::from("/opt/m2")));
+        assert_eq!(s.mirrors, vec![Mirror { id: "m".into(), mirror_of: "*".into(), url: "https://nexus/repo".into() }]);
+    }
+
+    #[test]
+    fn settings_xml_servers() {
+        // SAFETY: tests touching this variable don't run concurrently with readers of it.
+        unsafe { std::env::set_var("KTLS_TEST_ARTIFACTORY_TOKEN", "s3cret") };
+        let s = parse_maven_settings(
+            "<settings><servers>\
+               <server><id>jfrog</id><username>me</username><password>${env.KTLS_TEST_ARTIFACTORY_TOKEN}</password></server>\
+               <server><id>gitlab</id><configuration><httpHeaders><property><name>Private-Token</name><value>tok</value></property></httpHeaders></configuration></server>\
+               <server><id>enc</id><username>me</username><password>{COQLCE6DU6GtcS5P=}</password></server>\
+             </servers></settings>",
+        );
+        assert_eq!(s.servers.get("jfrog"), Some(&Credentials::Basic { username: "me".into(), password: "s3cret".into() }));
+        assert_eq!(s.servers.get("gitlab"), Some(&Credentials::Header { name: "Private-Token".into(), value: "tok".into() }));
+        assert!(!s.servers.contains_key("enc"));
+    }
+
+    #[test]
+    fn credentials_for_mirrors_and_repositories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut sys = system(tmp.path(), true);
+        let basic = Credentials::Basic { username: "u".into(), password: "p".into() };
+        sys.config.servers.insert("private".into(), basic.clone());
+        // By repository id (Maven <repository><id>).
+        let r = Repository::new("private", "https://example.jfrog.io/artifactory/libs");
+        assert_eq!(sys.endpoint(&r), ("https://example.jfrog.io/artifactory/libs/".to_string(), Some(&basic)));
+        // Declared with the repository (Gradle credentials { }).
+        let own = Credentials::Header { name: "Authorization".into(), value: "Bearer t".into() };
+        let g = Repository::new("https://x/", "https://x/").with_credentials(Some(own.clone()));
+        assert_eq!(sys.endpoint(&g).1, Some(&own));
+        // A mirror uses its own server entry.
+        sys.config.mirrors.push(Mirror { id: "private".into(), mirror_of: "central".into(), url: "https://example.jfrog.io/central".into() });
+        assert_eq!(sys.endpoint(&Repository::maven_central()), ("https://example.jfrog.io/central/".to_string(), Some(&basic)));
+        assert_eq!(format!("{basic:?}"), "Basic(u, ***)");
+    }
+
+    #[test]
+    fn credentials_stay_on_their_host() {
+        let u = |s: &str| s.parse::<ureq::http::Uri>().unwrap();
+        let origin = u("https://example.jfrog.io/artifactory/libs/a.jar");
+        assert!(may_send_credentials(&origin, &u("https://example.jfrog.io/artifactory/api/x")));
+        assert!(!may_send_credentials(&origin, &u("https://bucket.s3.amazonaws.com/a.jar?sig=1")));
+        assert!(!may_send_credentials(&origin, &u("http://example.jfrog.io/a.jar")));
+        assert!(!may_send_credentials(&origin, &u("https://example.jfrog.io:8443/a.jar")));
+        assert_eq!(redirect_target(&origin, "/b/c.jar"), Some(u("https://example.jfrog.io/b/c.jar")));
+        assert_eq!(redirect_target(&origin, "c.jar"), Some(u("https://example.jfrog.io/artifactory/libs/c.jar")));
+        assert_eq!(redirect_target(&origin, "https://cdn.example.com/x"), Some(u("https://cdn.example.com/x")));
+        assert_eq!(redirect_target(&origin, "//cdn.example.com/x"), Some(u("https://cdn.example.com/x")));
+    }
+
+    /// A tiny HTTP server: `handler(request head) -> response`; returns its base URL and the
+    /// request heads it saw.
+    fn serve(handler: impl Fn(&str) -> String + Send + 'static) -> (String, Arc<Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                while reader.read_line(&mut head).is_ok_and(|n| n > 2) {}
+                log.lock().push(head.clone());
+                let _ = (&stream).write_all(handler(&head).as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}/"), seen)
+    }
+
+    fn respond(status: &str, extra: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n{body}", body.len())
+    }
+
+    #[test]
+    fn downloads_with_credentials() {
+        // Another host (by name) that must never see the credentials.
+        let (blob, blob_seen) = serve(|_| respond("200 OK", "", "blob"));
+        let blob = blob.replace("127.0.0.1", "localhost");
+        let (base, _) = serve(move |head| {
+            let authorized = head.lines().any(|l| l.eq_ignore_ascii_case("authorization: Basic dTpw"));
+            match head.split_whitespace().nth(1).unwrap_or("") {
+                _ if !authorized => respond("401 Unauthorized", "WWW-Authenticate: Basic\r\n", ""),
+                "/g/a/1/a-1.jar" => respond("200 OK", "", "jar"),
+                "/g/b/1/b-1.jar" => respond("302 Found", "Location: /real/b-1.jar\r\n", ""),
+                "/real/b-1.jar" => respond("200 OK", "", "b"),
+                "/g/c/1/c-1.jar" => respond("302 Found", &format!("Location: {blob}c-1.jar\r\n"), ""),
+                _ => respond("404 Not Found", "", ""),
+            }
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let read = |p: Option<PathBuf>| p.map(|p| std::fs::read_to_string(p).unwrap());
+
+        // Without credentials: denied, reported, and not remembered as missing.
+        let anonymous = system(tmp.path(), false);
+        let repo = Repository::new("private", &base);
+        assert_eq!(anonymous.artifact(&Coordinate::new("g", "a", "1"), None, "jar", std::slice::from_ref(&repo)), None);
+        assert!(!tmp.path().join("cache/g/a/1/a-1.jar.missing").exists());
+        assert_eq!(anonymous.access_problems().len(), 1);
+        assert!(anonymous.access_problems()[0].contains("requires authentication"), "{:?}", anonymous.access_problems());
+
+        let mut sys = system(tmp.path(), false);
+        sys.config.servers.insert("private".into(), Credentials::Basic { username: "u".into(), password: "p".into() });
+        let repos = [repo];
+        assert_eq!(read(sys.artifact(&Coordinate::new("g", "a", "1"), None, "jar", &repos)), Some("jar".into()));
+        assert_eq!(read(sys.artifact(&Coordinate::new("g", "b", "1"), None, "jar", &repos)), Some("b".into()));
+        assert_eq!(read(sys.artifact(&Coordinate::new("g", "c", "1"), None, "jar", &repos)), Some("blob".into()));
+        assert!(blob_seen.lock().iter().all(|h| !h.to_ascii_lowercase().contains("authorization")), "{:?}", blob_seen.lock());
+        assert!(sys.access_problems().is_empty());
+    }
+
+    #[test]
+    fn basic_auth_header() {
+        let c = Credentials::Basic { username: "Aladdin".into(), password: "open sesame".into() };
+        assert_eq!(c.header().1, "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
+        assert_eq!(base64(b"a"), "YQ==");
+        assert_eq!(base64(b"ab"), "YWI=");
+        assert_eq!(base64(b""), "");
     }
 }

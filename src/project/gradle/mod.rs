@@ -554,6 +554,7 @@ pub fn load_static(root: &Path, opts: &LoadOptions) -> Project {
 
     build_files.sort();
     build_files.dedup();
+    problems.extend(loader.repo.access_problems());
     Project {
         root: root.to_path_buf(),
         build_system: BuildSystem::Gradle,

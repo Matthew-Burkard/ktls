@@ -728,6 +728,7 @@ mod tests {
             gradle_user_home: None,
             offline: true,
             mirrors: vec![],
+            servers: Default::default(),
             negative_ttl: std::time::Duration::from_secs(1),
         };
         let loader = Arc::new(PomLoader::new(Arc::new(RepoSystem::new(config, None)), vec![]));

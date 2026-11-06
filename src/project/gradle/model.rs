@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use super::catalog::{self, Catalog};
 use super::dsl::{self, Arg, Expr, Stmt, StrPart};
 use crate::project::coords::{Coordinate, ModuleId};
-use crate::project::repo::Repository;
+use crate::project::repo::{Credentials, Repository};
 
 // ----------------------------------------------------------------- settings
 
@@ -372,6 +372,10 @@ impl Evaluator {
         if let Some(v) = self.vars.get(key) {
             return Some(v.clone());
         }
+        // Gradle project properties from the environment (CI secrets).
+        if let Ok(v) = std::env::var(format!("ORG_GRADLE_PROJECT_{key}")) {
+            return Some(v);
+        }
         // catalog versions: libs.versions.kotlin(.get())
         let key = key.strip_suffix(".get").unwrap_or(key);
         if let Some((cat, rest)) = key.split_once('.')
@@ -424,9 +428,13 @@ impl Evaluator {
                 }
             }
             Expr::Call { target, args, .. } => {
-                let name = target.path().unwrap_or_default();
+                // The method name, also when the receiver is a call (`gradleProperty("x").get()`).
+                let name = match &**target {
+                    Expr::Member(_, n) => n.clone(),
+                    t => t.path().unwrap_or_default(),
+                };
                 let first = || args.first().and_then(|a| self.string(&a.value));
-                match name.rsplit('.').next().unwrap_or("") {
+                match name.as_str() {
                     "get" | "getOrNull" | "orNull" => {
                         // providers.gradleProperty("x").get(), libs.versions.x.get(), extra.get("x")
                         if let Expr::Member(inner, _) = &**target
@@ -543,22 +551,23 @@ pub fn repositories(ev: &Evaluator, stmts: &[Stmt]) -> Vec<Repository> {
             }
             "maven" | "ivy" if name == "maven" => {
                 let mut url = args.iter().find(|a| a.name.is_none() || a.name.as_deref() == Some("url")).and_then(|a| ev.string(&a.value));
+                let mut repo_name = None;
+                let mut credentials = None;
                 if let Some(body) = closure {
                     for s in body {
-                        match s {
-                            Stmt::Assign { target, value, .. } if target.path().as_deref() == Some("url") => url = ev.string(value),
-                            Stmt::Expr(Expr::Call { target, args, .. })
-                                if matches!(target.path().as_deref(), Some("url") | Some("setUrl")) =>
-                            {
-                                url = args.first().and_then(|a| ev.string(&a.value));
-                            }
+                        let Some((key, value)) = setting(s) else { continue };
+                        match key.as_str() {
+                            "url" | "setUrl" => url = value.and_then(|v| ev.string(v)),
+                            "name" | "setName" => repo_name = value.and_then(|v| ev.string(v)),
+                            "credentials" => credentials = Some(s),
                             _ => {}
                         }
                     }
                 }
                 if let Some(u) = url {
                     let u = if u.starts_with("http") || u.starts_with("file:") { u } else { format!("file://{}", ev.file(&Expr::Str(vec![StrPart::Lit(u)])).unwrap().display()) };
-                    out.push(Repository::new(u.clone(), &u));
+                    let credentials = credentials.and_then(|c| repository_credentials(ev, c, repo_name.as_deref()));
+                    out.push(Repository::new(u.clone(), &u).with_credentials(credentials));
                 }
             }
             "exclusiveContent" | "forRepository" | "forRepositories" => {
@@ -575,6 +584,46 @@ pub fn repositories(ev: &Evaluator, stmts: &[Stmt]) -> Vec<Repository> {
         }
     }
     out
+}
+
+/// `key = value`, `key(value)`, `key value` (Groovy) and `key { }` inside a configuration block.
+fn setting(s: &Stmt) -> Option<(String, Option<&Expr>)> {
+    match s {
+        Stmt::Assign { target, value, .. } => Some((target.path()?, Some(value))),
+        Stmt::Expr(Expr::Call { target, args, .. }) => Some((target.path()?, args.first().map(|a| &a.value))),
+        _ => None,
+    }
+}
+
+/// Credentials of a `maven { }` repository, from a `credentials { }` block or Gradle's
+/// convention for `credentials(PasswordCredentials::class)` / `credentials(HttpHeaderCredentials::class)`:
+/// the `<name>Username`/`<name>Password` (`<name>AuthHeaderName`/`<name>AuthHeaderValue`) properties.
+fn repository_credentials(ev: &Evaluator, stmt: &Stmt, repo_name: Option<&str>) -> Option<Credentials> {
+    let Stmt::Expr(Expr::Call { args, closure, .. }) = stmt else { return None };
+    let kind = args.first().and_then(|a| a.value.path()).unwrap_or_default();
+    let header = kind.starts_with("HttpHeaderCredentials");
+    let mut fields: HashMap<String, String> = HashMap::new();
+    for s in closure.iter().flatten() {
+        if let Some((key, Some(value))) = setting(s)
+            && let Some(v) = ev.string(value) {
+                fields.insert(key.trim_start_matches("set").to_ascii_lowercase(), v);
+            }
+    }
+    if let Some(n) = repo_name.filter(|_| closure.is_none() && !kind.is_empty()) {
+        let prop = |suffix: &str| ev.lookup(&format!("{n}{suffix}"));
+        if header {
+            fields.insert("name".into(), prop("AuthHeaderName")?);
+            fields.insert("value".into(), prop("AuthHeaderValue")?);
+        } else {
+            fields.insert("username".into(), prop("Username")?);
+            fields.insert("password".into(), prop("Password")?);
+        }
+    }
+    if header {
+        Some(Credentials::Header { name: fields.remove("name")?, value: fields.remove("value")? })
+    } else {
+        Some(Credentials::Basic { username: fields.remove("username")?, password: fields.remove("password")? })
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -1446,6 +1495,80 @@ project(":libs:core").projectDir = file("core")
         assert_eq!(s.repositories.len(), 2);
         assert_eq!(s.plugin_versions.get("org.jetbrains.kotlin.jvm").map(String::as_str), Some("1.9.20"));
         assert!(s.catalogs.contains_key("libs") && s.catalogs.contains_key("deps"));
+    }
+
+    #[test]
+    fn repository_credentials() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write(d, "gradle.properties", "ktlsTestUser=alice\nktlsTestPass=pw1\nktlsJfrogUsername=bob\nktlsJfrogPassword=pw2\n");
+        write(d, "settings.gradle.kts", r#"
+dependencyResolutionManagement {
+    repositories {
+        maven {
+            url = uri("https://example.jfrog.io/artifactory/a")
+            credentials {
+                username = providers.gradleProperty("ktlsTestUser").get()
+                password = project.findProperty("ktlsTestPass") as String?
+            }
+        }
+        maven {
+            name = "ktlsJfrog"
+            url = uri("https://example.jfrog.io/artifactory/b")
+            credentials(PasswordCredentials::class)
+        }
+        maven {
+            url = uri("https://gitlab.example.com/api/v4/packages/maven")
+            credentials(HttpHeaderCredentials::class) {
+                name = "Private-Token"
+                value = "tok"
+            }
+            authentication { create<HttpHeaderAuthentication>("header") }
+        }
+        maven("https://example.jfrog.io/artifactory/c") {
+            credentials { username = "u"; password = providers.gradleProperty("ktlsUndefined").get() }
+        }
+        mavenCentral()
+    }
+}
+"#);
+        let s = read_settings(d);
+        let creds: Vec<_> = s.repositories.iter().map(|r| r.credentials.clone()).collect();
+        assert_eq!(
+            creds,
+            vec![
+                Some(Credentials::Basic { username: "alice".into(), password: "pw1".into() }),
+                Some(Credentials::Basic { username: "bob".into(), password: "pw2".into() }),
+                Some(Credentials::Header { name: "Private-Token".into(), value: "tok".into() }),
+                None,
+                None,
+            ]
+        );
+        // Secrets never reach the model cache.
+        let json = serde_json::to_string(&s.repositories).unwrap();
+        assert!(!json.contains("pw1") && !json.contains("pw2") && !json.contains("tok\""), "{json}");
+    }
+
+    #[test]
+    fn repository_credentials_groovy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write(d, "gradle.properties", "ktlsGroovyUser=carol\nktlsGroovyPass=pw3\n");
+        write(d, "settings.gradle", r#"
+dependencyResolutionManagement {
+    repositories {
+        maven {
+            url 'https://example.jfrog.io/artifactory/g'
+            credentials {
+                username ktlsGroovyUser
+                password "${ktlsGroovyPass}"
+            }
+        }
+    }
+}
+"#);
+        let s = read_settings(d);
+        assert_eq!(s.repositories[0].credentials, Some(Credentials::Basic { username: "carol".into(), password: "pw3".into() }));
     }
 
     #[test]
