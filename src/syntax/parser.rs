@@ -47,9 +47,23 @@ pub(crate) struct Parser<'t> {
     /// Whether newlines are significant: off inside `(...)`/`[...]`, on again inside
     /// `{...}` bodies (mirrors the Kotlin compiler's newline handling).
     pub(crate) newlines: Vec<bool>,
+    /// Markers started but not yet completed or abandoned: the depth of the node
+    /// under construction.
+    open: u32,
+    /// Links of the left-recursive chains (`a.b.c`, `1 + 2 + 3`) being parsed; each
+    /// link nests the tree one level deeper without leaving a marker open.
+    chain: u32,
 }
 
-const STEP_LIMIT: u32 = 10_000;
+/// Deepest tree the parser builds. Anything nested deeper becomes one ERROR node, so
+/// that the parser and every recursive pass over the tree run in bounded stack space.
+/// Real code stays far below this (deep Compose UIs reach a few hundred).
+pub(crate) const MAX_DEPTH: u32 = 1_500;
+
+/// Lookahead calls without consuming a token before the parser is considered stuck in
+/// a loop. Unwinding a tree [`MAX_DEPTH`] deep at end of input legitimately peeks a
+/// few times per level.
+const STEP_LIMIT: u32 = 10_000 + 16 * MAX_DEPTH;
 
 impl<'t> Parser<'t> {
     pub(crate) fn new(text: &'t str, raw: &[Token]) -> Self {
@@ -71,7 +85,7 @@ impl<'t> Parser<'t> {
             }
             offset += t.len;
         }
-        Parser { tokens, pos: 0, events: Vec::new(), steps: Cell::new(0), no_trailing_lambda: false, newlines: Vec::new() }
+        Parser { tokens, pos: 0, events: Vec::new(), steps: Cell::new(0), no_trailing_lambda: false, newlines: Vec::new(), open: 0, chain: 0 }
     }
 
     pub(crate) fn finish(self) -> Vec<Event> {
@@ -192,10 +206,10 @@ impl<'t> Parser<'t> {
     }
 
     /// Skip tokens until one in `recovery` (or EOF) and wrap them in an ERROR node.
-    pub(crate) fn err_recover_until(&mut self, message: impl Into<String>, stop: impl Fn(&Parser) -> bool) {
+    pub(crate) fn err_recover_until(&mut self, message: impl Into<String>, stop: impl Fn(&Parser) -> bool) -> Option<CompletedMarker> {
         if self.at_eof() || stop(self) {
             self.error(message);
-            return;
+            return None;
         }
         let m = self.start();
         self.error(message);
@@ -222,13 +236,65 @@ impl<'t> Parser<'t> {
             }
             self.bump();
         }
-        m.complete(self, ERROR);
+        Some(m.complete(self, ERROR))
     }
 
     pub(crate) fn start(&mut self) -> Marker {
         let pos = self.events.len() as u32;
         self.events.push(Event::Tombstone);
+        self.open += 1;
         Marker { pos, completed: false }
+    }
+
+    /// The tree is as deep as [`MAX_DEPTH`] allows: callers about to nest further
+    /// should [`skip_too_deep`](Self::skip_too_deep) instead.
+    pub(crate) fn too_deep(&self) -> bool {
+        self.open + self.chain >= MAX_DEPTH
+    }
+
+    /// Wrap the current token (a whole bracketed group if it opens one) in a single
+    /// ERROR node, without descending into it.
+    pub(crate) fn skip_too_deep(&mut self) -> Option<CompletedMarker> {
+        const MESSAGE: &str = "Code is nested too deeply to be analysed";
+        if self.at_eof() {
+            self.error(MESSAGE);
+            return None;
+        }
+        let m = self.start();
+        self.error(MESSAGE);
+        let mut depth = 0u32;
+        loop {
+            match self.current() {
+                L_CURLY | L_PAREN | L_BRACK => depth += 1,
+                R_CURLY | R_PAREN | R_BRACK => depth = depth.saturating_sub(1),
+                EOF => break,
+                _ => {}
+            }
+            self.bump();
+            if depth == 0 {
+                break;
+            }
+        }
+        Some(m.complete(self, ERROR))
+    }
+
+    /// Note one more link of a left-recursive chain (see [`Parser::chain`]).
+    pub(crate) fn enter_link(&mut self) {
+        self.chain += 1;
+    }
+
+    /// The chain whose links were noted with [`enter_link`](Self::enter_link) ended.
+    pub(crate) fn leave_links(&mut self, links: u32) {
+        self.chain -= links;
+    }
+
+    /// Stop extending a chain that reached [`MAX_DEPTH`]: the rest of the expression
+    /// (up to the end of the statement or enclosing bracket) becomes one ERROR node.
+    pub(crate) fn skip_rest_of_chain(&mut self) {
+        let continues = |p: &Parser| matches!(p.current(), DOT | QUESTION | ELVIS | COLON2 | AMP2 | PIPE2);
+        self.err_recover_until("Expression is nested too deeply to be analysed", |p| {
+            p.at(SEMI) || (p.nl_before() && !continues(p))
+        });
     }
 }
 
@@ -244,12 +310,14 @@ impl Marker {
             ev @ Event::Tombstone => *ev = Event::Start { kind, forward_parent: None },
             _ => unreachable!(),
         }
+        p.open -= 1;
         p.events.push(Event::Finish);
         CompletedMarker { pos: self.pos }
     }
 
     pub(crate) fn abandon(mut self, p: &mut Parser) {
         self.completed = true;
+        p.open -= 1;
         let idx = self.pos as usize;
         if idx == p.events.len() - 1 {
             p.events.pop();

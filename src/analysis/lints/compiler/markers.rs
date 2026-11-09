@@ -96,7 +96,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     }
     let state = RefCell::new(Markers { engines: HashMap::new(), levels: HashMap::new(), decls: HashMap::new() });
     for n in cx.root.descendants() {
-        if !matches!(n.kind(), SyntaxKind::NAME_REF | SyntaxKind::USER_TYPE) || in_error(&n) {
+        if !matches!(n.kind(), SyntaxKind::NAME_REF | SyntaxKind::USER_TYPE) || cx.in_error(&n) {
             continue;
         }
         if n.ancestors().any(|a| matches!(a.kind(), SyntaxKind::IMPORT_DIRECTIVE | SyntaxKind::PACKAGE_DIRECTIVE | SyntaxKind::ANNOTATION | SyntaxKind::FILE_ANNOTATION_LIST)) {

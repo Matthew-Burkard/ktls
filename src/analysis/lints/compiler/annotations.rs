@@ -9,7 +9,7 @@ use crate::symbols::Origin;
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
     for a in cx.root.descendants().filter(|n| n.kind() == SyntaxKind::ANNOTATION) {
-        if !in_error(&a) {
+        if !cx.in_error(&a) {
             annotation(cx, e, &a, out);
         }
     }

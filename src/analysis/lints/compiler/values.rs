@@ -12,7 +12,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     // Kotlin 2 rejects what Kotlin 1 deprecated.
     let k2 = cx.language_version().is_none_or(|v| v >= 200);
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {

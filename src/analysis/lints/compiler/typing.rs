@@ -12,7 +12,7 @@ use crate::symbols::{Origin, SymbolKind, TypeArg, TypeRef};
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {

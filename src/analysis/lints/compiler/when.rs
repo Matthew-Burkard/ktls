@@ -11,13 +11,13 @@ use crate::symbols::{Modifiers, Symbol, SymbolKind, TypeRef, short_class_name};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     for n in cx.root.descendants().filter(|n| n.kind() == SyntaxKind::WHEN_EXPR) {
-        if !in_error(&n) {
+        if !cx.in_error(&n) {
             branches(cx, &n, out);
         }
     }
     let Some(e) = cx.engine() else { return };
     for n in cx.root.descendants().filter(|n| n.kind() == SyntaxKind::WHEN_EXPR) {
-        if !in_error(&n) {
+        if !cx.in_error(&n) {
             when_expr(cx, e, &n, out);
         }
     }

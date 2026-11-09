@@ -10,7 +10,7 @@ use crate::symbols::{Modifiers, Origin, Symbol, SymbolKind, TypeRef};
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
     for n in cx.root.descendants().filter(|n| matches!(n.kind(), SyntaxKind::BINARY_EXPR | SyntaxKind::PREFIX_EXPR | SyntaxKind::POSTFIX_EXPR)) {
-        if in_error(&n) || super::certain::in_unknown_lambda(e, &n) {
+        if cx.in_error(&n) || super::certain::in_unknown_lambda(e, &n) {
             continue;
         }
         if n.kind() == SyntaxKind::BINARY_EXPR {

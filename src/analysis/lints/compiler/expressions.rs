@@ -15,9 +15,9 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let star_class_import = cx.snap.file(cx.path).is_some_and(|f| {
         f.summary().imports.iter().any(|i| i.star && e.res.find_classifier(&i.path()).is_some())
     });
-    let mut st = State { complete_classes: HashMap::new(), star_class_import, file_names: None, scope_names: None };
+    let mut st = State { complete_classes: HashMap::new(), casting_scopes: HashMap::new(), star_class_import, file_names: None, scope_names: None };
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {
@@ -60,6 +60,8 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
 struct State {
     /// Class-like node → its supertypes all resolve (members are fully known).
     complete_classes: HashMap<TextRange, bool>,
+    /// Top-level declaration → it contains `is`/`as` (see `smart_cast_possible`).
+    casting_scopes: HashMap<TextRange, bool>,
     star_class_import: bool,
     /// Names declared in this file (computed on first use).
     file_names: Option<HashSet<String>>,
@@ -140,11 +142,14 @@ fn in_context_scope(at: &SyntaxNode) -> bool {
 }
 
 /// `is` checks and casts in the enclosing declaration may smart-cast receivers.
-fn smart_cast_possible(at: &SyntaxNode) -> bool {
+fn smart_cast_possible(at: &SyntaxNode, st: &mut State) -> bool {
     let Some(scope) = at.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::CLASS_INITIALIZER | SyntaxKind::SECONDARY_CONSTRUCTOR) && !is_local(a)) else {
         return true;
     };
-    tokens(&scope).any(|t| matches!(t.kind(), SyntaxKind::IS_KW | SyntaxKind::NOT_IS_KW | SyntaxKind::AS_KW | SyntaxKind::AS_SAFE_KW))
+    // Cached: scanning the whole declaration again for every reference in it is quadratic.
+    *st.casting_scopes
+        .entry(scope.text_range())
+        .or_insert_with(|| tokens(&scope).any(|t| matches!(t.kind(), SyntaxKind::IS_KW | SyntaxKind::NOT_IS_KW | SyntaxKind::AS_KW | SyntaxKind::AS_SAFE_KW)))
 }
 
 /// All enclosing classes have fully known hierarchies (otherwise inherited names are unknown).
@@ -208,7 +213,7 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
     }
     if member {
         let Some(recv) = outer.first_child() else { return };
-        if smart_cast_possible(nr) || st.exists(cx, e, &name) {
+        if smart_cast_possible(nr, st) || st.exists(cx, e, &name) {
             return;
         }
         // `x.f()` with a local `f` of function type with receiver (`it` of `T.() -> R`).
@@ -241,7 +246,7 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
     if callable_ref && outer.first_child().as_ref() != Some(nr) {
         return;
     }
-    if st.star_class_import || st.exists(cx, e, &name) || !receivers_known(e, nr, st) || e.res.package_exists(&name) || smart_cast_possible(nr) {
+    if st.star_class_import || st.exists(cx, e, &name) || !receivers_known(e, nr, st) || e.res.package_exists(&name) || smart_cast_possible(nr, st) {
         return;
     }
     // Code generators (kapt, KSP) add declarations that are not in the sources yet.

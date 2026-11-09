@@ -201,13 +201,34 @@ pub fn server_capabilities(encoding: Encoding, pull_diagnostics: bool, prepare_r
     }
 }
 
+/// Stack size of every thread that walks syntax trees (the main loop, the project
+/// loader and the rayon workers). The parser caps trees at `MAX_DEPTH` levels, and
+/// every analysis of a tree that deep fits into 16 MiB; the memory is only committed
+/// as it is touched.
+const STACK_SIZE: usize = 64 << 20;
+
 /// Run the server over `connection` until `exit`.
 pub fn run(connection: Connection) -> anyhow::Result<()> {
+    // Fails if the global pool already exists (another server in this process).
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(STACK_SIZE)
+        .thread_name(|i| format!("ktls-worker-{i}"))
+        .build_global();
+    std::thread::scope(|s| {
+        let main = std::thread::Builder::new().name("ktls-main".into()).stack_size(STACK_SIZE).spawn_scoped(s, || serve(connection))?;
+        main.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the server's main loop panicked")))
+    })
+}
+
+fn serve(connection: Connection) -> anyhow::Result<()> {
     let (id, params) = connection.initialize_start()?;
     // The specification (and Neovim) name it `workspace.diagnostics`; lsp-types reads
     // `workspace.diagnostic`.
     let diagnostic_refresh = ["diagnostics", "diagnostic"].iter().any(|k| params["capabilities"]["workspace"][k]["refreshSupport"].as_bool() == Some(true));
     let init: InitializeParams = serde_json::from_value(params).context("invalid initialize params")?;
+    if let Some(pid) = init.process_id {
+        watch_parent(pid);
+    }
     let encoding = match init.capabilities.general.as_ref().and_then(|g| g.position_encodings.as_ref()) {
         Some(encs) if encs.contains(&PositionEncodingKind::UTF8) => Encoding::Utf8,
         _ => Encoding::Utf16,
@@ -311,24 +332,47 @@ impl Server {
                 recv(receiver) -> msg => {
                     let Ok(msg) = msg else { return Ok(()) };
                     match msg {
-                        Message::Request(req) => self.on_request(req),
+                        Message::Request(req) => {
+                            let (id, method) = (req.id.clone(), req.method.clone());
+                            // Requests that panic before reaching a worker still get an answer.
+                            if !self.guarded(&method, |s| s.on_request(req)) && !self.in_flight.contains_key(&id) {
+                                self.send(Response::new_err(id, ErrorCode::InternalError as i32, format!("internal error handling {method}")));
+                            }
+                        }
                         Message::Notification(n) => {
                             if n.method == lsp_types::notification::Exit::METHOD {
                                 return Ok(());
                             }
-                            self.on_notification(n);
+                            let method = n.method.clone();
+                            self.guarded(&method, |s| s.on_notification(n));
                         }
-                        Message::Response(resp) => self.on_response(resp),
+                        Message::Response(resp) => {
+                            self.guarded("a client response", |s| s.on_response(resp));
+                        }
                     }
                 }
                 recv(self.tasks_rx) -> task => {
                     if let Ok(task) = task {
-                        self.on_task(task);
+                        self.guarded("a background result", |s| s.on_task(task));
                     }
                 }
                 default(timeout) => {}
             }
-            self.run_due();
+            self.guarded("scheduled work", Self::run_due);
+        }
+    }
+
+    /// Run `f`, surviving a panic in it: the server keeps going with whatever state `f`
+    /// left behind (a later edit or reload rebuilds it) instead of exiting and taking
+    /// every open editor's features with it. Returns whether `f` completed.
+    fn guarded(&mut self, what: &str, f: impl FnOnce(&mut Self)) -> bool {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))) {
+            Ok(()) => true,
+            Err(panic) => {
+                log::error!("internal error handling {what}: {}", panic_message(&*panic));
+                self.show_once(MessageType::ERROR, "Kotlin: the language server hit an internal error and recovered; results may be incomplete until the file changes. Details are in the server log.".into());
+                false
+            }
         }
     }
 
@@ -654,7 +698,7 @@ impl Server {
                 Ok(Err(RequestError::Cancelled)) => Response::new_err(id, ErrorCode::RequestCanceled as i32, "cancelled".into()),
                 Ok(Err(RequestError::Failed(msg))) => Response::new_err(id, ErrorCode::RequestFailed as i32, msg),
                 Err(panic) => {
-                    let msg = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                    let msg = panic_message(&*panic);
                     log::error!("request handler panicked: {msg}");
                     Response::new_err(id, ErrorCode::InternalError as i32, format!("internal error: {msg}"))
                 }
@@ -726,9 +770,15 @@ impl Server {
                 let Ok(p) = serde_json::from_value::<lsp_types::DidOpenTextDocumentParams>(n.params) else { return };
                 let Some(path) = uri_to_path(&p.text_document.uri) else { return };
                 self.docs.insert(path.clone(), OpenDoc { version: p.text_document.version, text: p.text_document.text.clone() });
+                // Contents the analysis has not seen (a new file, unsaved changes, a file
+                // moved back in) may change what the other open files see.
+                let unseen = self.host.file(&path).is_none_or(|f| *f.text != *p.text_document.text);
                 self.detached.remove(&path);
                 self.host.set_file(path.clone(), p.text_document.text.into(), Some(p.text_document.version));
                 self.state_changed();
+                if unseen {
+                    self.schedule_open_files(Duration::from_millis(self.config.diagnostics.debounce_ms));
+                }
                 self.schedule_diagnostics(&path, Duration::ZERO);
             }
             DidChangeTextDocument::METHOD => {
@@ -964,6 +1014,7 @@ impl Server {
         let tx = self.tasks_tx.clone();
         std::thread::Builder::new()
             .name("project-loader".into())
+            .stack_size(STACK_SIZE)
             .spawn(move || {
                 let tx2 = tx.clone();
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loader::load(folders, config, generation, force, tx)));
@@ -1123,7 +1174,7 @@ impl Server {
                         let _ = tx.send(Task::Diagnostics { path, version: Some(version), diagnostics, coverage });
                     }
                     Ok(Err(Cancelled)) => {}
-                    Err(_) => log::error!("diagnostics panicked for {}", path.display()),
+                    Err(panic) => log::error!("diagnostics panicked for {}: {}", path.display(), panic_message(&*panic)),
                 }
             });
         }
@@ -1140,6 +1191,43 @@ impl Server {
     fn path_of(&self, uri: &Uri) -> Option<PathBuf> {
         uri_to_path(uri)
     }
+}
+
+/// The message a panic was raised with.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "unknown panic".into())
+}
+
+/// Exit once the editor that started the server (`processId` in `initialize`) is gone,
+/// as LSP requires: an editor that crashes or is killed never sends `exit`, and its
+/// stdio pipe can outlive it (held open by other processes it started).
+fn watch_parent(pid: u32) {
+    let spawned = std::thread::Builder::new().name("parent-watch".into()).spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            if !process_alive(pid) {
+                log::warn!("the editor (process {pid}) exited without shutting the server down; exiting");
+                std::process::exit(1);
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("cannot watch the editor process: {e}");
+    }
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return true };
+    // Signal 0 only checks: EPERM still means the process exists.
+    // SAFETY: kill with signal 0 sends nothing and has no memory-safety preconditions.
+    let found = unsafe { libc::kill(pid, 0) } == 0;
+    found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    true
 }
 
 pub fn is_build_file(path: &Path) -> bool {

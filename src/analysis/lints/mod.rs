@@ -584,6 +584,10 @@ pub(crate) struct Cx<'a> {
     /// Types are available (dependencies resolved, standard library present).
     full: bool,
     engine: OnceCell<Option<Engine<'a>>>,
+    /// The file's ERROR nodes, found on first use of [`Cx::in_error`].
+    errors: OnceCell<ErrorRanges>,
+    /// Start offsets of the file's comments, found on first use of [`Cx::has_comments`].
+    comments: OnceCell<Vec<TextSize>>,
 }
 
 impl<'a> Cx<'a> {
@@ -597,6 +601,20 @@ impl<'a> Cx<'a> {
             return None;
         }
         self.engine.get_or_init(|| Engine::new(self.snap, self.path)).as_ref()
+    }
+
+    /// The node is inside, or contains, a syntax error.
+    pub fn in_error(&self, n: &SyntaxNode) -> bool {
+        self.errors.get_or_init(|| ErrorRanges::new(&self.root)).touch(n.text_range())
+    }
+
+    /// The node contains a comment ([`has_comments`] without walking its tokens: lints
+    /// ask this of nested nodes, which made them quadratic in the depth of the tree).
+    pub fn has_comments(&self, n: &SyntaxNode) -> bool {
+        let starts = self.comments.get_or_init(|| tokens(&self.root).filter(|t| is_comment(t.kind())).map(|t| t.text_range().start()).collect());
+        let range = n.text_range();
+        let i = starts.partition_point(|&s| s < range.start());
+        starts.get(i).is_some_and(|&s| s < range.end())
     }
 
     /// The Kotlin language version (`major * 100 + minor`), if known.
@@ -651,6 +669,8 @@ pub fn lint_file(snap: &Snapshot, path: &Path, full: bool) -> Vec<Lint> {
         config: &snap.lints,
         full,
         engine: OnceCell::new(),
+        errors: OnceCell::new(),
+        comments: OnceCell::new(),
     };
     let mut sink = Sink { config: &snap.lints, lints: Vec::new() };
     compiler::check(&cx, &mut sink);
@@ -683,6 +703,8 @@ pub fn unused_imports(snap: &Snapshot, path: &Path, full: bool) -> Vec<TextRange
         config: &config,
         full,
         engine: OnceCell::new(),
+        errors: OnceCell::new(),
+        comments: OnceCell::new(),
     };
     let mut sink = Sink { config: &config, lints: Vec::new() };
     unused::unused_imports(&cx, &mut sink);
@@ -1013,9 +1035,36 @@ pub(crate) fn name_token(n: &SyntaxNode) -> Option<SyntaxToken> {
     ast::token(n, SyntaxKind::IDENT)
 }
 
-/// The node is inside, or contains, a syntax error.
-pub(crate) fn in_error(n: &SyntaxNode) -> bool {
-    n.ancestors().any(|a| a.kind() == SyntaxKind::ERROR) || n.descendants().any(|d| d.kind() == SyntaxKind::ERROR)
+/// The ranges of a file's ERROR nodes, to tell in logarithmic time whether a node is
+/// inside or contains one (walking its ancestors and descendants instead made linting
+/// quadratic in the depth of the tree).
+struct ErrorRanges {
+    /// Sorted by start.
+    ranges: Vec<TextRange>,
+    /// `max_end[i]`: the furthest end among `ranges[..=i]`.
+    max_end: Vec<TextSize>,
+}
+
+impl ErrorRanges {
+    fn new(root: &SyntaxNode) -> ErrorRanges {
+        // Preorder: already sorted by start.
+        let ranges: Vec<TextRange> = root.descendants().filter(|d| d.kind() == SyntaxKind::ERROR).map(|d| d.text_range()).collect();
+        let max_end = ranges.iter().scan(TextSize::from(0), |m, r| {
+            *m = (*m).max(r.end());
+            Some(*m)
+        });
+        ErrorRanges { max_end: max_end.collect(), ranges }
+    }
+
+    /// Some ERROR node contains `range` or lies within it. Nodes of one tree either
+    /// nest or are disjoint, so overlapping is enough.
+    fn touch(&self, range: TextRange) -> bool {
+        let i = self.ranges.partition_point(|r| r.start() < range.start());
+        // One starting inside `range` lies within it (or, starting with it, contains it).
+        let inside = self.ranges.get(i).is_some_and(|r| r.start() < range.end() || r.start() == range.start());
+        // One starting before `range` and reaching past its start contains it.
+        inside || i > 0 && self.max_end[i - 1] > range.start()
+    }
 }
 
 /// Expressions that never need parentheses as an operand.

@@ -18,6 +18,7 @@ Status: `[x]` implemented · `[~]` partially implemented · `[ ]` not started.
 - [x] [P0] Text document sync: `didOpen`, `didChange` (incremental), `didClose`, `didSave`
 - [ ] [P1] `willSave` / `willSaveWaitUntil` (format/organize-imports on save)
 - [x] [P0] Cancellation (`$/cancelRequest`) honored by all long-running requests
+- [x] [P1] Exit when the editor process (`processId`) dies without sending `exit`
 - [x] [P1] Progress reporting (`window/workDoneProgress`, `$/progress`) for indexing/builds
 - [~] [P1] `window/showMessage`, `window/logMessage`, `window/showDocument` — *partial: showMessage + logMessage; showDocument not yet*
 - [x] [P1] `workspace/configuration` + `workspace/didChangeConfiguration`
@@ -528,7 +529,7 @@ Code action kinds: `quickfix`, `refactor`, `refactor.extract`, `refactor.inline`
 ## 11. Non-functional Requirements
 
 - [ ] [P0] Responsiveness: completion < 100 ms p95, diagnostics on keystroke < 300 ms for open files
-- [x] [P0] Never crash on malformed input; isolate panics per request
+- [x] [P0] Never crash on malformed input; isolate panics per request — *code nested deeper than the parser's limit (1,500 tree levels) becomes one syntax error, so recursive analyses fit their (64 MiB) stacks; panics in request handlers, background work and the main loop are logged and survived*
 - [ ] [P1] Bounded memory with LRU eviction of analysis results; lazy library indexing
 - [ ] [P1] Parallel analysis across files/modules; work-stealing scheduler with priority for the active file
 - [ ] [P1] Deterministic results independent of request order (salsa-style incremental queries)

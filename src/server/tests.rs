@@ -504,3 +504,52 @@ fn editing_assists_session() {
     assert_eq!(supers[0]["name"], "Any", "{supers}");
     c.shutdown();
 }
+
+#[test]
+fn survives_deeply_nested_code() {
+    // Deeper than the parser's limit, in every way the grammar nests: the server must
+    // answer (not overflow its stack or time out) and keep serving afterwards.
+    let Some(stdlib) = stdlib() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let (project, options) = maven_fixture(tmp.path(), &stdlib);
+    let mut c = Client::start(&project, options, false);
+    c.wait_for_import();
+    let n = 3_000;
+    let cases = [
+        ("Parens", format!("val x = {}1{}\n", "(".repeat(n), ")".repeat(n))),
+        ("Binary", format!("val x = 1{}\n", " + 1".repeat(n))),
+        ("Calls", format!("val x = 1{}\n", ".let { it }".repeat(n))),
+        ("Lambdas", format!("val x = {}1{}\n", "run { ".repeat(n), " }".repeat(n))),
+        ("Ifs", format!("fun f(a: Boolean) {{\n{}println()\n{}}}\n", "if (a) {\n".repeat(n), "}\n".repeat(n))),
+        ("Classes", format!("{}{}", "class A {\n".repeat(n), "}\n".repeat(n))),
+        ("Types", format!("val x: {}Int{} = TODO()\n", "List<".repeat(n), ">".repeat(n))),
+        ("Templates", format!("val x = {}1{}\n", "\"${".repeat(n), "}\"".repeat(n))),
+        ("Unclosed", format!("fun f() {{\n{}", "(".repeat(n))),
+    ];
+    for (name, text) in cases {
+        let file = project.join(format!("src/main/kotlin/demo/{name}.kt"));
+        write(&file, &text);
+        let uri = path_to_uri(&file).as_str().to_string();
+        c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": text } }));
+        let diags = c.diagnostics_for(&file, 1);
+        assert!(diags.iter().any(|d| d["message"].as_str().is_some_and(|m| m.contains("too deeply"))), "{name}: {:?}", diags.first());
+        let doc = json!({ "uri": uri });
+        let at = json!({ "line": 0, "character": 9 });
+        for (method, params) in [
+            ("textDocument/documentSymbol", json!({ "textDocument": doc })),
+            ("textDocument/foldingRange", json!({ "textDocument": doc })),
+            ("textDocument/semanticTokens/full", json!({ "textDocument": doc })),
+            ("textDocument/hover", json!({ "textDocument": doc, "position": at })),
+            ("textDocument/completion", json!({ "textDocument": doc, "position": at })),
+            ("textDocument/selectionRange", json!({ "textDocument": doc, "positions": [at] })),
+            ("textDocument/inlayHint", json!({ "textDocument": doc, "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 100000, "character": 0 } } })),
+            ("textDocument/codeAction", json!({ "textDocument": doc, "range": { "start": at, "end": at }, "context": { "diagnostics": [] } })),
+        ] {
+            c.request(method, params);
+        }
+        c.notify("textDocument/didClose", json!({ "textDocument": doc }));
+    }
+    let syms = c.request("workspace/symbol", json!({ "query": "User" }));
+    assert!(!syms.as_array().unwrap().is_empty());
+    c.shutdown();
+}

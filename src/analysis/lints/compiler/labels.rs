@@ -6,7 +6,7 @@ use super::super::*;
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     for q in cx.root.descendants().filter(|n| n.kind() == SyntaxKind::LABEL_QUALIFIER) {
-        if !in_error(&q) {
+        if !cx.in_error(&q) {
             qualifier(&q, out);
         }
     }

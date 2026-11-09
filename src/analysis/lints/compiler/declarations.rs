@@ -14,7 +14,7 @@ const PRIMITIVES: &[&str] = &["Int", "Long", "Short", "Byte", "Float", "Double",
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {

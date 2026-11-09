@@ -441,6 +441,11 @@ pub(crate) fn super_type_entry(p: &mut Parser) {
 
 pub(crate) fn class_body(p: &mut Parser, is_enum: bool) {
     let m = p.start();
+    if p.too_deep() {
+        p.skip_too_deep();
+        m.complete(p, CLASS_BODY);
+        return;
+    }
     p.bump(); // {
     p.with_newlines(true, |p| {
         if is_enum {

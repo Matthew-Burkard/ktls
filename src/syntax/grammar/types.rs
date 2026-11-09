@@ -17,9 +17,40 @@ pub(crate) fn user_type_receiver(p: &mut Parser) {
 
 fn type_reference_inner(p: &mut Parser, receiver: bool) {
     let m = p.start();
+    // (Unless at a token that ends the type, which would leave the ERROR node empty.)
+    if p.too_deep() && !p.nl_before() && !matches!(p.current(), R_PAREN | R_BRACK | R_CURLY | L_CURLY | GT | COMMA | EQ | SEMI | EOF) {
+        skip_type_too_deep(p);
+        m.complete(p, TYPE_REFERENCE);
+        return;
+    }
     type_modifiers(p);
     non_null_type(p, receiver);
     m.complete(p, TYPE_REFERENCE);
+}
+
+/// The rest of a type nested deeper than the parser allows, as one ERROR node: up to
+/// the `,` or `>` that ends it in the enclosing type argument list, or the end of the
+/// type at the enclosing level (`)`, `=`, `{`, a newline...).
+fn skip_type_too_deep(p: &mut Parser) {
+    let m = p.start();
+    p.error("Type is nested too deeply to be analysed");
+    let (mut angles, mut brackets) = (0u32, 0u32);
+    loop {
+        match p.current() {
+            EOF => break,
+            L_PAREN | L_BRACK => brackets += 1,
+            R_PAREN | R_BRACK if brackets == 0 => break,
+            R_PAREN | R_BRACK => brackets -= 1,
+            LT => angles += 1,
+            GT | COMMA if angles == 0 && brackets == 0 => break,
+            GT => angles = angles.saturating_sub(1),
+            R_CURLY | L_CURLY | EQ | SEMI if brackets == 0 => break,
+            _ if brackets == 0 && angles == 0 && p.nl_before() => break,
+            _ => {}
+        }
+        p.bump();
+    }
+    m.complete(p, ERROR);
 }
 
 fn type_modifiers(p: &mut Parser) {

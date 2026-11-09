@@ -1,0 +1,6 @@
+[env]
+# The server gives its own threads (and rayon's global pool) 64 MiB stacks so that
+# analyses of the deepest trees the parser builds fit. In the test binary another test
+# can create rayon's global pool first; this gives that pool, and the test threads, the
+# same stack size.
+RUST_MIN_STACK = "67108864"

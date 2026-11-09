@@ -8,7 +8,7 @@ use crate::symbols::{Origin, SymbolKind, TypeArg, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {
@@ -22,7 +22,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     }
     let Some(e) = cx.engine() else { return };
     for n in cx.root.descendants() {
-        if matches!(n.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::SECONDARY_CONSTRUCTOR) && !in_error(&n) {
+        if matches!(n.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::SECONDARY_CONSTRUCTOR) && !cx.in_error(&n) {
             exposure(cx, e, &n, out);
         }
     }

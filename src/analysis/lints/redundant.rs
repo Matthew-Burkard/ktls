@@ -14,7 +14,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
                 _ => {}
             },
             rowan::NodeOrToken::Node(n) => {
-                if in_error(&n) {
+                if cx.in_error(&n) {
                     continue;
                 }
                 match n.kind() {
@@ -136,7 +136,7 @@ fn template_braces(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         SyntaxKind::THIS_EXPR if e.text() == "this" => "this".to_string(),
         _ => return,
     };
-    if has_comments(n) {
+    if cx.has_comments(n) {
         return;
     }
     let next = cx.text[usize::from(n.text_range().end())..].chars().next();
@@ -374,7 +374,7 @@ fn accessor(acc: &SyntaxNode, out: &mut Sink) {
 
 fn init_block(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     let Some(block) = n.children().find(|c| c.kind() == SyntaxKind::BLOCK) else { return };
-    if is_empty_block(&block) && !has_comments(n) {
+    if is_empty_block(&block) && !cx.has_comments(n) {
         out.report(&REDUNDANT_INIT_BLOCK, n.text_range(), "Redundant empty initializer block", Some(Fix::delete("Remove initializer block", deletion_range(cx.text, n.text_range()))));
     }
 }
@@ -448,7 +448,7 @@ fn string_template(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         return;
     }
     let Some(expr) = entry.first_child() else { return };
-    if !cx.on(&REDUNDANT_STRING_TEMPLATE) || has_comments(n) {
+    if !cx.on(&REDUNDANT_STRING_TEMPLATE) || cx.has_comments(n) {
         return;
     }
     let Some(e) = cx.engine() else { return };
@@ -472,7 +472,7 @@ fn call_of_lambda(lambda: &SyntaxNode) -> Option<SyntaxNode> {
 /// `{ -> … }` and `{ it -> … }`: the arrow (and `it`) say nothing the lambda would not.
 fn lambda_arrow(cx: &Cx, lambda: &SyntaxNode, out: &mut Sink) {
     let (Some(list), Some(arrow)) = (lambda.children().find(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST), ast::token(lambda, SyntaxKind::ARROW)) else { return };
-    if !cx.on(&REDUNDANT_LAMBDA_ARROW) || has_comments(&list) {
+    if !cx.on(&REDUNDANT_LAMBDA_ARROW) || cx.has_comments(&list) {
         return;
     }
     let params: Vec<SyntaxNode> = list.children().collect();
@@ -499,7 +499,7 @@ fn lambda_arrow(cx: &Cx, lambda: &SyntaxNode, out: &mut Sink) {
 /// arguments all have exactly that type.
 fn explicit_type_arguments(cx: &Cx, list: &SyntaxNode, out: &mut Sink) {
     let Some(call) = list.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR) else { return };
-    if !cx.on(&REDUNDANT_TYPE_ARGUMENTS) || call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) || has_comments(list) {
+    if !cx.on(&REDUNDANT_TYPE_ARGUMENTS) || call.children().any(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) || cx.has_comments(list) {
         return;
     }
     let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
@@ -568,7 +568,7 @@ const NULLABLE_RECEIVER_CALLS: &[(&str, Option<&str>)] = &[
 fn useless_call_on_not_null(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     let mut parts = n.children();
     let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
-    if call.kind() != SyntaxKind::CALL_EXPR || !cx.on(&USELESS_CALL_ON_NOT_NULL) || has_comments(n) {
+    if call.kind() != SyntaxKind::CALL_EXPR || !cx.on(&USELESS_CALL_ON_NOT_NULL) || cx.has_comments(n) {
         return;
     }
     let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return };
@@ -598,7 +598,7 @@ fn useless_call_on_not_null(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
 /// `val x: Int = 1`, `val u: User = User(…)`: a local's written type that the initializer
 /// states anyway.
 fn explicit_type(cx: &Cx, p: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&REDUNDANT_EXPLICIT_TYPE) || p.parent().is_none_or(|b| b.kind() != SyntaxKind::BLOCK) || has_comments(p) {
+    if !cx.on(&REDUNDANT_EXPLICIT_TYPE) || p.parent().is_none_or(|b| b.kind() != SyntaxKind::BLOCK) || cx.has_comments(p) {
         return;
     }
     let Some(decl) = ast::PropertyDecl::cast(p.clone()) else { return };
@@ -859,7 +859,7 @@ fn companion_reference(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     use crate::analysis::ide::infer::Qualifier;
     let mut parts = n.children();
     let (Some(recv), Some(sel), None) = (parts.next(), parts.next(), parts.next()) else { return };
-    if recv.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || !cx.on(&REDUNDANT_COMPANION_REFERENCE) || has_comments(&recv) {
+    if recv.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || !cx.on(&REDUNDANT_COMPANION_REFERENCE) || cx.has_comments(&recv) {
         return;
     }
     let mut inner = recv.children();
@@ -912,7 +912,7 @@ fn elvis_return_null(cx: &Cx, ret: &SyntaxNode, out: &mut Sink) {
 
 /// `override fun f(a: A) = super.f(a)`.
 fn redundant_override(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&REDUNDANT_OVERRIDE) || !has_modifier(f, "override") || has_comments(f) {
+    if !cx.on(&REDUNDANT_OVERRIDE) || !has_modifier(f, "override") || cx.has_comments(f) {
         return;
     }
     let Some(m) = modifiers(f) else { return };
@@ -1056,7 +1056,7 @@ fn nullable_return_type(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
 
 /// `x.let { it.f() }` → `x.f()`, `x?.let { it.f() }` → `x?.f()`.
 fn redundant_let(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&SIMPLE_REDUNDANT_LET) || has_comments(n) {
+    if !cx.on(&SIMPLE_REDUNDANT_LET) || cx.has_comments(n) {
         return;
     }
     let mut parts = n.children();
@@ -1180,7 +1180,7 @@ fn empty_secondary_body(cx: &Cx, c: &SyntaxNode, out: &mut Sink) {
         return;
     }
     let Some(body) = c.children().find(|x| x.kind() == SyntaxKind::BLOCK) else { return };
-    if body.children().next().is_some() || has_comments(&body) {
+    if body.children().next().is_some() || cx.has_comments(&body) {
         return;
     }
     let start = body.first_token().and_then(|t| prev_significant(&t)).map_or(body.text_range().start(), |t| t.text_range().end());
@@ -1194,7 +1194,7 @@ fn to_string_in_template(cx: &Cx, entry: &SyntaxNode, out: &mut Sink) {
     }
     let mut exprs = entry.children();
     let (Some(e), None) = (exprs.next(), exprs.next()) else { return };
-    if e.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || has_comments(entry) {
+    if e.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || cx.has_comments(entry) {
         return;
     }
     let mut parts = e.children();
@@ -1239,7 +1239,7 @@ fn useless_on_collection(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
 /// `inner class` that uses nothing of its outer instance.
 fn redundant_inner(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
     use crate::analysis::ide::infer::Def;
-    if !cx.on(&REDUNDANT_INNER) || in_error(class) {
+    if !cx.on(&REDUNDANT_INNER) || cx.in_error(class) {
         return;
     }
     let Some(outer) = class.parent().filter(|b| b.kind() == SyntaxKind::CLASS_BODY).and_then(|b| b.parent()) else { return };
@@ -1280,7 +1280,7 @@ fn redundant_inner(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
 
 /// `x.let { f(it) }` → `f(x)` (`it` passed once, nothing else).
 fn complex_let(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&COMPLEX_REDUNDANT_LET) || n.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || has_comments(n) {
+    if !cx.on(&COMPLEX_REDUNDANT_LET) || n.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || cx.has_comments(n) {
         return;
     }
     let mut parts = n.children();
@@ -1382,7 +1382,7 @@ fn sam_constructor(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
 /// `f(*arrayOf(a, b))` → `f(a, b)`.
 fn redundant_spread(cx: &Cx, arg: &SyntaxNode, out: &mut Sink) {
     let Some(star) = ast::token(arg, SyntaxKind::STAR) else { return };
-    if !cx.on(&REDUNDANT_SPREAD) || arg.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME) || has_comments(arg) {
+    if !cx.on(&REDUNDANT_SPREAD) || arg.children().any(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME) || cx.has_comments(arg) {
         return;
     }
     let Some(call) = arg.children().find(|c| c.kind() == SyntaxKind::CALL_EXPR) else { return };
@@ -1427,7 +1427,7 @@ fn conversion_call(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     if call.children().any(|c| matches!(c.kind(), SyntaxKind::TYPE_ARGUMENT_LIST | SyntaxKind::LAMBDA_ARGUMENT))
         || call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST).is_none_or(|l| l.children().next().is_some())
         || recv.kind() == SyntaxKind::SUPER_EXPR
-        || has_comments(n)
+        || cx.has_comments(n)
     {
         return;
     }
@@ -1459,7 +1459,7 @@ fn when_with_only_else(cx: &Cx, w: &SyntaxNode, out: &mut Sink) {
     let plain_subject = subject.as_ref().is_none_or(|s| s.children().next().is_some_and(|c| matches!(c.kind(), SyntaxKind::NAME_REF | SyntaxKind::THIS_EXPR | SyntaxKind::LITERAL)));
     let body = entry.children().find(|c| c.kind() == SyntaxKind::BODY).and_then(|b| b.first_child());
     let fix = match body {
-        Some(b) if plain_subject && !has_comments(w) => {
+        Some(b) if plain_subject && !cx.has_comments(w) => {
             if b.kind() != SyntaxKind::BLOCK {
                 Some(b.text().to_string())
             } else if super::value_unused(w) {

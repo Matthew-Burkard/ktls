@@ -13,7 +13,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         return;
     }
     for n in cx.root.descendants().filter(|n| n.kind() == SyntaxKind::DOT_QUALIFIED_EXPR) {
-        if !in_error(&n) {
+        if !cx.in_error(&n) {
             member_access(cx, e, &n, out);
         }
     }

@@ -11,7 +11,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     // Files with `@file:JvmName` / `@file:JvmMultifileClass` share or rename the facade.
     let file_annotations = cx.root.children().filter(|c| c.kind() == SyntaxKind::FILE_ANNOTATION_LIST).any(|l| l.text().to_string().contains("Jvm"));
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {

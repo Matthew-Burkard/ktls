@@ -8,7 +8,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         return;
     }
     for n in cx.root.descendants() {
-        if matches!(n.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::TYPEALIAS) && !in_error(&n) && is_public_api(&n) {
+        if matches!(n.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::TYPEALIAS) && !cx.in_error(&n) && is_public_api(&n) {
             declaration(cx, &n, out);
         }
     }

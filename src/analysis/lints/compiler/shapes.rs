@@ -8,7 +8,7 @@ use crate::symbols::{Modifiers, Origin, SymbolKind, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {
