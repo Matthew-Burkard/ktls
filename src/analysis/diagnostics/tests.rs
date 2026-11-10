@@ -21,6 +21,11 @@ struct Fixture {
 impl Fixture {
     /// Two modules: `:lib` and `:app` (depends on `:lib`), both with the stdlib.
     fn new() -> Option<Fixture> {
+        Fixture::with_app_jars(vec![])
+    }
+
+    /// Like `new`, with more `jars` on the classpath of `:app`.
+    fn with_app_jars(jars: Vec<PathBuf>) -> Option<Fixture> {
         let stdlib = stdlib()?;
         let jdk = crate::project::jdk::find(None, None)?;
         let tmp = tempfile::tempdir().unwrap();
@@ -48,7 +53,11 @@ impl Fixture {
         let project = Project {
             root: root.clone(),
             build_system: BuildSystem::Gradle,
-            modules: vec![module(":lib", vec![]), module(":app", vec![ModuleDependency { module: ":lib".into(), scope: Scope::Compile }])],
+            modules: vec![module(":lib", vec![]), {
+                let mut app = module(":app", vec![ModuleDependency { module: ":lib".into(), scope: Scope::Compile }]);
+                app.dependencies.extend(jars.iter().map(|f| ResolvedArtifact { file: Some(f.clone()), ..dep.clone() }));
+                app
+            }],
             problems: vec![],
             source: ModelSource::Static,
             build_files: vec![],
@@ -134,6 +143,28 @@ fun main(args: Array<String>) {
         diags,
         vec!["DoesNotExist: UNRESOLVED_REFERENCE", "nonexistent: UNRESOLVED_REFERENCE", "Missing: UNRESOLVED_REFERENCE", "Missing2: UNRESOLVED_REFERENCE", "AlsoMissing: UNRESOLVED_REFERENCE"]
     );
+}
+
+#[test]
+fn unreadable_dependencies_disable_semantic_checks() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A login page saved as a jar: its classes are missing, so imports from it must not be
+    // reported. A missing file (an output not built yet) keeps the module checked.
+    let page = tmp.path().join("repo2-1.0.jar");
+    std::fs::write(&page, "<!DOCTYPE html><html>Sign in</html>").unwrap();
+    let missing = tmp.path().join("not-built.jar");
+    let Some(mut f) = Fixture::with_app_jars(vec![page.clone(), missing]) else { return };
+    let app = f.add("app/src/main/kotlin/a/App.kt", "package a\n\nimport my.company.repo2.Thing\n\nfun f(): Thing? = null\n");
+    let lib = f.add("lib/src/main/kotlin/b/Lib.kt", "package b\n\nimport my.company.nothing.Here\n");
+    let snap = f.host.snapshot();
+    let (diags, coverage) = file_diagnostics(&snap, &app);
+    assert!(diags.is_empty(), "{diags:?}");
+    match coverage {
+        Coverage::SyntaxOnly(why) => assert!(why.contains("cannot be read") && why.contains("repo2-1.0.jar"), "{why}"),
+        Coverage::Full => panic!("expected syntax-only coverage"),
+    }
+    // Other modules are unaffected.
+    assert_eq!(f.diagnostics(&lib), vec!["my: UNRESOLVED_REFERENCE"]);
 }
 
 #[test]

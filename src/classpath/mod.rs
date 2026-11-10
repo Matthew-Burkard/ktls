@@ -117,6 +117,11 @@ fn archive_cache() -> &'static Mutex<HashMap<PathBuf, (Option<SystemTime>, Arc<A
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Whether `path` names a zip-based archive of classes (jar, aar, klib, …).
+pub fn is_archive(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "jar" | "zip" | "aar" | "klib" | "war" | "jmod"))
+}
+
 pub fn open_cached(path: &Path) -> anyhow::Result<Arc<Archive>> {
     let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     if let Some((t, a)) = archive_cache().lock().get(path)
@@ -161,6 +166,9 @@ pub struct ClasspathIndex {
     /// Top-level callable name → packages declaring it (built on first use).
     callable_index: OnceLock<HashMap<String, Vec<Box<str>>>>,
     pub problems: Vec<String>,
+    /// Archives on the classpath that exist but cannot be read (corrupt or not a zip): their
+    /// classes are missing, so names from them would be falsely unresolved.
+    pub unreadable: Vec<String>,
 }
 
 /// A name segment like `Foo$1` or `Foo$lambda$2` is not a source-level class.
@@ -198,11 +206,20 @@ impl ClasspathIndex {
         let opened: Vec<anyhow::Result<Arc<Archive>>> =
             if parallel { paths.par_iter().map(|p| open_cached(p)).collect() } else { paths.iter().map(|p| open_cached(p)).collect() };
         let mut problems = Vec::new();
+        let mut unreadable = Vec::new();
         let mut archives = Vec::new();
         for (p, a) in paths.iter().zip(opened) {
             match a {
                 Ok(a) => archives.push(a),
-                Err(e) => problems.push(format!("cannot open {}: {e}", p.display())),
+                Err(e) => {
+                    let msg = format!("cannot open {}: {e}", p.display());
+                    // Missing entries (an output directory not built yet) stay best-effort.
+                    if p.is_file() && is_archive(p) {
+                        log::warn!("{msg}");
+                        unreadable.push(msg.clone());
+                    }
+                    problems.push(msg);
+                }
             }
         }
         let mut classes: HashMap<Box<str>, (u32, u32)> = HashMap::new();
@@ -233,6 +250,7 @@ impl ClasspathIndex {
             relocated_facades: HashMap::new(),
             callable_index: OnceLock::new(),
             problems,
+            unreadable,
         };
         idx.load_builtins();
         idx.relocated_facades = idx.find_relocated_facades(parallel);

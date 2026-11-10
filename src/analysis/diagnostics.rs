@@ -55,7 +55,10 @@ pub fn coverage(snap: &Snapshot, path: &Path) -> Coverage {
         Coverage::SyntaxOnly("scripts are checked for syntax only".into())
     } else if let Some(c) = ctx.filter(|_| snap.workspace.jdk.is_some() && !snap.workspace.is_complete(ctx)) {
         let m = snap.workspace.module(c.module);
-        Coverage::SyntaxOnly(format!("dependencies of module {} are not fully resolved", m.name))
+        match snap.workspace.classpath(ctx).unreadable.first().filter(|_| m.complete) {
+            Some(why) => Coverage::SyntaxOnly(format!("a dependency of module {} cannot be read ({why}); delete the file and reload the project", m.name)),
+            None => Coverage::SyntaxOnly(format!("dependencies of module {} are not fully resolved", m.name)),
+        }
     } else if ctx.is_none() {
         Coverage::SyntaxOnly("file is not part of any module's source roots".into())
     } else if snap.workspace.jdk.is_none() {
