@@ -13,7 +13,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
     for n in cx.root.descendants() {
         let relevant = matches!(n.kind(), SyntaxKind::BINARY_EXPR | SyntaxKind::VALUE_ARGUMENT | SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::INDEX_EXPR);
-        if !relevant || in_error(&n) || super::certain::in_unknown_lambda(e, &n) {
+        if !relevant || cx.in_error(&n) || super::certain::in_unknown_lambda(e, &n) {
             continue;
         }
         match n.kind() {

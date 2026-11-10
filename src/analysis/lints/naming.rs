@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     package(cx, out);
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {

@@ -178,10 +178,10 @@ impl Workspace {
         });
     }
 
-    /// Whether semantic diagnostics for `ctx` can be trusted (all deps resolved).
+    /// Whether semantic diagnostics for `ctx` can be trusted (all deps resolved and readable).
     pub fn is_complete(&self, ctx: Option<FileContext>) -> bool {
         let Some(c) = ctx else { return false };
-        self.jdk.is_some() && self.module(c.module).complete
+        self.jdk.is_some() && self.module(c.module).complete && self.classpath(ctx).unreadable.is_empty()
     }
 }
 

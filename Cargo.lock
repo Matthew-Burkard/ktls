@@ -310,6 +310,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs",
  "flate2",
+ "libc",
  "log",
  "lsp-server",
  "lsp-types",

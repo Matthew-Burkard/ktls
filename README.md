@@ -312,6 +312,9 @@ src/
 
 * Parser: all 1,272 `.kt` files of the Kotlin stdlib/reflect/test/js/metadata source jars parse
   without errors (~20 MB/s); every prefix of a sample file parses without panics.
+* Pathological input: files nested 3,000 levels deep in each way the grammar nests (brackets,
+  operator and call chains, lambdas, blocks, classes, generic types, string templates) are
+  diagnosed and answered in under 1.5 s each, without exhausting the stack.
 * Dependency resolution matches the real tools exactly: a Spring Boot Maven project
   (73 artifacts) against `mvn dependency:list`, and a Ktor + Multiplatform Gradle project
   (49 artifacts) against Gradle 9.8.1.

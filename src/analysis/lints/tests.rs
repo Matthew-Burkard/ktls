@@ -3833,3 +3833,46 @@ val unit: (Int) -> Unit = ::g
     let found: Vec<String> = compiler(ok).into_iter().filter(|f| !f.starts_with("UNUSED_") && !f.starts_with("ASSIGNED_BUT_NEVER")).collect();
     assert!(found.is_empty(), "{found:#?}");
 }
+
+#[test]
+fn unresolved_names_next_to_casts_and_star_imports() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+import java.lang.Math.*
+import a.Tools.*
+
+object Tools {
+    fun tool() = 1
+}
+
+open class Shape
+class Circle(val radius: Double) : Shape()
+
+fun take(x: Any?) = x
+
+fun casts(o: Any): Int {
+    take(garbage1)
+    val c = o as Circle
+    if (o is Circle) take(garbage2)
+    when (o) { is Shape -> take(garbage3) }
+    return max(1, tool())
+}
+
+fun Shape.ext() {
+    if (this is Circle) take(radius)
+    take(garbage4)
+}
+
+fun Any.whens() = when (this) { is Circle -> radius; else -> 0.0 }
+"#,
+    );
+    assert_eq!(
+        found,
+        vec!["UNRESOLVED_REFERENCE: garbage1", "UNRESOLVED_REFERENCE: garbage2", "UNRESOLVED_REFERENCE: garbage3"],
+        "{found:#?}"
+    );
+}

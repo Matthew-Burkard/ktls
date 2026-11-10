@@ -307,3 +307,61 @@ fn unclosed_parens_report_one_error() {
         assert_eq!(msgs, expected, "{text:?}\n{}", p.debug_tree());
     }
 }
+
+/// Inputs nested `n` levels deep in each way the grammar recurses or chains.
+fn deeply_nested(n: usize) -> Vec<(&'static str, String)> {
+    vec![
+        ("parens", format!("val x = {}1{}\n", "(".repeat(n), ")".repeat(n))),
+        ("prefix", format!("val x = {}1\n", "-".repeat(n))),
+        ("binary", format!("val x = 1{}\n", " + 1".repeat(n))),
+        ("calls", format!("val x = a{}\n", ".b()".repeat(n))),
+        ("lambdas", format!("val x = {}1{}\n", "run { ".repeat(n), " }".repeat(n))),
+        ("ifs", format!("fun f() {{\n{}g()\n{}}}\n", "if (a) {\n".repeat(n), "}\n".repeat(n))),
+        ("functions", format!("{}{}", "fun f() {\n".repeat(n), "}\n".repeat(n))),
+        ("classes", format!("{}{}", "class A {\n".repeat(n), "}\n".repeat(n))),
+        ("types", format!("val x: {}Int{} = y\n", "List<".repeat(n), ">".repeat(n))),
+        ("function types", format!("val x: {}Unit = y\n", "() -> ".repeat(n))),
+        ("templates", format!("val x = {}1{}\n", "\"${".repeat(n), "}\"".repeat(n))),
+        ("unclosed", format!("fun f() {{\n{}", "(".repeat(n))),
+    ]
+}
+
+fn tree_depth(node: &SyntaxNode) -> usize {
+    let (mut depth, mut max) = (0usize, 0usize);
+    for event in node.preorder() {
+        match event {
+            rowan::WalkEvent::Enter(_) => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            rowan::WalkEvent::Leave(_) => depth -= 1,
+        }
+    }
+    max
+}
+
+#[test]
+fn nesting_depth_is_bounded() {
+    let limit = parser::MAX_DEPTH as usize;
+    for (what, text) in deeply_nested(20_000) {
+        let parse = parse(&text, false);
+        assert_eq!(parse.syntax().text().to_string(), text, "{what}: tree is not lossless");
+        let depth = tree_depth(&parse.syntax());
+        // A few wrapper nodes (the node being started, its ERROR child) may sit on top.
+        assert!(depth <= limit + 8, "{what}: tree is {depth} deep");
+        assert!(parse.errors().iter().any(|e| e.message.contains("too deeply")), "{what}: {:?}", parse.errors().first());
+        // Not one per skipped token (unclosed brackets do get one each, up to the limit).
+        assert!(parse.errors().len() < limit + 100, "{what}: {} errors", parse.errors().len());
+    }
+}
+
+#[test]
+fn realistic_nesting_is_parsed_normally() {
+    for (what, text) in deeply_nested(150) {
+        if matches!(what, "unclosed" | "prefix") {
+            continue;
+        }
+        let parse = parse(&text, false);
+        assert!(parse.errors().is_empty(), "{what}: {:?}", parse.errors().first());
+    }
+}

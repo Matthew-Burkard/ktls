@@ -16,7 +16,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         }
     }
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {
@@ -301,7 +301,7 @@ fn operator_calls(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         return;
     }
     let rule = if binary.is_some() { &REPLACE_CALL_WITH_OPERATOR } else { &REPLACE_GET_OR_SET };
-    if !cx.on(rule) || has_comments(n) {
+    if !cx.on(rule) || cx.has_comments(n) {
         return;
     }
     // Plain positional arguments only.
@@ -405,7 +405,7 @@ fn plain_target(n: &SyntaxNode) -> bool {
 
 /// `x = x + y` → `x += y`.
 fn operator_assignment(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if assignment_op(n).is_none_or(|t| t.kind() != SyntaxKind::EQ) || !cx.on(&OPERATOR_ASSIGNMENT) || has_comments(n) {
+    if assignment_op(n).is_none_or(|t| t.kind() != SyntaxKind::EQ) || !cx.on(&OPERATOR_ASSIGNMENT) || cx.has_comments(n) {
         return;
     }
     let (Some(target), Some(value)) = (n.first_child(), n.last_child()) else { return };
@@ -442,7 +442,7 @@ fn plain_arguments(call: &SyntaxNode) -> Option<Vec<SyntaxNode>> {
 fn put_assignment(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     let mut parts = n.children();
     let (Some(recv), Some(call), None) = (parts.next(), parts.next(), parts.next()) else { return };
-    if call.kind() != SyntaxKind::CALL_EXPR || recv.kind() == SyntaxKind::SUPER_EXPR || !cx.on(&PUT_ASSIGNMENT) || has_comments(n) || !value_unused(n) {
+    if call.kind() != SyntaxKind::CALL_EXPR || recv.kind() == SyntaxKind::SUPER_EXPR || !cx.on(&PUT_ASSIGNMENT) || cx.has_comments(n) || !value_unused(n) {
         return;
     }
     let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && c.text() == "put") else { return };
@@ -485,7 +485,7 @@ const CHAIN_RECEIVERS: &[&str] = &["kotlin.collections.Iterable", "kotlin.Array"
 fn call_chain(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     let mut parts = n.children();
     let (Some(inner), Some(second), None) = (parts.next(), parts.next(), parts.next()) else { return };
-    if inner.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || !cx.on(&SIMPLIFIABLE_CALL_CHAIN) || has_comments(n) {
+    if inner.kind() != SyntaxKind::DOT_QUALIFIED_EXPR || !cx.on(&SIMPLIFIABLE_CALL_CHAIN) || cx.has_comments(n) {
         return;
     }
     let mut inner_parts = inner.children();
@@ -645,7 +645,7 @@ fn bool_literal(n: &SyntaxNode) -> Option<bool> {
 /// `x && true`, `false || x` → `x`; `x == true` → `x`, `x == false` → `!x` (non-null
 /// Boolean `x`).
 fn boolean_constants(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&BOOLEAN_CONSTANTS) || has_comments(n) {
+    if !cx.on(&BOOLEAN_CONSTANTS) || cx.has_comments(n) {
         return;
     }
     let (Some(op), Some((l, r))) = (binary_op(n), binary_operands(n)) else { return };
@@ -696,7 +696,7 @@ fn count_with_size(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
 
 /// `a.lowercase() == b.lowercase()` → `a.equals(b, ignoreCase = true)`.
 fn ignore_case_equals(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&IGNORE_CASE_EQUALS) || has_comments(n) {
+    if !cx.on(&IGNORE_CASE_EQUALS) || cx.has_comments(n) {
         return;
     }
     let (Some(op), Some((l, r))) = (binary_op(n), binary_operands(n)) else { return };
@@ -780,7 +780,7 @@ const JAVA_STATICS: &[(&str, &str, Analog)] = &[
 /// `System.out.println(x)` → `println(x)`.
 fn java_static_method(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
     use crate::analysis::ide::infer::Qualifier;
-    if !cx.on(&JAVA_STATIC_METHOD) && !cx.on(&JAVA_COLLECTIONS_STATIC) || has_comments(n) {
+    if !cx.on(&JAVA_STATIC_METHOD) && !cx.on(&JAVA_COLLECTIONS_STATIC) || cx.has_comments(n) {
         return;
     }
     let mut parts = n.children();
@@ -1012,7 +1012,7 @@ fn condition_of(i: &SyntaxNode) -> Option<SyntaxNode> {
 
 /// `if (x != null) x else y` → `x ?: y`; `if (x != null) x.f() else null` → `x?.f()`.
 fn if_to_elvis_or_safe_access(cx: &Cx, i: &SyntaxNode, out: &mut Sink) {
-    if (!cx.on(&IF_THEN_TO_ELVIS) && !cx.on(&IF_THEN_TO_SAFE_ACCESS)) || has_comments(i) {
+    if (!cx.on(&IF_THEN_TO_ELVIS) && !cx.on(&IF_THEN_TO_SAFE_ACCESS)) || cx.has_comments(i) {
         return;
     }
     let Some((x, not_null)) = condition_of(i).and_then(|c| null_comparison(&c)) else { return };
@@ -1054,7 +1054,7 @@ fn fold_initializer(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
     let stmts: Vec<SyntaxNode> = block.children().collect();
     for w in stmts.windows(2) {
         let (decl, i) = (&w[0], &w[1]);
-        if decl.kind() != SyntaxKind::PROPERTY || i.kind() != SyntaxKind::IF_EXPR || i.children().any(|c| c.kind() == SyntaxKind::ELSE_BRANCH) || has_comments(i) {
+        if decl.kind() != SyntaxKind::PROPERTY || i.kind() != SyntaxKind::IF_EXPR || i.children().any(|c| c.kind() == SyntaxKind::ELSE_BRANCH) || cx.has_comments(i) {
             continue;
         }
         let Some(p) = ast::PropertyDecl::cast(decl.clone()) else { continue };
@@ -1083,7 +1083,7 @@ fn fold_initializer(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
 
 /// `if (a) … else if (b) … else …` with three or more branches → `when { … }`.
 fn cascade_if(cx: &Cx, i: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&CASCADE_IF) || i.parent().is_some_and(|p| p.kind() == SyntaxKind::ELSE_BRANCH) || has_comments(i) {
+    if !cx.on(&CASCADE_IF) || i.parent().is_some_and(|p| p.kind() == SyntaxKind::ELSE_BRANCH) || cx.has_comments(i) {
         return;
     }
     let mut branches: Vec<(Option<String>, String)> = Vec::new();
@@ -1146,7 +1146,7 @@ fn negated_text(c: &SyntaxNode) -> String {
 /// `if (x == null) throw IllegalArgumentException(m)` → `requireNotNull(x) { m }`,
 /// `if (!ok) throw IllegalStateException(m)` → `check(ok) { m }`.
 fn guard_clause(cx: &Cx, i: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&GUARD_CLAUSE) || i.children().any(|c| c.kind() == SyntaxKind::ELSE_BRANCH) || i.parent().is_none_or(|p| p.kind() != SyntaxKind::BLOCK) || has_comments(i) {
+    if !cx.on(&GUARD_CLAUSE) || i.children().any(|c| c.kind() == SyntaxKind::ELSE_BRANCH) || i.parent().is_none_or(|p| p.kind() != SyntaxKind::BLOCK) || cx.has_comments(i) {
         return;
     }
     let Some(cond) = condition_of(i) else { return };
@@ -1213,7 +1213,7 @@ fn simplifiable_call(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         return;
     }
     let Some((recv, callee, lambda)) = lambda_only_call(n) else { return };
-    if callee.text() != "filter" || has_comments(&lambda) {
+    if callee.text() != "filter" || cx.has_comments(&lambda) {
         return;
     }
     let Some((param, body)) = single_param_lambda(&lambda) else { return };
@@ -1238,7 +1238,7 @@ fn associate_function(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
         return;
     }
     let Some((recv, callee, lambda)) = lambda_only_call(n) else { return };
-    if callee.text() != "associate" || has_comments(&lambda) {
+    if callee.text() != "associate" || cx.has_comments(&lambda) {
         return;
     }
     let Some((param, body)) = single_param_lambda(&lambda) else { return };
@@ -1268,7 +1268,7 @@ fn join_declaration(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
     let stmts: Vec<SyntaxNode> = block.children().collect();
     for w in stmts.windows(2) {
         let (decl, assign) = (&w[0], &w[1]);
-        if decl.kind() != SyntaxKind::PROPERTY || ast::token(decl, SyntaxKind::EQ).is_some() || has_comments(assign) || modifiers(decl).is_some() {
+        if decl.kind() != SyntaxKind::PROPERTY || ast::token(decl, SyntaxKind::EQ).is_some() || cx.has_comments(assign) || modifiers(decl).is_some() {
             continue;
         }
         let Some(p) = ast::PropertyDecl::cast(decl.clone()) else { continue };
@@ -1318,7 +1318,7 @@ fn plain_string(n: &SyntaxNode) -> Option<String> {
 
 /// `"a" + x + "b"` → `"a${x}b"` (left operand a string literal).
 fn string_template(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&STRING_TEMPLATE_CONCATENATION) || has_comments(n) || n.text().to_string().contains('\n') {
+    if !cx.on(&STRING_TEMPLATE_CONCATENATION) || cx.has_comments(n) || n.text().to_string().contains('\n') {
         return;
     }
     // Only the whole chain.
@@ -1380,7 +1380,7 @@ fn lift_branches(n: &SyntaxNode) -> Option<Vec<SyntaxNode>> {
 /// `if (c) return a else return b` → `return if (c) a else b`, and the same for
 /// assignments to one variable and for `when`.
 fn lift_return_or_assignment(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&LIFT_RETURN_OR_ASSIGNMENT) || n.parent().is_none_or(|p| p.kind() != SyntaxKind::BLOCK) || has_comments(n) {
+    if !cx.on(&LIFT_RETURN_OR_ASSIGNMENT) || n.parent().is_none_or(|p| p.kind() != SyntaxKind::BLOCK) || cx.has_comments(n) {
         return;
     }
     let Some(branches) = lift_branches(n) else { return };
@@ -1447,7 +1447,7 @@ fn move_into_when(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
     let stmts: Vec<SyntaxNode> = block.children().collect();
     for (i, w) in stmts.windows(2).enumerate() {
         let (decl, when) = (&w[0], &w[1]);
-        if decl.kind() != SyntaxKind::PROPERTY || when.kind() != SyntaxKind::WHEN_EXPR || has_comments(decl) || modifiers(decl).is_some() {
+        if decl.kind() != SyntaxKind::PROPERTY || when.kind() != SyntaxKind::WHEN_EXPR || cx.has_comments(decl) || modifiers(decl).is_some() {
             continue;
         }
         let Some(p) = ast::PropertyDecl::cast(decl.clone()) else { continue };
@@ -1596,7 +1596,7 @@ fn primary_constructor_property(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
     let params: Vec<SyntaxNode> = ctor.descendants().filter(|d| d.kind() == SyntaxKind::VALUE_PARAMETER).collect();
     for p in body.children().filter(|c| c.kind() == SyntaxKind::PROPERTY) {
         let Some(decl) = ast::PropertyDecl::cast(p.clone()) else { continue };
-        if decl.accessors().next().is_some() || decl.has_delegate() || decl.receiver().is_some() || has_comments(&p) {
+        if decl.accessors().next().is_some() || decl.has_delegate() || decl.receiver().is_some() || cx.has_comments(&p) {
             continue;
         }
         // Only a visibility modifier may be carried over.
@@ -1645,7 +1645,7 @@ fn until_to_range_until(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
 
 /// `if (s.isEmpty()) d else s` → `s.ifEmpty { d }` (also `isBlank`, and the negated forms).
 fn if_empty(cx: &Cx, i: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&IS_EMPTY_TO_IF_EMPTY) || has_comments(i) {
+    if !cx.on(&IS_EMPTY_TO_IF_EMPTY) || cx.has_comments(i) {
         return;
     }
     let Some(cond) = condition_of(i) else { return };
@@ -1666,7 +1666,7 @@ fn if_empty(cx: &Cx, i: &SyntaxNode, out: &mut Sink) {
 
 /// `x >= a && x <= b` → `x in a..b`; `x >= a && x < b` → `x in a..<b` (integer types).
 fn two_comparisons(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&TWO_COMPARISONS_TO_RANGE) || binary_op(n).is_none_or(|o| o.kind() != SyntaxKind::AMP2) || has_comments(n) {
+    if !cx.on(&TWO_COMPARISONS_TO_RANGE) || binary_op(n).is_none_or(|o| o.kind() != SyntaxKind::AMP2) || cx.has_comments(n) {
         return;
     }
     let Some((a, b)) = binary_operands(n) else { return };
@@ -1707,7 +1707,7 @@ fn two_comparisons(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
 
 /// `String.format("%s and %s", a, b)` / `"%s".format(a)` with only `%s` → a template.
 fn string_format(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&STRING_FORMAT_TO_TEMPLATE) || has_comments(n) {
+    if !cx.on(&STRING_FORMAT_TO_TEMPLATE) || cx.has_comments(n) {
         return;
     }
     let mut parts = n.children();
@@ -1855,7 +1855,7 @@ fn single_abstract_method(e: &crate::analysis::ide::infer::Engine, fq: &str) -> 
 
 /// `object : Runnable { override fun run() { … } }` → `Runnable { … }`.
 fn object_to_lambda(cx: &Cx, o: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&OBJECT_LITERAL_TO_LAMBDA) || has_comments(o) {
+    if !cx.on(&OBJECT_LITERAL_TO_LAMBDA) || cx.has_comments(o) {
         return;
     }
     let entries: Vec<SyntaxNode> = o.children().filter(|c| c.kind() == SyntaxKind::SUPER_TYPE_LIST).flat_map(|l| l.children().collect::<Vec<_>>()).collect();
@@ -1908,7 +1908,7 @@ fn try_finally_to_use(cx: &Cx, block: &SyntaxNode, out: &mut Sink) {
     let stmts: Vec<SyntaxNode> = block.children().collect();
     for (i, w) in stmts.windows(2).enumerate() {
         let (decl, t) = (&w[0], &w[1]);
-        if decl.kind() != SyntaxKind::PROPERTY || t.kind() != SyntaxKind::TRY_EXPR || t.children().any(|c| c.kind() == SyntaxKind::CATCH_CLAUSE) || has_comments(t) {
+        if decl.kind() != SyntaxKind::PROPERTY || t.kind() != SyntaxKind::TRY_EXPR || t.children().any(|c| c.kind() == SyntaxKind::CATCH_CLAUSE) || cx.has_comments(t) {
             continue;
         }
         let (Some(name), Some(init)) = (name_token(decl).map(|n| ast::ident_text(&n)), initializer(decl)) else { continue };
@@ -1967,7 +1967,7 @@ fn sort_modifiers(cx: &Cx, list: &SyntaxNode, out: &mut Sink) {
 
 /// `when { x == 1 -> …; x is T -> …; x in r -> … }` → `when (x) { 1 -> …; is T -> …; in r -> … }`.
 fn when_subject(cx: &Cx, w: &SyntaxNode, out: &mut Sink) {
-    if !cx.on(&INTRODUCE_WHEN_SUBJECT) || w.children().any(|c| c.kind() == SyntaxKind::WHEN_SUBJECT) || has_comments(w) {
+    if !cx.on(&INTRODUCE_WHEN_SUBJECT) || w.children().any(|c| c.kind() == SyntaxKind::WHEN_SUBJECT) || cx.has_comments(w) {
         return;
     }
     let Some(kw) = ast::token(w, SyntaxKind::WHEN_KW) else { return };
@@ -2026,7 +2026,7 @@ fn secondary_to_primary(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
     let ctors: Vec<SyntaxNode> = body.children().filter(|c| c.kind() == SyntaxKind::SECONDARY_CONSTRUCTOR).collect();
     let [ctor] = ctors.as_slice() else { return };
     // Delegation to a superclass constructor would move into the supertype list.
-    if ctor.children().any(|c| matches!(c.kind(), SyntaxKind::MODIFIER_LIST | SyntaxKind::CONSTRUCTOR_DELEGATION_CALL)) || has_comments(ctor) {
+    if ctor.children().any(|c| matches!(c.kind(), SyntaxKind::MODIFIER_LIST | SyntaxKind::CONSTRUCTOR_DELEGATION_CALL)) || cx.has_comments(ctor) {
         return;
     }
     let Some(e) = cx.engine() else { return };
@@ -2074,7 +2074,7 @@ fn secondary_to_primary(cx: &Cx, class: &SyntaxNode, out: &mut Sink) {
             || decl.accessors().next().is_some()
             || decl.receiver().is_some()
             || has_modifier(prop, "lateinit")
-            || has_comments(prop)
+            || cx.has_comments(prop)
             || prop.children_with_tokens().any(|t| t.kind() == SyntaxKind::KDOC)
         {
             return;
@@ -2145,7 +2145,7 @@ fn data_object(cx: &Cx, o: &SyntaxNode, out: &mut Sink) {
 
 /// `x as? T ?: return` as a statement → `if (x !is T) return`.
 fn safe_cast_with_return(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if binary_op(n).is_none_or(|o| o.kind() != SyntaxKind::ELVIS) || !cx.on(&SAFE_CAST_WITH_RETURN) || !value_unused(n) || has_comments(n) {
+    if binary_op(n).is_none_or(|o| o.kind() != SyntaxKind::ELVIS) || !cx.on(&SAFE_CAST_WITH_RETURN) || !value_unused(n) || cx.has_comments(n) {
         return;
     }
     let Some((cast, ret)) = binary_operands(n) else { return };
@@ -2159,7 +2159,7 @@ fn safe_cast_with_return(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
 
 /// `b ?: false` → `b == true`, `b ?: true` → `b != false` for a `Boolean?`.
 fn nullable_boolean_elvis(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
-    if binary_op(n).is_none_or(|o| o.kind() != SyntaxKind::ELVIS) || !cx.on(&NULLABLE_BOOLEAN_ELVIS) || has_comments(n) {
+    if binary_op(n).is_none_or(|o| o.kind() != SyntaxKind::ELVIS) || !cx.on(&NULLABLE_BOOLEAN_ELVIS) || cx.has_comments(n) {
         return;
     }
     let Some((l, r)) = binary_operands(n) else { return };
@@ -2179,7 +2179,7 @@ fn nullable_boolean_elvis(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
 /// `Pair(a, b)` → `a to b`.
 fn pair_constructor(cx: &Cx, call: &SyntaxNode, out: &mut Sink) {
     let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF && c.text() == "Pair") else { return };
-    if !cx.on(&PAIR_CONSTRUCTOR) || call.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(call)) || has_comments(call) {
+    if !cx.on(&PAIR_CONSTRUCTOR) || call.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(call)) || cx.has_comments(call) {
         return;
     }
     let Some(args) = plain_arguments(call) else { return };

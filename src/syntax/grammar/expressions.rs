@@ -13,6 +13,11 @@ use super::{
 /// `{ statements }` as a BLOCK node.
 pub(crate) fn block(p: &mut Parser) {
     let m = p.start();
+    if p.too_deep() && p.at(L_CURLY) {
+        p.skip_too_deep();
+        m.complete(p, BLOCK);
+        return;
+    }
     if !p.expect(L_CURLY) {
         m.complete(p, BLOCK);
         return;
@@ -168,10 +173,17 @@ fn can_start_expression(k: SyntaxKind) -> bool {
 
 fn expr_bp(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
     let mut lhs = prefix_expr(p)?;
+    let mut links = 0;
     while let Some((bp, nl_ok, op)) = binary_op(p) {
         if bp < min_bp || (p.nl_before() && !nl_ok) {
             break;
         }
+        if p.too_deep() {
+            p.skip_rest_of_chain();
+            break;
+        }
+        links += 1;
+        p.enter_link();
         let m = lhs.precede(p);
         match op {
             Op::IsCheck => {
@@ -193,6 +205,7 @@ fn expr_bp(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
             }
         }
     }
+    p.leave_links(links);
     Some(lhs)
 }
 
@@ -208,6 +221,9 @@ fn label_definition_ahead(p: &Parser) -> bool {
 }
 
 fn prefix_expr(p: &mut Parser) -> Option<CompletedMarker> {
+    if p.too_deep() && can_start_expression(p.current()) {
+        return p.skip_too_deep();
+    }
     match p.current() {
         MINUS | PLUS | PLUS2 | MINUS2 | EXCL => {
             let m = p.start();
@@ -244,7 +260,14 @@ fn prefix_expr(p: &mut Parser) -> Option<CompletedMarker> {
 
 fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
     let mut lhs = primary(p)?;
+    let mut links = 0;
     loop {
+        if p.too_deep() {
+            p.skip_rest_of_chain();
+            break;
+        }
+        links += 1;
+        p.enter_link();
         lhs = match p.current() {
             PLUS2 | MINUS2 | EXCL2 if !p.nl_before() => {
                 let m = lhs.precede(p);
@@ -290,6 +313,7 @@ fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
             _ => break,
         };
     }
+    p.leave_links(links);
     Some(lhs)
 }
 

@@ -23,7 +23,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         unused_imports(cx, out);
     }
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {
@@ -112,7 +112,7 @@ fn local_variable(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
             Some(e) if !is_pure(e) => Fix::replace(format!("Remove variable '{name}'"), n.text_range(), e.text().to_string()),
             _ => Fix::delete(format!("Remove variable '{name}'"), decl_range),
         };
-        let fix = (!has_comments(n) && !has_annotations(n)).then_some(fix);
+        let fix = (!cx.has_comments(n) && !has_annotations(n)).then_some(fix);
         out.report(&UNUSED_VARIABLE, name_tok.text_range(), format!("Variable '{name}' is never used"), fix);
         return;
     }

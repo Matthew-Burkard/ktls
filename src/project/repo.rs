@@ -210,11 +210,19 @@ pub struct RepoSystem {
     /// One lock per path being looked up, so concurrent resolutions never download twice.
     inflight: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     versions_memo: Mutex<HashMap<(ModuleId, Vec<Repository>), Vec<String>>>,
+    /// Snapshot metadata path and repositories → timestamped file version.
+    snapshot_memo: Mutex<HashMap<String, Option<String>>>,
     downloads: AtomicUsize,
     progress: Option<ProgressFn>,
     /// Repositories that refused a request (401/403): id → (status, credentials were sent).
     denied: Mutex<std::collections::BTreeMap<String, (u16, bool)>>,
+    /// Repositories that answered with something other than the requested file (a login
+    /// page instead of a jar): id → (file name, what was wrong).
+    invalid: Mutex<std::collections::BTreeMap<String, (String, String)>>,
 }
+
+/// How long cached SNAPSHOT `maven-metadata.xml` is trusted before asking the repository again.
+const SNAPSHOT_METADATA_TTL: Duration = Duration::from_secs(3600);
 
 /// Outcome of a remote request.
 enum Fetch {
@@ -222,6 +230,8 @@ enum Fetch {
     NotFound,
     /// 401/403: an authentication problem, not proof the file doesn't exist.
     Denied(u16),
+    /// A successful response whose body is not the file (an HTML login or proxy error page).
+    Invalid(String),
 }
 
 impl RepoSystem {
@@ -239,9 +249,11 @@ impl RepoSystem {
             memo: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
             versions_memo: Mutex::new(HashMap::new()),
+            snapshot_memo: Mutex::new(HashMap::new()),
             downloads: AtomicUsize::new(0),
             progress,
             denied: Mutex::new(Default::default()),
+            invalid: Mutex::new(Default::default()),
         }
     }
 
@@ -249,9 +261,11 @@ impl RepoSystem {
         self.downloads.load(Ordering::Relaxed)
     }
 
-    /// Repositories that refused access, as user-facing problems.
+    /// Repositories that refused access or sent something other than the requested files, as
+    /// user-facing problems.
     pub fn access_problems(&self) -> Vec<String> {
-        self.denied
+        let mut out: Vec<String> = self
+            .denied
             .lock()
             .iter()
             .map(|(id, (status, sent))| {
@@ -261,7 +275,11 @@ impl RepoSystem {
                     format!("Repository {id} requires authentication (HTTP {status}): add credentials to the build script, gradle.properties or ~/.m2/settings.xml")
                 }
             })
-            .collect()
+            .collect();
+        out.extend(self.invalid.lock().iter().map(|(id, (file, why))| {
+            format!("Repository {id} sent {why} instead of {file}: check the repository URL and credentials")
+        }));
+        out
     }
 
     /// The URL to request for `repo` (applying mirrors) and the credentials to send.
@@ -289,6 +307,11 @@ impl RepoSystem {
         if let Ok(Fetch::Denied(status)) = result {
             log::warn!("{url}: HTTP {status} ({})", if credentials.is_some() { "credentials rejected" } else { "no credentials configured" });
             self.denied.lock().insert(repo.id.clone(), (status, credentials.is_some()));
+        }
+        if let Ok(Fetch::Invalid(why)) = &result {
+            log::warn!("{url}: the response is {why}, not the requested file");
+            let file = rel.rsplit('/').next().unwrap_or(rel).to_string();
+            self.invalid.lock().entry(repo.id.clone()).or_insert((file, why.clone()));
         }
         result
     }
@@ -359,7 +382,14 @@ impl RepoSystem {
         // 4. Our download cache.
         let cached = self.config.cache_dir.join(rel);
         if cached.is_file() {
-            return Some(cached);
+            // Older versions saved whatever the server sent; drop a cached login page.
+            match content_problem(&cached) {
+                None => return Some(cached),
+                Some(why) => {
+                    log::warn!("discarding cached {}: it is {why}", cached.display());
+                    let _ = std::fs::remove_file(&cached);
+                }
+            }
         }
         if self.config.offline {
             return None;
@@ -377,7 +407,7 @@ impl RepoSystem {
             match self.fetch(repo, rel, &cached) {
                 Ok(Fetch::Downloaded) => return Some(cached),
                 Ok(Fetch::NotFound) => continue,
-                Ok(Fetch::Denied(_)) => uncertain = true,
+                Ok(Fetch::Denied(_) | Fetch::Invalid(_)) => uncertain = true,
                 Err(e) => {
                     log::warn!("download failed {}{rel}: {e}", repo.url);
                     uncertain = true;
@@ -425,6 +455,10 @@ impl RepoSystem {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
         }
+        if let Some(why) = content_problem_as(&tmp, dest) {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(Fetch::Invalid(why));
+        }
         std::fs::rename(&tmp, dest)?;
         self.downloads.fetch_add(1, Ordering::Relaxed);
         Ok(Fetch::Downloaded)
@@ -461,13 +495,49 @@ impl RepoSystem {
                 return None;
             }
         let rel = format!("{}/{}/{}/maven-metadata.xml", coord.group.replace('.', "/"), coord.artifact, coord.version);
-        let path = self.file(&rel, None, repos)?;
-        let xml = std::fs::read_to_string(path).ok()?;
-        let root = super::xml::parse(&xml)?;
-        let snap = root.child("versioning")?.child("snapshot")?;
-        let ts = snap.child_text("timestamp")?;
-        let build = snap.child_text("buildNumber")?;
-        Some(format!("{}-{}-{}", coord.version.trim_end_matches("-SNAPSHOT"), ts, build))
+        let memo_key = format!("snapshot|{rel}|{}", repos.iter().map(|r| r.url.as_str()).collect::<Vec<_>>().join(","));
+        if let Some(hit) = self.snapshot_memo.lock().get(&memo_key) {
+            return hit.clone();
+        }
+        let lock = self.inflight.lock().entry(memo_key.clone()).or_default().clone();
+        let _guard = lock.lock();
+        if let Some(hit) = self.snapshot_memo.lock().get(&memo_key) {
+            return hit.clone();
+        }
+        let found = self.lookup_snapshot(coord, &rel, repos);
+        self.snapshot_memo.lock().insert(memo_key.clone(), found.clone());
+        self.inflight.lock().remove(&memo_key);
+        found
+    }
+
+    /// The latest SNAPSHOT build listed by the first repository that has one. New builds are
+    /// published under the same metadata path, so cached metadata is refreshed after
+    /// `SNAPSHOT_METADATA_TTL` (and kept when the refresh fails).
+    fn lookup_snapshot(&self, coord: &Coordinate, rel: &str, repos: &[Repository]) -> Option<String> {
+        let parse = |p: &Path| -> Option<String> {
+            let xml = std::fs::read_to_string(p).ok()?;
+            let root = super::xml::parse(&xml)?;
+            let snap = root.child("versioning")?.child("snapshot")?;
+            let ts = snap.child_text("timestamp")?;
+            let build = snap.child_text("buildNumber")?;
+            Some(format!("{}-{}-{}", coord.version.trim_end_matches("-SNAPSHOT"), ts, build))
+        };
+        for repo in repos {
+            let path = match repo.local_dir() {
+                Some(dir) => dir.join(rel),
+                None => {
+                    let cached = self.config.cache_dir.join(format!("metadata/{}/{rel}", sanitize(&repo.id)));
+                    if !self.config.offline && !(cached.is_file() && is_recent(&cached, SNAPSHOT_METADATA_TTL)) {
+                        let _ = self.fetch(repo, rel, &cached);
+                    }
+                    cached
+                }
+            };
+            if let Some(v) = parse(&path) {
+                return Some(v);
+            }
+        }
+        None
     }
 
     /// All versions of a module known to local caches and remote metadata.
@@ -532,6 +602,29 @@ fn redirect_target(current: &ureq::http::Uri, location: &str) -> Option<ureq::ht
         format!("{dir}/{location}")
     };
     format!("{origin}{path}").parse().ok()
+}
+
+/// What is wrong with the file at `path` if it is not what its name says: archives must be
+/// zips, and nothing may be an HTML page (repositories behind SSO answer 200 with a login page).
+fn content_problem(path: &Path) -> Option<String> {
+    content_problem_as(path, path)
+}
+
+/// Like `content_problem`, for content at `path` that will be stored as `name`.
+fn content_problem_as(path: &Path, name: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(512);
+    std::fs::File::open(path).ok()?.take(512).read_to_end(&mut head).ok()?;
+    let text = String::from_utf8_lossy(&head);
+    let start = text.trim_start_matches('\u{feff}').trim_start().to_ascii_lowercase();
+    let html = start.starts_with("<!doctype html") || start.starts_with("<html") || start.starts_with("<head") || start.starts_with("<body");
+    if html {
+        return Some("a web page (a login page or proxy error?)".into());
+    }
+    if crate::classpath::is_archive(name) && !(head.starts_with(b"PK\x03\x04") || head.starts_with(b"PK\x05\x06")) {
+        return Some(if head.is_empty() { "an empty file".into() } else { "not a zip archive".into() });
+    }
+    None
 }
 
 fn sanitize(s: &str) -> String {
@@ -681,21 +774,21 @@ mod tests {
     #[test]
     fn downloads_with_credentials() {
         // Another host (by name) that must never see the credentials.
-        let (blob, blob_seen) = serve(|_| respond("200 OK", "", "blob"));
+        let (blob, blob_seen) = serve(|_| respond("200 OK", "", "PK\u{3}\u{4}blob"));
         let blob = blob.replace("127.0.0.1", "localhost");
         let (base, _) = serve(move |head| {
             let authorized = head.lines().any(|l| l.eq_ignore_ascii_case("authorization: Basic dTpw"));
             match head.split_whitespace().nth(1).unwrap_or("") {
                 _ if !authorized => respond("401 Unauthorized", "WWW-Authenticate: Basic\r\n", ""),
-                "/g/a/1/a-1.jar" => respond("200 OK", "", "jar"),
+                "/g/a/1/a-1.jar" => respond("200 OK", "", "PK\u{3}\u{4}jar"),
                 "/g/b/1/b-1.jar" => respond("302 Found", "Location: /real/b-1.jar\r\n", ""),
-                "/real/b-1.jar" => respond("200 OK", "", "b"),
+                "/real/b-1.jar" => respond("200 OK", "", "PK\u{3}\u{4}b"),
                 "/g/c/1/c-1.jar" => respond("302 Found", &format!("Location: {blob}c-1.jar\r\n"), ""),
                 _ => respond("404 Not Found", "", ""),
             }
         });
         let tmp = tempfile::tempdir().unwrap();
-        let read = |p: Option<PathBuf>| p.map(|p| std::fs::read_to_string(p).unwrap());
+        let read = |p: Option<PathBuf>| p.map(|p| std::fs::read_to_string(p).unwrap().trim_start_matches("PK\u{3}\u{4}").to_string());
 
         // Without credentials: denied, reported, and not remembered as missing.
         let anonymous = system(tmp.path(), false);
@@ -713,6 +806,81 @@ mod tests {
         assert_eq!(read(sys.artifact(&Coordinate::new("g", "c", "1"), None, "jar", &repos)), Some("blob".into()));
         assert!(blob_seen.lock().iter().all(|h| !h.to_ascii_lowercase().contains("authorization")), "{:?}", blob_seen.lock());
         assert!(sys.access_problems().is_empty());
+    }
+
+    const ZIP: &str = "PK\u{5}\u{6}\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+
+    #[test]
+    fn web_pages_are_not_saved_as_artifacts() {
+        let page = "<!DOCTYPE html><html><body>Sign in</body></html>";
+        let (base, _) = serve(move |head| match head.split_whitespace().nth(1).unwrap_or("") {
+            "/g/a/1/a-1.jar" | "/g/a/1/a-1.pom" => respond("200 OK", "Content-Type: text/html\r\n", page),
+            "/g/b/1/b-1.jar" => respond("200 OK", "", "not a zip"),
+            "/g/c/1/c-1.jar" => respond("200 OK", "", ZIP),
+            _ => respond("404 Not Found", "", ""),
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let repos = [Repository::new("private", &base)];
+        let sys = system(tmp.path(), false);
+        let a = Coordinate::new("g", "a", "1");
+        assert_eq!(sys.artifact(&a, None, "jar", &repos), None);
+        assert_eq!(sys.artifact(&a, None, "pom", &repos), None);
+        assert_eq!(sys.artifact(&Coordinate::new("g", "b", "1"), None, "jar", &repos), None);
+        // Neither saved nor remembered as missing: the next load asks again.
+        for f in ["a-1.jar", "a-1.pom", "a-1.jar.missing"] {
+            assert!(!tmp.path().join("cache/g/a/1").join(f).exists(), "{f}");
+        }
+        let problems = sys.access_problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("sent a web page") && problems[0].contains("a-1.jar"), "{problems:?}");
+
+        // A login page cached by an older version is replaced by the real archive.
+        let cached = tmp.path().join("cache/g/c/1/c-1.jar");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, page).unwrap();
+        let sys = system(tmp.path(), false);
+        assert_eq!(sys.artifact(&Coordinate::new("g", "c", "1"), None, "jar", &repos), Some(cached.clone()));
+        assert_eq!(std::fs::read_to_string(&cached).unwrap(), ZIP);
+    }
+
+    #[test]
+    fn snapshot_metadata_is_refreshed() {
+        let build = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let served = build.clone();
+        let (base, seen) = serve(move |head| {
+            let n = served.load(Ordering::SeqCst);
+            match head.split_whitespace().nth(1).unwrap_or("") {
+                "/g/a/1.0-SNAPSHOT/maven-metadata.xml" => respond(
+                    "200 OK",
+                    "",
+                    &format!("<metadata><versioning><snapshot><timestamp>20261109.10000{n}</timestamp><buildNumber>{n}</buildNumber></snapshot></versioning></metadata>"),
+                ),
+                p if p == format!("/g/a/1.0-SNAPSHOT/a-1.0-20261109.10000{n}-{n}.jar") => respond("200 OK", "", ZIP),
+                _ => respond("404 Not Found", "", ""),
+            }
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let repos = [Repository::new("snapshots", &base)];
+        let coord = Coordinate::new("g", "a", "1.0-SNAPSHOT");
+        let name = |p: Option<PathBuf>| p.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        assert_eq!(name(system(tmp.path(), false).artifact(&coord, None, "jar", &repos)).as_deref(), Some("a-1.0-20261109.100001-1.jar"));
+
+        // A new build is published; recent metadata is still trusted (no request)…
+        build.store(2, Ordering::SeqCst);
+        let requests = seen.lock().len();
+        assert_eq!(name(system(tmp.path(), false).artifact(&coord, None, "jar", &repos)).as_deref(), Some("a-1.0-20261109.100001-1.jar"));
+        assert_eq!(seen.lock().len(), requests);
+
+        // …until it is older than the TTL.
+        let cached = tmp.path().join("cache/metadata/snapshots/g/a/1.0-SNAPSHOT/maven-metadata.xml");
+        let old = SystemTime::now() - SNAPSHOT_METADATA_TTL - Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&cached).unwrap().set_modified(old).unwrap();
+        assert_eq!(name(system(tmp.path(), false).artifact(&coord, None, "jar", &repos)).as_deref(), Some("a-1.0-20261109.100002-2.jar"));
+
+        // Offline, stale metadata is used as is.
+        std::fs::File::options().write(true).open(&cached).unwrap().set_modified(old).unwrap();
+        build.store(3, Ordering::SeqCst);
+        assert_eq!(name(system(tmp.path(), true).artifact(&coord, None, "jar", &repos)).as_deref(), Some("a-1.0-20261109.100002-2.jar"));
     }
 
     #[test]

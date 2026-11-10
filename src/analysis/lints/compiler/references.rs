@@ -10,13 +10,13 @@ use crate::symbols::{Modifiers, Origin, SymbolKind, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     for n in cx.root.descendants() {
-        if !in_error(&n) && n.kind() == SyntaxKind::VALUE_PARAMETER {
+        if !cx.in_error(&n) && n.kind() == SyntaxKind::VALUE_PARAMETER {
             val_on_parameter(&n, out);
         }
     }
     let Some(e) = cx.engine() else { return };
     for n in cx.root.descendants() {
-        if in_error(&n) {
+        if cx.in_error(&n) {
             continue;
         }
         match n.kind() {

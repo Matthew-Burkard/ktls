@@ -20,7 +20,7 @@ use crate::symbols::{SymbolKind, TypeRef};
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
     for root in cx.root.descendants().filter(is_root) {
-        if in_error(&root) {
+        if cx.in_error(&root) {
             continue;
         }
         let body: Vec<SyntaxNode> = match root.kind() {
