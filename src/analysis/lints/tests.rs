@@ -3876,3 +3876,38 @@ fun Any.whens() = when (this) { is Circle -> radius; else -> 0.0 }
         "{found:#?}"
     );
 }
+
+#[test]
+fn locals_used_before_their_declaration() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+fun take(x: Any?) = x
+
+fun before() {
+    take(early)
+    val early = 0
+    take(early)
+    val (p, q) = Pair(1, 2)
+    take(p + q)
+    fun rec(n: Int): Int = if (n == 0) 0 else rec(n - 1)
+    take(rec(3))
+    take(listOf(1 to 2).map { (k, v) -> k + v })
+}
+
+fun other() {
+    take(inner)
+    run { val inner = 1; take(inner) }
+    take(early)
+}
+"#,
+    );
+    assert_eq!(
+        found,
+        vec!["UNRESOLVED_REFERENCE: early", "UNRESOLVED_REFERENCE: inner", "UNRESOLVED_REFERENCE: early"],
+        "{found:#?}"
+    );
+}

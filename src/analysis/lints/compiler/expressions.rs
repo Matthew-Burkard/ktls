@@ -20,6 +20,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
         this_casting_scopes: HashMap::new(),
         star_class_imports,
         file_names: None,
+        local_names: HashMap::new(),
         scope_names: None,
     };
     for n in cx.root.descendants() {
@@ -74,6 +75,8 @@ struct State {
     star_class_imports: Vec<String>,
     /// Names declared in this file (computed on first use).
     file_names: Option<HashSet<String>>,
+    /// Names declared in blocks (locals), with their declarations.
+    local_names: HashMap<String, Vec<SyntaxNode>>,
     /// Names of top-level declarations in scope: imports, this package, default imports.
     scope_names: Option<HashSet<String>>,
 }
@@ -82,33 +85,56 @@ impl State {
     /// Whether `name` is declared anywhere it could come from. Unresolved references are
     /// only reported for names that exist nowhere (typos, deleted declarations): resolution
     /// of the rest may fail for reasons this engine does not model.
-    fn exists(&mut self, cx: &Cx, e: &Engine, name: &str) -> bool {
+    fn exists(&mut self, cx: &Cx, e: &Engine, name: &str, at: &SyntaxNode) -> bool {
         if cx.snap.index.declares_name(name) {
             return true;
         }
-        let file = self.file_names.get_or_insert_with(|| {
-            idents(&cx.root)
-                .filter(|t| {
-                    t.parent().is_some_and(|p| {
-                        matches!(
-                            p.kind(),
-                            SyntaxKind::PROPERTY
-                                | SyntaxKind::FUN
-                                | SyntaxKind::VALUE_PARAMETER
-                                | SyntaxKind::DESTRUCTURING_ENTRY
-                                | SyntaxKind::CLASS
-                                | SyntaxKind::OBJECT_DECLARATION
-                                | SyntaxKind::TYPEALIAS
-                                | SyntaxKind::ENUM_ENTRY
-                                | SyntaxKind::TYPE_PARAMETER
-                                | SyntaxKind::IMPORT_ALIAS
-                        )
-                    })
-                })
-                .map(|t| ast::ident_text(&t))
-                .collect()
-        });
-        if file.contains(name) {
+        if self.file_names.is_none() {
+            let mut file = HashSet::new();
+            let mut locals: HashMap<String, Vec<SyntaxNode>> = HashMap::new();
+            for t in idents(&cx.root) {
+                let Some(p) = t.parent().filter(|p| {
+                    matches!(
+                        p.kind(),
+                        SyntaxKind::PROPERTY
+                            | SyntaxKind::FUN
+                            | SyntaxKind::VALUE_PARAMETER
+                            | SyntaxKind::DESTRUCTURING_ENTRY
+                            | SyntaxKind::CLASS
+                            | SyntaxKind::OBJECT_DECLARATION
+                            | SyntaxKind::TYPEALIAS
+                            | SyntaxKind::ENUM_ENTRY
+                            | SyntaxKind::TYPE_PARAMETER
+                            | SyntaxKind::IMPORT_ALIAS
+                    )
+                }) else {
+                    continue;
+                };
+                let text = ast::ident_text(&t);
+                // `val (a, b) = …` in a block: the entries' declaration is the destructuring.
+                let decl = if p.kind() == SyntaxKind::DESTRUCTURING_ENTRY { p.parent().and_then(|d| d.parent()).filter(|d| d.kind() == SyntaxKind::PROPERTY).unwrap_or(p) } else { p };
+                if is_local(&decl) {
+                    locals.entry(text).or_default().push(decl);
+                } else {
+                    file.insert(text);
+                }
+            }
+            self.file_names = Some(file);
+            self.local_names = locals;
+        }
+        if self.file_names.as_ref().is_some_and(|f| f.contains(name)) {
+            return true;
+        }
+        // Declarations in blocks are only in scope after them, within their block
+        // (`print(x); val x = 0` is unresolved).
+        let start = at.text_range().start();
+        let visible = |d: &SyntaxNode| {
+            let in_block = d.parent().is_some_and(|b| at.ancestors().any(|a| a == b));
+            // Local functions and classes may refer to themselves.
+            let declared = if matches!(d.kind(), SyntaxKind::FUN | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION) { d.text_range().start() } else { d.text_range().end() };
+            in_block && declared <= start
+        };
+        if self.local_names.get(name).is_some_and(|ds| ds.iter().any(visible)) {
             return true;
         }
         let scope = self.scope_names.get_or_insert_with(|| {
@@ -255,7 +281,7 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
     }
     if member {
         let Some(recv) = outer.first_child() else { return };
-        if smart_cast_possible(nr, st) || st.exists(cx, e, &name) {
+        if smart_cast_possible(nr, st) || st.exists(cx, e, &name, nr) {
             return;
         }
         // `x.f()` with a local `f` of function type with receiver (`it` of `T.() -> R`).
@@ -288,7 +314,7 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
     if callable_ref && outer.first_child().as_ref() != Some(nr) {
         return;
     }
-    if st.exists(cx, e, &name)
+    if st.exists(cx, e, &name, nr)
         || st.star_class_imports.iter().any(|fq| star_import_may_declare(e, fq, &name))
         || !receivers_known(e, nr, st)
         || e.res.package_exists(&name)
