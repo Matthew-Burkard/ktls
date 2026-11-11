@@ -714,11 +714,20 @@ pub(crate) fn destructuring_declaration(p: &mut Parser) {
 }
 
 pub(crate) fn value_parameter_list(p: &mut Parser) {
+    parameters(p, false);
+}
+
+/// `catch (e: T)`: the parameter needs a type.
+pub(crate) fn typed_value_parameter_list(p: &mut Parser) {
+    parameters(p, true);
+}
+
+fn parameters(p: &mut Parser, type_required: bool) {
     let m = p.start();
     p.bump(); // (
     p.with_newlines(false, |p| {
         while !p.at(R_PAREN) && !p.at_eof() && !p.at(R_CURLY) && !p.at(L_CURLY) {
-            if !value_parameter(p) {
+            if !value_parameter(p, type_required) {
                 break;
             }
             if !p.bump_if(COMMA) {
@@ -738,7 +747,7 @@ pub(crate) fn value_parameter_list(p: &mut Parser) {
     m.complete(p, VALUE_PARAMETER_LIST);
 }
 
-fn value_parameter(p: &mut Parser) -> bool {
+fn value_parameter(p: &mut Parser, type_required: bool) -> bool {
     let m = p.start();
     modifier_list(p);
     if p.at(VAL_KW) || p.at(VAR_KW) {
@@ -748,6 +757,9 @@ fn value_parameter(p: &mut Parser) -> bool {
         p.error_expecting("parameter name");
         m.complete(p, ERROR);
         return false;
+    }
+    if type_required && !p.nth_at(1, COLON) {
+        p.error("Parameters must have type annotation");
     }
     p.bump();
     if p.bump_if(COLON) {

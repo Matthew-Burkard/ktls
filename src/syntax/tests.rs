@@ -365,3 +365,9 @@ fn realistic_nesting_is_parsed_normally() {
         assert!(parse.errors().is_empty(), "{what}: {:?}", parse.errors().first());
     }
 }
+
+#[test]
+fn catch_parameter_needs_a_type() {
+    assert_eq!(errs("fun f() { try {} catch (Exception) {} }\n"), vec!["Parameters must have type annotation"]);
+    ok("fun f() { try {} catch (e: Exception) {} catch (@Suppress(\"x\") e: Throwable) {} }\n");
+}

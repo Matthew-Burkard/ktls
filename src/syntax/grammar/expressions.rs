@@ -5,7 +5,7 @@ use super::super::parser::{CompletedMarker, Parser};
 use super::types::{type_argument_list, type_arguments_ahead, type_reference};
 use super::{
     DeclContext, annotation, class_body, super_type_entry, declaration, declaration_ahead, destructuring_declaration, function_body,
-    modifier_list, skip_annotation_ahead, value_parameter_list,
+    modifier_list, skip_annotation_ahead, typed_value_parameter_list, value_parameter_list,
 };
 
 // ------------------------------------------------------------- statements
@@ -738,7 +738,7 @@ fn try_expr(p: &mut Parser) {
         let c = p.start();
         p.bump();
         if p.at(L_PAREN) {
-            value_parameter_list(p);
+            typed_value_parameter_list(p);
         } else {
             p.error_expecting("'('");
         }
