@@ -695,7 +695,7 @@ impl<'s> Engine<'s> {
 
     /// Members accessible through a classifier name: nested classes, enum entries,
     /// object members, Java statics and companion members.
-    fn static_members(&self, c: &Classifier, name: &str) -> Vec<Def> {
+    pub fn static_members(&self, c: &Classifier, name: &str) -> Vec<Def> {
         let sym = c.symbol();
         if let Some(n) = self.res.find_classifier(&format!("{}.{name}", sym.fq_name)) {
             return vec![Def::symbol(n.symbol().clone())];

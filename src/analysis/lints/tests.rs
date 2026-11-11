@@ -4086,3 +4086,90 @@ fun g() {}
         ], "{found:#?}");
 }
 
+
+#[test]
+fn bare_names_declared_only_in_other_scopes() {
+    let mut fx = Fixture::new();
+    if !fx.typed() {
+        return;
+    }
+    fx.run(
+        "src/main/kotlin/a/Base.kt",
+        "package a\n\nopen class Base {\n    val inherited = 1\n    companion object {\n        const val BASE_CONST = 2\n    }\n}\ninterface Food {\n    fun rice()\n    fun spice() = 1\n}\nclass Other {\n    val otherMember = 1\n    fun otherFun(otherParam: Int) {\n        val otherLocal = otherParam\n    }\n}\nfun Meal.helper() = 1\nfun topLevel() = 1\n",
+    );
+    let text = r#"package a
+
+class Meal(ctorParam: Int) : Base(), Food {
+    val fromCtor = ctorParam
+    init {
+        println(ctorParam)
+    }
+    var withAccessors: Int = 0
+        get() = field
+        set(value) {
+            field = value
+        }
+
+    override fun rice() {
+        otherLocal
+        otherParam
+        otherMember
+        missingEverywhere
+        println(inherited + BASE_CONST + OWN_CONST + later + spice() + helper() + topLevel())
+        listOf(1).forEach { println(it) }
+        listOf(1 to 2).forEach { (k, v) -> println(k + v) }
+        for (i in 0..1) println(i)
+        try {
+            println()
+        } catch (e: Exception) {
+            println(e)
+        }
+        when (val w = later) {
+            1 -> println(w)
+        }
+        fun local() = 1
+        println(local())
+    }
+
+    val later = 1
+
+    inner class Inner {
+        fun f() = later + fromCtor
+    }
+
+    companion object {
+        const val OWN_CONST = 3
+    }
+}
+
+enum class Color {
+    RED, GREEN;
+
+    fun isRed() = this == RED
+}
+
+object Single {
+    val x = 1
+    fun f() = x
+}
+"#;
+    let (lints, text) = fx.run("src/main/kotlin/a/Meal.kt", text);
+    let unresolved: Vec<&str> = lints.iter().filter(|l| l.rule.id == "UNRESOLVED_REFERENCE").map(|l| &text[usize::from(l.range.start())..usize::from(l.range.end())]).collect();
+    assert_eq!(unresolved, ["otherLocal", "otherParam", "otherMember", "missingEverywhere"], "{lints:#?}");
+
+    fx.run("src/main/java/a/JavaBase.java", "package a;\n\npublic class JavaBase {\n    public static final int JAVA_CONST = 1;\n    protected int javaField;\n}\n");
+    fx.run("src/main/kotlin/a/Shapes.kt", "package a\n\ninterface Shape {\n    companion object {\n        const val SIDES = 4\n    }\n}\n");
+    for quiet in [
+        "fun f() = with(Other()) { otherMember }\n",
+        "fun f() = Other().apply { println(otherMember) }\n",
+        "fun f() = Other().run { otherFun(otherMember) }\n",
+        "class T : Thread() {\n    fun f() = MIN_PRIORITY + priority\n}\n",
+        "class J : JavaBase() {\n    fun f() = JAVA_CONST + javaField\n}\n",
+        "class S : Shape {\n    fun f() = SIDES\n}\n",
+        "class Outer {\n    val o = 1\n    class Nested {\n        fun f() = Outer().o\n    }\n}\n",
+    ] {
+        let (lints, text) = fx.run("src/main/kotlin/a/Q.kt", &format!("package a\n\n{quiet}"));
+        let found: Vec<&str> = lints.iter().filter(|l| l.rule.id == "UNRESOLVED_REFERENCE").map(|l| &text[usize::from(l.range.start())..usize::from(l.range.end())]).collect();
+        assert!(found.is_empty(), "{quiet}: {found:?}");
+    }
+}

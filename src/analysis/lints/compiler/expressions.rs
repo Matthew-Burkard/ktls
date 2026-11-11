@@ -73,7 +73,7 @@ struct State {
     this_casting_scopes: HashMap<TextRange, bool>,
     /// Classifiers imported with `import a.C.*`.
     star_class_imports: Vec<String>,
-    /// Names declared in this file (computed on first use).
+    /// Names of this file's top-level declarations (computed on first use).
     file_names: Option<HashSet<String>>,
     /// Names declared in blocks (locals), with their declarations.
     local_names: HashMap<String, Vec<SyntaxNode>>,
@@ -83,15 +83,21 @@ struct State {
 
 impl State {
     /// Whether `name` is declared anywhere it could come from. Unresolved references are
-    /// only reported for names that exist nowhere (typos, deleted declarations): resolution
-    /// of the rest may fail for reasons this engine does not model.
+    /// only reported for names that exist nowhere they could be in scope (typos, deleted
+    /// declarations, names of other scopes): resolution of the rest may fail for reasons
+    /// this engine does not model.
     ///
-    /// After `x.` (`member`), project members of other classes do not count: only
-    /// declarations that could apply to `x` without being its members (extensions, values
-    /// of function type).
+    /// Bare names count when declared around `at` (locals, parameters, members of
+    /// enclosing classes), in scope at the top level, or as something usable bare almost
+    /// anywhere (extensions, classifiers, enum entries, companion and Java members).
+    /// Inherited members are left to the caller.
+    ///
+    /// After `x.` (`member`), only declarations that could apply to `x` without being its
+    /// members count (extensions, values of function type).
     fn exists(&mut self, cx: &Cx, e: &Engine, name: &str, at: &SyntaxNode, member: bool) -> bool {
-        let declared = if member { cx.snap.index.declares_receiver_name(name) } else { cx.snap.index.declares_name(name) };
-        if declared {
+        let index = &cx.snap.index;
+        let anywhere = if member { index.declares_receiver_name(name) } else { index.declares_static_name(name) || declared_around(at, name) };
+        if anywhere {
             return true;
         }
         if self.file_names.is_none() {
@@ -120,7 +126,7 @@ impl State {
                 let decl = if p.kind() == SyntaxKind::DESTRUCTURING_ENTRY { p.parent().and_then(|d| d.parent()).filter(|d| d.kind() == SyntaxKind::PROPERTY).unwrap_or(p) } else { p };
                 if is_local(&decl) {
                     locals.entry(text).or_default().push(decl);
-                } else {
+                } else if decl.parent().is_some_and(|p| matches!(p.kind(), SyntaxKind::KOTLIN_FILE | SyntaxKind::SCRIPT_BODY)) {
                     file.insert(text);
                 }
             }
@@ -159,6 +165,38 @@ impl State {
         });
         scope.contains(name)
     }
+}
+
+/// `name` is a parameter of a declaration around `at` (function, constructor, accessor,
+/// lambda, `catch`, `for`), a `when` subject variable, or a member of an enclosing class
+/// (or of its companion object). Scope boundaries within a declaration are not modelled.
+fn declared_around(at: &SyntaxNode, name: &str) -> bool {
+    let named = |n: &SyntaxNode| n.children_with_tokens().filter_map(|c| c.into_token()).any(|t| t.kind() == SyntaxKind::IDENT && ast::ident_text(&t) == name);
+    // A parameter, or one of its destructured entries (`{ (a, b) -> }`).
+    let param = |p: &SyntaxNode| named(p) || p.descendants().any(|d| d.kind() == SyntaxKind::DESTRUCTURING_ENTRY && named(&d));
+    let params = |n: &SyntaxNode| {
+        n.children().any(|c| match c.kind() {
+            SyntaxKind::VALUE_PARAMETER => param(&c),
+            SyntaxKind::VALUE_PARAMETER_LIST | SyntaxKind::LAMBDA_PARAMETER_LIST => c.children().any(|p| p.kind() == SyntaxKind::VALUE_PARAMETER && param(&p)),
+            SyntaxKind::PRIMARY_CONSTRUCTOR => c.children().filter(|l| l.kind() == SyntaxKind::VALUE_PARAMETER_LIST).any(|l| l.children().any(|p| p.kind() == SyntaxKind::VALUE_PARAMETER && param(&p))),
+            SyntaxKind::WHEN_SUBJECT => c.children().any(|d| d.kind() == SyntaxKind::PROPERTY && named(&d)),
+            _ => false,
+        })
+    };
+    let member_decl = |d: &SyntaxNode| {
+        matches!(d.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::TYPEALIAS | SyntaxKind::ENUM_ENTRY)
+            && (named(d) || d.children().any(|c| c.kind() == SyntaxKind::DESTRUCTURING_DECLARATION))
+    };
+    let members = |cls: &SyntaxNode| {
+        let Some(body) = cls.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY) else { return false };
+        body.children().any(|d| {
+            member_decl(&d)
+                || (d.kind() == SyntaxKind::OBJECT_DECLARATION
+                    && has_modifier(&d, "companion")
+                    && d.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY).is_some_and(|b| b.children().any(|m| member_decl(&m))))
+        })
+    };
+    at.ancestors().skip(1).any(|a| params(&a) || (matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::OBJECT_LITERAL) && members(&a)))
 }
 
 /// Lambdas whose signature is unknown may have receivers (DSLs): names inside them
@@ -350,9 +388,13 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
     if cx.module.is_some_and(|m| m.kotlin.compiler_plugins.iter().any(|p| matches!(p.as_str(), "kapt" | "ksp"))) {
         return;
     }
-    // Members of implicit receivers declared in libraries.
+    // Members of implicit receivers declared in libraries, and static members of their
+    // supertypes (`MIN_PRIORITY` in a `Thread` subclass).
     for (t, _) in e.implicit_receivers(&header_scope(nr)) {
-        if jvm_members(e, &t).is_none_or(|m| m.contains(&name)) || e.all_members(&t).iter().any(|(m, _)| m.name == name) {
+        if jvm_members(e, &t).is_none_or(|m| m.contains(&name))
+            || e.all_members(&t).iter().any(|(m, _)| m.name == name)
+            || e.supertype_closure(&t).iter().filter_map(fq_of).filter_map(|fq| e.classifier(fq)).any(|c| !e.static_members(&c, &name).is_empty())
+        {
             return;
         }
     }

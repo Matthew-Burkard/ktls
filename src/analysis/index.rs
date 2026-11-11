@@ -7,7 +7,8 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use super::source::{FileSummary, SourceDecl};
-use crate::symbols::{SymbolKind, TypeRef};
+use super::source::Language;
+use crate::symbols::{Modifiers, SymbolKind, TypeRef};
 use super::{FileContext, FileData, Workspace};
 
 /// Location of a declaration: file + index path into `FileSummary::decls`.
@@ -42,6 +43,10 @@ pub struct SourceIndex {
     /// Names that may be used after `x.` on some receiver other than their declaring
     /// class's: extensions, and properties and parameters that may hold a function type.
     receiver_names: HashSet<String>,
+    /// Names that may be used bare outside their declaring class: classifiers, enum
+    /// entries, companion object members (in subclasses), Java members (statics), and
+    /// extensions (member extensions apply inside `with(…)`).
+    static_names: HashSet<String>,
     pub file_count: usize,
 }
 
@@ -69,6 +74,16 @@ impl SourceIndex {
                 d.children.iter().for_each(|c| names(c, out));
             }
             s.decls.iter().for_each(|d| names(d, &mut idx.names));
+            fn static_names(d: &SourceDecl, java: bool, companion: bool, out: &mut HashSet<String>) {
+                let s = &d.symbol;
+                if java || companion || s.kind.is_classifier() || s.kind == SymbolKind::EnumEntry || s.receiver.is_some() {
+                    out.insert(s.name.clone());
+                }
+                let companion = s.kind == SymbolKind::Object && s.modifiers.has(Modifiers::COMPANION);
+                d.children.iter().for_each(|c| static_names(c, java, companion, out));
+            }
+            let java = s.language == Language::Java;
+            s.decls.iter().for_each(|d| static_names(d, java, false, &mut idx.static_names));
             for (i, d) in s.decls.iter().enumerate() {
                 let loc = DeclLoc { path: path.clone(), decl: vec![i as u32], ctx: *ctx };
                 idx.top_level.entry(s.package.clone()).or_default().push(loc.clone());
@@ -114,6 +129,12 @@ impl SourceIndex {
     /// Some project source declares something called `name`.
     pub fn declares_name(&self, name: &str) -> bool {
         self.names.contains(name)
+    }
+
+    /// Some project source declares `name` so that it may be used bare outside its
+    /// declaring class (see `static_names`).
+    pub fn declares_static_name(&self, name: &str) -> bool {
+        self.static_names.contains(name)
     }
 
     /// Some project source declares `name` so that `x.name` may resolve on a receiver that
