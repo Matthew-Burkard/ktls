@@ -214,3 +214,18 @@ fn java_sources_are_visible_to_kotlin() {
     let k = fx.add("app/src/main/kotlin/k/Use.kt", "package k\nimport j.Helper\nfun f(h: Helper, i: Helper.Inner, x: j.Helper) {}\n");
     assert!(fx.diagnostics(&k).is_empty());
 }
+
+#[test]
+fn internal_library_types() {
+    let Some(mut fx) = Fixture::new() else { return };
+    let app = fx.add(
+        "app/src/main/kotlin/com/acme/app/Main.kt",
+        "package com.acme.app\n\nclass Implicit : Serializable\nfun f(s: Serializable?, q: java.io.Serializable?) {}\n",
+    );
+    assert_eq!(fx.diagnostics(&app), vec!["Serializable: INVISIBLE_REFERENCE", "Serializable: INVISIBLE_REFERENCE"]);
+    let ok = fx.add(
+        "app/src/main/kotlin/com/acme/app/Ok.kt",
+        "package com.acme.app\n\nimport java.io.Serializable\n\nclass Explicit : Serializable\n",
+    );
+    assert_eq!(fx.diagnostics(&ok), Vec::<String>::new());
+}

@@ -127,7 +127,12 @@ fn compiler_diagnostics(snap: &Snapshot, path: &Path) -> (Vec<Diagnostic>, Cover
         let scope = scope_at(&node, &summary.package, &mut locals_cache);
         let names: Vec<&str> = segs.iter().map(|(s, _)| s.as_str()).collect();
         match resolver.resolve_type_name(&names, &scope) {
-            Ok(Resolved::Classifier(_) | Resolved::TypeParameter(_) | Resolved::Local(_)) => {}
+            Ok(Resolved::Classifier(c)) => {
+                if let Some(d) = internal_library(&c, segs.last().unwrap().1) {
+                    out.push(d);
+                }
+            }
+            Ok(Resolved::TypeParameter(_) | Resolved::Local(_)) => {}
             Ok(_) => out.push(unresolved(segs.last().unwrap().1, &segs.last().unwrap().0)),
             Err(i) => out.push(unresolved(segs[i].1, &segs[i].0)),
         }
@@ -166,6 +171,34 @@ fn compiler_diagnostics(snap: &Snapshot, path: &Path) -> (Vec<Diagnostic>, Cover
     out.sort_by_key(|d| (d.range.start(), d.range.end()));
     out.dedup();
     (out, Coverage::Full)
+}
+
+/// A type naming an `internal` Kotlin declaration of a library (`Serializable` through the
+/// default import of `kotlin.io`, whose alias of that name is internal).
+fn internal_library(c: &super::resolve::Classifier, range: TextRange) -> Option<Diagnostic> {
+    use super::resolve::Classifier;
+    let kotlin = match c {
+        Classifier::Library(lc) => lc.is_kotlin,
+        Classifier::LibraryAlias(_) => true,
+        Classifier::Source(_) => false,
+    };
+    let s = c.symbol();
+    if !kotlin || s.visibility != crate::symbols::Visibility::Internal || !matches!(s.origin, Origin::Library { .. }) {
+        return None;
+    }
+    let outer = match c {
+        // `a/b/Outer$Inner`: nested in `Outer`.
+        Classifier::Library(lc) => lc.internal.rsplit_once('$').map(|(o, _)| o.rsplit(['/', '$']).next().unwrap_or(o).to_string()),
+        _ => None,
+    };
+    let place = outer.map_or_else(|| "file".to_string(), |o| format!("'{o}'"));
+    Some(Diagnostic {
+        range,
+        severity: Severity::Error,
+        message: format!("Cannot access '{}': it is internal in {place}.", s.name),
+        code: "INVISIBLE_REFERENCE",
+        unnecessary: false,
+    })
 }
 
 fn unresolved(range: TextRange, name: &str) -> Diagnostic {
