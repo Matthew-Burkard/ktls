@@ -7,6 +7,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use super::source::{FileSummary, SourceDecl};
+use crate::symbols::{SymbolKind, TypeRef};
 use super::{FileContext, FileData, Workspace};
 
 /// Location of a declaration: file + index path into `FileSummary::decls`.
@@ -38,6 +39,9 @@ pub struct SourceIndex {
     shapes: HashMap<PathBuf, u64>,
     /// Every name declared in project sources (declarations, members, parameters).
     names: HashSet<String>,
+    /// Names that may be used after `x.` on some receiver other than their declaring
+    /// class's: extensions, and properties and parameters that may hold a function type.
+    receiver_names: HashSet<String>,
     pub file_count: usize,
 }
 
@@ -71,6 +75,26 @@ impl SourceIndex {
                 idx.add_classifiers(d, loc);
             }
         }
+        // Second pass: whether a declared type may be a function type depends on the type
+        // aliases of every file.
+        fn aliases(d: &SourceDecl, out: &mut HashSet<String>) {
+            if d.symbol.kind == SymbolKind::TypeAlias {
+                out.insert(d.symbol.name.clone());
+            }
+            d.children.iter().for_each(|c| aliases(c, out));
+        }
+        fn receiver_names(d: &SourceDecl, aliases: &HashSet<String>, out: &mut HashSet<String>) {
+            let s = &d.symbol;
+            let property = matches!(s.kind, SymbolKind::Property | SymbolKind::Field);
+            if s.receiver.is_some() || (property && s.ty.as_ref().is_none_or(|t| may_be_function(t, aliases))) {
+                out.insert(s.name.clone());
+            }
+            out.extend(s.params.iter().filter(|p| may_be_function(&p.ty, aliases)).map(|p| p.name.clone()));
+            d.children.iter().for_each(|c| receiver_names(c, aliases, out));
+        }
+        let mut alias_names = HashSet::new();
+        summaries.iter().flat_map(|(s, _)| &s.decls).for_each(|d| aliases(d, &mut alias_names));
+        summaries.iter().flat_map(|(s, _)| &s.decls).for_each(|d| receiver_names(d, &alias_names, &mut idx.receiver_names));
         idx
     }
 
@@ -90,6 +114,12 @@ impl SourceIndex {
     /// Some project source declares something called `name`.
     pub fn declares_name(&self, name: &str) -> bool {
         self.names.contains(name)
+    }
+
+    /// Some project source declares `name` so that `x.name` may resolve on a receiver that
+    /// does not declare it as a member (see `receiver_names`).
+    pub fn declares_receiver_name(&self, name: &str) -> bool {
+        self.receiver_names.contains(name)
     }
 
     pub fn shape(&self, path: &Path) -> Option<u64> {
@@ -131,5 +161,16 @@ impl SourceIndex {
 
     pub fn all_top_level(&self) -> impl Iterator<Item = (&String, &Vec<DeclLoc>)> {
         self.top_level.iter()
+    }
+}
+
+/// `ty` may be a function type, whose value can be invoked as `x.name()`. Named types
+/// count when a project type alias has their name (library aliases of function types are
+/// rare enough to ignore).
+fn may_be_function(ty: &TypeRef, aliases: &HashSet<String>) -> bool {
+    match ty {
+        TypeRef::Named { name, .. } => aliases.contains(name.rsplit('.').next().unwrap_or(name)),
+        TypeRef::Platform(t) => may_be_function(t, aliases),
+        _ => true,
     }
 }

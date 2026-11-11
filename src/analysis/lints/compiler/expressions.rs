@@ -85,8 +85,13 @@ impl State {
     /// Whether `name` is declared anywhere it could come from. Unresolved references are
     /// only reported for names that exist nowhere (typos, deleted declarations): resolution
     /// of the rest may fail for reasons this engine does not model.
-    fn exists(&mut self, cx: &Cx, e: &Engine, name: &str, at: &SyntaxNode) -> bool {
-        if cx.snap.index.declares_name(name) {
+    ///
+    /// After `x.` (`member`), project members of other classes do not count: only
+    /// declarations that could apply to `x` without being its members (extensions, values
+    /// of function type).
+    fn exists(&mut self, cx: &Cx, e: &Engine, name: &str, at: &SyntaxNode, member: bool) -> bool {
+        let declared = if member { cx.snap.index.declares_receiver_name(name) } else { cx.snap.index.declares_name(name) };
+        if declared {
             return true;
         }
         if self.file_names.is_none() {
@@ -122,7 +127,7 @@ impl State {
             self.file_names = Some(file);
             self.local_names = locals;
         }
-        if self.file_names.as_ref().is_some_and(|f| f.contains(name)) {
+        if !member && self.file_names.as_ref().is_some_and(|f| f.contains(name)) {
             return true;
         }
         // Declarations in blocks are only in scope after them, within their block
@@ -281,7 +286,7 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
     }
     if member {
         let Some(recv) = outer.first_child() else { return };
-        if smart_cast_possible(nr, st) || st.exists(cx, e, &name, nr) {
+        if smart_cast_possible(nr, st) || st.exists(cx, e, &name, nr, true) {
             return;
         }
         // `x.f()` with a local `f` of function type with receiver (`it` of `T.() -> R`).
@@ -314,7 +319,7 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
     if callable_ref && outer.first_child().as_ref() != Some(nr) {
         return;
     }
-    if st.exists(cx, e, &name, nr)
+    if st.exists(cx, e, &name, nr, false)
         || st.star_class_imports.iter().any(|fq| star_import_may_declare(e, fq, &name))
         || !receivers_known(e, nr, st)
         || e.res.package_exists(&name)

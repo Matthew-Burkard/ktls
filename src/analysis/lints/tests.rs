@@ -3988,3 +3988,40 @@ fn same_package_imports_are_redundant() {
     }
     assert_eq!(found.iter().filter(|f| f.starts_with("UnusedImport")).count(), 2, "{found:#?}");
 }
+
+#[test]
+fn members_missing_from_a_changed_receiver_type() {
+    let mut fx = Fixture::new();
+    if !fx.typed() {
+        return;
+    }
+    fx.run("src/main/kotlin/a/Food.kt", "package a\n\nclass Rice {\n    fun color() = 1\n}\nclass Bean {\n    fun size() = 1\n}\n");
+    let ids = |fx: &mut Fixture, text: &str| {
+        let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+        lints.iter().filter(|l| l.rule.id == "UNRESOLVED_REFERENCE").map(|l| text[usize::from(l.range.start())..usize::from(l.range.end())].to_string()).collect::<Vec<_>>()
+    };
+    assert!(ids(&mut fx, "package a\n\nfun f() {\n    val rice = Rice()\n    rice.color()\n}\n").is_empty());
+    assert_eq!(ids(&mut fx, "package a\n\nfun f() {\n    val rice = Bean()\n    rice.color()\n}\n"), ["color"]);
+    assert_eq!(ids(&mut fx, "package a\n\nfun f(rice: Bean) {\n    rice.color()\n}\n"), ["color"]);
+    // Changing the declared type in another file, with this file unchanged.
+    let user = "package a\n\nclass Meal(val rice: Rice)\nfun f(m: Meal) = m.rice.color()\n";
+    assert!(ids(&mut fx, user).is_empty());
+    fx.run("src/main/kotlin/a/Meal.kt", "package a\n");
+    fx.run("src/main/kotlin/a/Food.kt", "package a\n\nclass Rice {\n    fun size() = 1\n}\n");
+    assert_eq!(ids(&mut fx, user), ["color"]);
+    fx.run("src/main/kotlin/a/Food.kt", "package a\n\nclass Rice {\n    fun color() = 1\n}\nclass Bean {\n    fun size() = 1\n}\n");
+
+    // Names that may apply to a `Bean` without being its members.
+    for quiet in [
+        "fun Bean.color() = 1\nfun f(rice: Bean) = rice.color()\n",
+        "fun f(rice: Bean, color: Bean.() -> Int) = rice.color()\n",
+        "val color: Bean.() -> Int = { 1 }\nfun f(rice: Bean) = rice.color()\n",
+        "typealias Painter = Bean.() -> Int\nclass Box(val color: Painter) {\n    fun f(rice: Bean) = rice.color()\n}\n",
+        "class Scope {\n    fun Bean.color() = 1\n}\nfun f(rice: Bean) = with(Scope()) { rice.color() }\n",
+        "fun f(rice: Bean) {\n    fun Bean.color() = 1\n    rice.color()\n}\n",
+        "fun f(rice: Bean) {\n    val color: Bean.() -> Int = { 1 }\n    rice.color()\n}\n",
+    ] {
+        let found = ids(&mut fx, &format!("package a\n\n{quiet}"));
+        assert!(found.is_empty(), "{quiet}: {found:?}");
+    }
+}
