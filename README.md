@@ -204,7 +204,7 @@ supertypes, generated code).
 | Rule | Default | Flags |
 |---|---|---|
 | `UnusedImport` | warning | Import directive that nothing in the file uses |
-| `UNUSED_VARIABLE` | warning | Local variable that is never read |
+| `UNUSED_VARIABLE` | warning | Local variable or catch parameter that is never read |
 | `UNUSED_PARAMETER` | warning | Function or constructor parameter that is never used |
 | `UNUSED_ANONYMOUS_PARAMETER` | info | Lambda parameter that is never used (can be '_') |
 | `UnusedSymbol` | warning | Private or local declaration that is never used |

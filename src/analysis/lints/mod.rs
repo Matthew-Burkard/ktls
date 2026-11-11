@@ -335,7 +335,7 @@ rules! {
     UNUSED_LAMBDA_EXPRESSION = "UNUSED_LAMBDA_EXPRESSION", Compiler, Warning, true, [], "Lambda literal used as a statement (never called)";
 
     UNUSED_IMPORT = "UnusedImport", Unused, Warning, true, ["unused"], "Import directive that nothing in the file uses";
-    UNUSED_VARIABLE = "UNUSED_VARIABLE", Unused, Warning, true, ["unused", "UnusedVariable"], "Local variable that is never read";
+    UNUSED_VARIABLE = "UNUSED_VARIABLE", Unused, Warning, true, ["unused", "UnusedVariable"], "Local variable or catch parameter that is never read";
     UNUSED_PARAMETER = "UNUSED_PARAMETER", Unused, Warning, true, ["unused", "UnusedParameter"], "Function or constructor parameter that is never used";
     UNUSED_ANONYMOUS_PARAMETER = "UNUSED_ANONYMOUS_PARAMETER", Unused, Info, true, ["unused"], "Lambda parameter that is never used (can be '_')";
     UNUSED_SYMBOL = "UnusedSymbol", Unused, Warning, true, ["unused", "UnusedPrivateMember", "UnusedPrivateProperty", "UnusedPrivateClass"], "Private or local declaration that is never used";

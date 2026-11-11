@@ -3911,3 +3911,21 @@ fun other() {
         "{found:#?}"
     );
 }
+
+#[test]
+fn unused_catch_parameters() {
+    let found = lint(
+        r#"package a
+
+fun f() {
+    try { println() } catch (unused: Exception) {}
+    try { println() } catch (used: Exception) { println(used) }
+    try { println() } catch (_: Exception) {}
+    try { println() } catch (@Keep annotated: Exception) {}
+}
+"#,
+    );
+    let catch: Vec<_> = found.iter().filter(|f| f.starts_with("UNUSED_VARIABLE")).collect();
+    assert_eq!(catch, vec!["UNUSED_VARIABLE: unused"], "{found:#?}");
+    assert_eq!(fixed("fun f() { try {} catch (e: Exception) {} }\n", "UNUSED_VARIABLE"), "fun f() { try {} catch (_: Exception) {} }\n");
+}

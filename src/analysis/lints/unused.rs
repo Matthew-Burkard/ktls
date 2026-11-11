@@ -37,6 +37,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             }
             SyntaxKind::PRIMARY_CONSTRUCTOR | SyntaxKind::SECONDARY_CONSTRUCTOR => unused_constructor_parameters(cx, &n, out),
             SyntaxKind::LAMBDA_EXPR => unused_lambda_parameters(cx, &n, out),
+            SyntaxKind::CATCH_CLAUSE => unused_catch_parameter(cx, &n, out),
             SyntaxKind::CLASS => {
                 unused_declaration(cx, &n, out);
                 can_be_parameter(cx, &n, out);
@@ -303,6 +304,20 @@ fn unused_lambda_parameters(cx: &Cx, lambda: &SyntaxNode, out: &mut Sink) {
             );
         }
     }
+}
+
+/// `catch (e: Exception) {}` never reading `e`: it can be `_` (Kotlin 2.0+).
+fn unused_catch_parameter(cx: &Cx, clause: &SyntaxNode, out: &mut Sink) {
+    if !cx.on(&UNUSED_VARIABLE) || cx.language_version().is_some_and(|v| v < 200) {
+        return;
+    }
+    let Some(p) = clause.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER_LIST).and_then(|l| l.children().find(|c| c.kind() == SyntaxKind::VALUE_PARAMETER)) else { return };
+    let Some(tok) = name_token(&p) else { return };
+    let name = ast::ident_text(&tok);
+    if name == "_" || has_annotations(&p) || parameter_used(cx, clause, &tok) {
+        return;
+    }
+    out.report(&UNUSED_VARIABLE, tok.text_range(), format!("Parameter '{name}' is never used, could be renamed to _"), Some(Fix::replace("Rename to _", tok.text_range(), "_")));
 }
 
 /// The range that removes `item` and one adjacent comma from its list.
