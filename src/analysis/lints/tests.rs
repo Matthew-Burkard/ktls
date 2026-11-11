@@ -3929,3 +3929,45 @@ fun f() {
     assert_eq!(catch, vec!["UNUSED_VARIABLE: unused"], "{found:#?}");
     assert_eq!(fixed("fun f() { try {} catch (e: Exception) {} }\n", "UNUSED_VARIABLE"), "fun f() { try {} catch (_: Exception) {} }\n");
 }
+
+#[test]
+fn not_null_assertions_that_may_not_run() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+fun getNullable(): String? = null
+fun acceptNotNull(s: String) = s
+
+fun elvis(other: String?) {
+    val beans = getNullable()
+    val rice = beans ?: other!!
+    acceptNotNull(other)
+}
+
+fun and(flag: Boolean, other: String?) {
+    val ok = flag && other!!.isEmpty()
+    acceptNotNull(other)
+}
+
+fun safe(beans: String?, other: String?) {
+    beans?.plus(other!!)
+    acceptNotNull(other)
+}
+
+fun always(other: String?) {
+    other!!
+    acceptNotNull(other)
+}
+
+fun left(other: String?) {
+    val rice = other!! ?: ""
+    acceptNotNull(other)
+}
+"#,
+    );
+    let args: Vec<_> = found.iter().filter(|f| f.starts_with("ARGUMENT_TYPE_MISMATCH")).collect();
+    assert_eq!(args, vec!["ARGUMENT_TYPE_MISMATCH: other"; 3], "{found:#?}");
+}

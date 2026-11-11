@@ -726,7 +726,7 @@ pub(super) fn nullable_local(e: &Engine, nr: &SyntaxNode) -> Option<String> {
     // Uses before this one, or in a loop around it (they run before the next iteration).
     let loops: Vec<SyntaxNode> = nr.ancestors().take_while(|a| *a != scope).filter(|a| matches!(a.kind(), SyntaxKind::FOR_EXPR | SyntaxKind::WHILE_EXPR | SyntaxKind::DO_WHILE_EXPR)).collect();
     let earlier = |r: &SyntaxNode| r.text_range().start() < nr.text_range().start() || loops.iter().any(|l| l.text_range().contains_range(r.text_range()));
-    let narrowed = scope.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d != nr && d.first_token().is_some_and(|t| ast::ident_text(&t) == name)).any(|r| earlier(&r) && may_narrow(e, &r));
+    let narrowed = scope.descendants().filter(|d| d.kind() == SyntaxKind::NAME_REF && d != nr && d.first_token().is_some_and(|t| ast::ident_text(&t) == name)).any(|r| earlier(&r) && !skippable(&r, nr, &scope) && may_narrow(e, &r));
     if narrowed {
         return None;
     }
@@ -899,6 +899,29 @@ fn in_modeled_condition(n: &SyntaxNode) -> bool {
             _ => return false,
         }
         cur = p;
+    }
+    false
+}
+
+/// `r` may not run before `at`: it is in the right operand of `?:`, `&&` or `||`, or the
+/// selector of a safe call (`a ?: x!!`, `a?.f(x!!)`), which `at` is outside of. What it
+/// would establish about the name does not hold at `at`.
+fn skippable(r: &SyntaxNode, at: &SyntaxNode, scope: &SyntaxNode) -> bool {
+    let mut child = r.clone();
+    while let Some(p) = child.parent() {
+        if p == *scope || p.text_range().contains_range(at.text_range()) {
+            return false;
+        }
+        let right = p.first_child().as_ref() != Some(&child);
+        let conditional = match p.kind() {
+            SyntaxKind::BINARY_EXPR => right && binary_op(&p).is_some_and(|o| matches!(o.kind(), SyntaxKind::ELVIS | SyntaxKind::AMP2 | SyntaxKind::PIPE2)),
+            SyntaxKind::SAFE_QUALIFIED_EXPR => right,
+            _ => false,
+        };
+        if conditional {
+            return true;
+        }
+        child = p;
     }
     false
 }
