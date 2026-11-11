@@ -3971,3 +3971,20 @@ fun left(other: String?) {
     let args: Vec<_> = found.iter().filter(|f| f.starts_with("ARGUMENT_TYPE_MISMATCH")).collect();
     assert_eq!(args, vec!["ARGUMENT_TYPE_MISMATCH: other"; 3], "{found:#?}");
 }
+
+#[test]
+fn same_package_imports_are_redundant() {
+    let mut fx = Fixture::new();
+    fx.run("src/main/kotlin/a/S.kt", "package a\n\nclass Shape {\n    class Inner\n}\nfun helper() = 1\n");
+    fx.run("src/main/kotlin/a/b/T.kt", "package a.b\n\nclass Other\n");
+    let text = "package a\n\nimport a.Shape\nimport a.helper\nimport a.Shape.Inner\nimport a.Shape as S\nimport a.b.Other\n\nfun f(s: Shape, i: Inner, t: S, o: Other) = helper()\n";
+    let (lints, text) = fx.run("src/main/kotlin/a/A.kt", text);
+    let found: Vec<String> = lints.iter().map(|l| format!("{}: {}", l.rule.id, &text[usize::from(l.range.start())..usize::from(l.range.end())])).collect();
+    has(&found, "UnusedImport: import a.Shape");
+    has(&found, "UnusedImport: import a.helper");
+    // Nested classes, aliases and subpackages are not in scope without the import.
+    for quiet in ["import a.Shape.Inner", "import a.Shape as S", "import a.b.Other"] {
+        assert!(!found.iter().any(|f| f.ends_with(quiet)), "{quiet}: {found:#?}");
+    }
+    assert_eq!(found.iter().filter(|f| f.starts_with("UnusedImport")).count(), 2, "{found:#?}");
+}

@@ -70,6 +70,16 @@ pub(super) fn unused_imports(cx: &Cx, out: &mut Sink) {
         }
         let name = imp.alias.clone().unwrap_or_else(|| imp.segments.last().unwrap().0.clone());
         let duplicate = !seen.insert((imp.path(), imp.alias.clone()));
+        if !duplicate && same_package(resolver.as_ref(), imp, &summary.package) {
+            let range = imp.range;
+            out.report(
+                &UNUSED_IMPORT,
+                range,
+                format!("Redundant import: '{name}' is in the same package"),
+                Some(Fix::delete("Remove redundant import", deletion_range(cx.text, range))),
+            );
+            continue;
+        }
         if !duplicate {
             if used.contains(&name) || is_convention_name(&imp.segments.last().unwrap().0) || kdoc_mentions(&kdoc, &name) {
                 continue;
@@ -82,6 +92,22 @@ pub(super) fn unused_imports(cx: &Cx, out: &mut Sink) {
         }
         let range = imp.range;
         out.report(&UNUSED_IMPORT, range, "Unused import directive", Some(Fix::delete("Remove unused import", deletion_range(cx.text, range))));
+    }
+}
+
+/// An unaliased import of a top-level declaration of the file's own package, which is in
+/// scope without it.
+fn same_package(resolver: Option<&crate::analysis::resolve::Resolver<'_>>, imp: &crate::analysis::source::Import, package: &str) -> bool {
+    use crate::analysis::resolve::Resolved;
+    let Some((pkg, _)) = imp.path().rsplit_once('.').map(|(p, n)| (p.to_string(), n.to_string())) else { return false };
+    if imp.alias.is_some() || pkg != package {
+        return false;
+    }
+    let Some(r) = resolver else { return false };
+    match r.resolve_import(imp) {
+        Ok(Resolved::Classifier(c)) => c.fq_name() == imp.path(),
+        Ok(Resolved::Callables(syms)) => syms.iter().all(|s| s.fq_name == imp.path()),
+        _ => false,
     }
 }
 
