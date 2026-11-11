@@ -186,7 +186,8 @@ fn in_context_scope(at: &SyntaxNode) -> bool {
 /// Casts of other values only matter for qualified names (`smart_cast_possible`).
 fn this_cast_possible(at: &SyntaxNode, st: &mut State) -> bool {
     let Some(scope) = at.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::CLASS_INITIALIZER | SyntaxKind::SECONDARY_CONSTRUCTOR) && !is_local(a)) else {
-        return true;
+        // Class headers have no `this` to cast.
+        return header_scope(at) == *at;
     };
     let is_this = |n: &SyntaxNode| {
         let mut n = n.clone();
@@ -217,12 +218,28 @@ fn this_cast_possible(at: &SyntaxNode, st: &mut State) -> bool {
 /// `is` checks and casts in the enclosing declaration may smart-cast receivers.
 fn smart_cast_possible(at: &SyntaxNode, st: &mut State) -> bool {
     let Some(scope) = at.ancestors().find(|a| matches!(a.kind(), SyntaxKind::FUN | SyntaxKind::PROPERTY | SyntaxKind::CLASS_INITIALIZER | SyntaxKind::SECONDARY_CONSTRUCTOR) && !is_local(a)) else {
-        return true;
+        // Class headers: casts in supertype arguments or constructor defaults.
+        let header = header_scope(at);
+        return header == *at
+            || header.children().filter(|c| c.kind() != SyntaxKind::CLASS_BODY).any(|c| tokens(&c).any(|t| matches!(t.kind(), SyntaxKind::IS_KW | SyntaxKind::NOT_IS_KW | SyntaxKind::AS_KW | SyntaxKind::AS_SAFE_KW)));
     };
     // Cached: scanning the whole declaration again for every reference in it is quadratic.
     *st.casting_scopes
         .entry(scope.text_range())
         .or_insert_with(|| tokens(&scope).any(|t| matches!(t.kind(), SyntaxKind::IS_KW | SyntaxKind::NOT_IS_KW | SyntaxKind::AS_KW | SyntaxKind::AS_SAFE_KW)))
+}
+
+/// For a name in a class header (annotations, constructor, supertypes), the class node:
+/// its receivers are the class's surroundings', not the class itself. Otherwise `at`.
+fn header_scope(at: &SyntaxNode) -> SyntaxNode {
+    for a in at.ancestors().skip(1) {
+        match a.kind() {
+            SyntaxKind::CLASS_BODY | SyntaxKind::LAMBDA_EXPR | SyntaxKind::FUN => break,
+            SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::OBJECT_LITERAL => return a,
+            _ => {}
+        }
+    }
+    at.clone()
 }
 
 /// All enclosing classes have fully known hierarchies (otherwise inherited names are unknown).
@@ -232,7 +249,9 @@ fn receivers_known(e: &Engine, at: &SyntaxNode, st: &mut State) -> bool {
             return false;
         }
     }
-    for anc in at.ancestors().filter(|a| matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::OBJECT_LITERAL)) {
+    // Only bodies see the class's members: not its annotations, constructor or supertypes.
+    let in_body = |a: &SyntaxNode| a.children().find(|c| c.kind() == SyntaxKind::CLASS_BODY).is_some_and(|b| b.text_range().contains_range(at.text_range()));
+    for anc in at.ancestors().filter(|a| matches!(a.kind(), SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION | SyntaxKind::OBJECT_LITERAL) && in_body(a)) {
         let key = anc.text_range();
         let known = *st.complete_classes.entry(key).or_insert_with(|| {
             let t = match anc.kind() {
@@ -250,7 +269,7 @@ fn receivers_known(e: &Engine, at: &SyntaxNode, st: &mut State) -> bool {
 
 fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink) {
     let Some(tok) = nr.first_token().filter(|t| t.kind() == SyntaxKind::IDENT) else { return };
-    if nr.ancestors().any(|a| matches!(a.kind(), SyntaxKind::ANNOTATION | SyntaxKind::IMPORT_DIRECTIVE | SyntaxKind::PACKAGE_DIRECTIVE)) {
+    if nr.ancestors().any(|a| matches!(a.kind(), SyntaxKind::IMPORT_DIRECTIVE | SyntaxKind::PACKAGE_DIRECTIVE)) {
         return;
     }
     let name = ast::ident_text(&tok);
@@ -321,7 +340,7 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
     }
     if st.exists(cx, e, &name, nr, false)
         || st.star_class_imports.iter().any(|fq| star_import_may_declare(e, fq, &name))
-        || !receivers_known(e, nr, st)
+        || !receivers_known(e, &header_scope(nr), st)
         || e.res.package_exists(&name)
         || this_cast_possible(nr, st)
     {
@@ -332,7 +351,7 @@ fn name_ref(cx: &Cx, e: &Engine, nr: &SyntaxNode, st: &mut State, out: &mut Sink
         return;
     }
     // Members of implicit receivers declared in libraries.
-    for (t, _) in e.implicit_receivers(nr) {
+    for (t, _) in e.implicit_receivers(&header_scope(nr)) {
         if jvm_members(e, &t).is_none_or(|m| m.contains(&name)) || e.all_members(&t).iter().any(|(m, _)| m.name == name) {
             return;
         }

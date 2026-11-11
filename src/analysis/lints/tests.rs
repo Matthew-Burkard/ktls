@@ -4025,3 +4025,64 @@ fn members_missing_from_a_changed_receiver_type() {
         assert!(found.is_empty(), "{quiet}: {found:?}");
     }
 }
+
+#[test]
+fn unresolved_names_in_annotation_arguments() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"@file:JvmName("X")
+
+package a
+
+import kotlin.annotation.AnnotationTarget.FUNCTION
+
+const val PATH = "/p"
+
+annotation class Mapping(vararg val value: String)
+annotation class Targets(val t: AnnotationTarget, val k: kotlin.reflect.KClass<*>)
+
+object Paths {
+    const val API = "/api"
+}
+
+@Mapping(DOES_NOT_EXIST)
+class A
+
+@Mapping(value = [PATH, Paths.API, Paths.MISSING, MISSING_TOO])
+class B {
+    @Mapping(LOCAL)
+    fun f() {}
+
+    companion object {
+        const val LOCAL = "/l"
+    }
+}
+
+open class Base(val s: String)
+class C(val x: String = MISSING_DEFAULT) : Base(MISSING_SUPER)
+class D(p: String, q: Any) : Base(p + PATH + (q as String) + Paths.API)
+
+@Mapping(OWN)
+class E {
+    companion object {
+        const val OWN = "/own"
+    }
+}
+
+@Targets(t = FUNCTION, k = B::class)
+@Suppress("UNUSED")
+fun g() {}
+"#,
+    );
+    let unresolved: Vec<&String> = found.iter().filter(|f| f.starts_with("UNRESOLVED_REFERENCE")).collect();
+    assert_eq!(unresolved, [
+            "UNRESOLVED_REFERENCE: DOES_NOT_EXIST",
+            "UNRESOLVED_REFERENCE: MISSING",
+            "UNRESOLVED_REFERENCE: MISSING_TOO",
+            "UNRESOLVED_REFERENCE: MISSING_DEFAULT",
+            "UNRESOLVED_REFERENCE: MISSING_SUPER",
+        ], "{found:#?}");
+}
+
