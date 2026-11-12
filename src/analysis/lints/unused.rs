@@ -219,12 +219,8 @@ fn signature_is_fixed(cx: &Cx, f: &SyntaxNode) -> bool {
     if ["override", "open", "abstract", "actual", "expect", "operator", "external"].iter().any(|m| has_modifier(f, m)) {
         return true;
     }
-    // Annotated functions are usually called by frameworks (tests, web handlers, DI);
-    // deprecated ones keep their signature.
-    let annotated = modifiers(f).is_some_and(|m| {
-        m.annotations().any(|a| !matches!(a.type_ref().map(|t| t.syntax().text().to_string()).as_deref(), Some("Suppress" | "kotlin.Suppress")))
-    });
-    if annotated {
+    // Deprecated functions keep their signature for existing callers.
+    if annotation_named(f, &["Deprecated", "kotlin.Deprecated", "java.lang.Deprecated"]) {
         return true;
     }
     if owner(f).is_some_and(|o| is_interface(&o) || has_modifier(&o, "expect")) {
@@ -241,6 +237,16 @@ fn signature_is_fixed(cx: &Cx, f: &SyntaxNode) -> bool {
     } else {
         cx.snap.files.values().any(|file| file.text.contains(&reference))
     }
+}
+
+fn annotation_named(f: &SyntaxNode, names: &[&str]) -> bool {
+    modifiers(f).is_some_and(|m| m.annotations().any(|a| a.type_ref().is_some_and(|t| names.contains(&t.syntax().text().to_string().as_str()))))
+}
+
+/// Annotations other than `@Suppress`: the function is likely called by a framework (tests,
+/// web handlers, event listeners), which may rely on its parameters' types.
+fn framework_called(f: &SyntaxNode) -> bool {
+    modifiers(f).is_some_and(|m| m.annotations().any(|a| !matches!(a.type_ref().map(|t| t.syntax().text().to_string()).as_deref(), Some("Suppress" | "kotlin.Suppress"))))
 }
 
 /// Bodies that intentionally ignore their parameters: `{}`, `TODO()`, `throw ...`.
@@ -270,10 +276,13 @@ fn unused_parameters(cx: &Cx, f: &SyntaxNode, out: &mut Sink) {
     if unused.is_empty() || signature_is_fixed(cx, f) {
         return;
     }
+    // Framework-called functions are still reported, but removing a parameter is left to
+    // the user: the framework may depend on it.
+    let removable = !framework_called(f);
     for p in unused {
         let tok = p.name_token().unwrap();
         let name = ast::ident_text(&tok);
-        let fix = remove_parameter_fix(cx, f, &p);
+        let fix = if removable { remove_parameter_fix(cx, f, &p) } else { None };
         out.report(&UNUSED_PARAMETER, tok.text_range(), format!("Parameter '{name}' is never used"), fix);
     }
 }

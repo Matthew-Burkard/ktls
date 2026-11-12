@@ -1079,8 +1079,6 @@ class Impl : Base(), Handler {
 }
 open class Open { open fun extensible(x: Int) { println() } }
 @Suppress("X") @Deprecated("old") fun deprecated(x: Int) { println() }
-annotation class Test
-@Test fun annotated(x: Int) { println() }
 fun stub(x: Int): Int = TODO()
 fun empty(x: Int) {}
 fun throwing(x: Int): Int = throw UnsupportedOperationException()
@@ -1101,6 +1099,15 @@ operator fun String.getValue(thisRef: Any?, property: Any?): String = this
     let text = "package a\n\nprivate fun last(a: Int, b: Int) = a\nfun g() = last(1, 2)\n";
     assert_eq!(fixed(text, "UNUSED_PARAMETER"), "package a\n\nprivate fun last(a: Int) = a\nfun g() = last(1)\n");
     assert_eq!(fixed("fun f() = listOf(1).map { x -> 2 }\n", "UNUSED_ANONYMOUS_PARAMETER"), "fun f() = listOf(1).map { _ -> 2 }\n");
+
+    // Annotated (framework-called) functions are reported, without the removal fix;
+    // annotated parameters are not reported.
+    let (lints, text) = Fixture::new().run(
+        "src/main/kotlin/a/A.kt",
+        "package a\n\nannotation class Handler\nannotation class Bound\n@Handler private fun on(event: String, @Bound id: Int) { println() }\nfun g() = on(\"\", 1)\n",
+    );
+    let unused: Vec<(&str, bool)> = lints.iter().filter(|l| l.rule.id == "UNUSED_PARAMETER").map(|l| (&text[usize::from(l.range.start())..usize::from(l.range.end())], l.fix.is_some())).collect();
+    assert_eq!(unused, [("event", false)]);
 }
 
 #[test]
