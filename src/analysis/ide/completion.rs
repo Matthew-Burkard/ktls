@@ -137,7 +137,7 @@ pub fn complete(snap: &Snapshot, path: &Path, offset: TextSize, opts: Options) -
     let next_char = file.text[o..].chars().find(|c| !c.is_alphanumeric() && *c != '_');
     let context = classify(&tok, &text)?;
     let expected = tok.parent().and_then(|n| expected_type(&e, &n));
-    let mut c = Collector { e: &e, file, prefix, opts, next_char, offset, items: Vec::new(), seen: HashSet::new(), truncated: false, expected, conforming: HashMap::new(), annotation: false };
+    let mut c = Collector { e: &e, file, prefix, opts, next_char, offset, items: Vec::new(), seen: HashSet::new(), importing: None, truncated: false, expected, conforming: HashMap::new(), annotation: false };
     match context {
         Context::Member { recv, callable_ref } => c.members(&recv, &tok, callable_ref),
         Context::Scope { at, statement, callable_ref } => c.scope(&at, statement, callable_ref),
@@ -176,7 +176,7 @@ fn kdoc_completion(snap: &Snapshot, file: &Arc<FileData>, offset: TextSize, opts
     let decl = e.root.covering_element(link.decl.text_range()).ancestors().find(|a| a.text_range() == link.decl.text_range() && a.kind() == link.decl.kind())?;
     let (prefix, range) = link.segments.last()?.clone();
     let range = TextRange::new(range.start(), offset);
-    let mut c = Collector { e: &e, file, prefix: prefix[..usize::from(range.len()).min(prefix.len())].to_string(), opts, next_char: None, offset, items: Vec::new(), seen: HashSet::new(), truncated: false, expected: None, conforming: HashMap::new(), annotation: false };
+    let mut c = Collector { e: &e, file, prefix: prefix[..usize::from(range.len()).min(prefix.len())].to_string(), opts, next_char: None, offset, items: Vec::new(), seen: HashSet::new(), importing: None, truncated: false, expected: None, conforming: HashMap::new(), annotation: false };
     let at = kdoc::anchor(&decl);
     if link.segments.len() == 1 {
         for (name, _) in kdoc::parameters(&decl) {
@@ -323,6 +323,8 @@ struct Collector<'a, 's> {
     offset: TextSize,
     items: Vec<Item>,
     seen: HashSet<(String, Option<String>, Option<String>)>,
+    /// FQ name that items pushed now import (see `with_import`).
+    importing: Option<String>,
     truncated: bool,
     /// The class (and nullability) the value at the cursor should have.
     expected: Option<(String, bool)>,
@@ -364,6 +366,11 @@ impl Collector<'_, '_> {
         let key = item.filter.clone().unwrap_or_else(|| item.label.clone());
         if !matches(&self.prefix, &key) {
             return;
+        }
+        // Before deduplication: same-named declarations of different packages stay apart.
+        if let Some(fq) = &self.importing {
+            item.additional = vec![import_edit(self.file, fq)];
+            item.description = Some(package_of(fq));
         }
         if let Some(t) = item.ty.take() {
             // A class is a value only through a constructor.
@@ -527,13 +534,18 @@ impl Collector<'_, '_> {
         }
         let mut sym = sym.clone();
         sym.name = name.to_string();
-        let before = self.items.len();
-        self.symbol(&sym, &Subst::new(), rank, false, false);
-        if import && self.items.len() > before {
-            let item = self.items.last_mut().unwrap();
-            item.additional = vec![import_edit(self.file, fq)];
-            item.description = Some(package_of(fq));
+        if import {
+            self.with_import(fq, |c| c.symbol(&sym, &Subst::new(), rank, false, false));
+        } else {
+            self.symbol(&sym, &Subst::new(), rank, false, false);
         }
+    }
+
+    /// Run `f`, with every item it pushes importing `fq`.
+    fn with_import(&mut self, fq: &str, f: impl FnOnce(&mut Self)) {
+        let outer = self.importing.replace(fq.to_string());
+        f(self);
+        self.importing = outer;
     }
 
     fn keywords(&mut self, words: &[&str]) {
@@ -1158,14 +1170,7 @@ impl Collector<'_, '_> {
                 if s.visibility != crate::symbols::Visibility::Public && s.visibility != crate::symbols::Visibility::Internal || !seen.insert(s.fq_name.clone()) {
                     continue;
                 }
-                let fq = s.fq_name.clone();
-                let before = self.items.len();
-                self.symbol(&s, &Subst::new(), 6, false, true);
-                if self.items.len() > before {
-                    let item = self.items.last_mut().unwrap();
-                    item.additional = vec![import_edit(self.file, &fq)];
-                    item.description = Some(package_of(&fq));
-                }
+                self.with_import(&s.fq_name, |c| c.symbol(&s, &Subst::new(), 6, false, true));
             }
         }
     }
@@ -1193,13 +1198,7 @@ impl Collector<'_, '_> {
             if !seen.insert(s.fq_name.clone()) {
                 continue;
             }
-            let before = self.items.len();
-            self.symbol(&s, &subst, 6, true, true);
-            if self.items.len() > before {
-                let item = self.items.last_mut().unwrap();
-                item.additional = vec![import_edit(self.file, &s.fq_name)];
-                item.description = Some(package_of(&s.fq_name));
-            }
+            self.with_import(&s.fq_name, |c| c.symbol(&s, &subst, 6, true, true));
         }
     }
 }

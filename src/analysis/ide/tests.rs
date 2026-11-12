@@ -1671,3 +1671,20 @@ fn intention_assists() {
     );
     assert_eq!(body(fx.assist(&f("    xs.for$0Each { x -> println(x) }"), "Replace with a 'for'").unwrap()), "    for (x in xs) {\n        println(x)\n    }");
 }
+
+#[test]
+fn auto_import_offers_every_package_of_a_name() {
+    let Some(mut fx) = fixture() else { return };
+    fx.host.set_file(fx.root.join("src/lib/one/Service.kt"), Arc::from("package lib.one\n\nclass Service\nfun helper() = 1\nfun String.shout() = this\n"), Some(1));
+    fx.host.set_file(fx.root.join("src/lib/two/Service.kt"), Arc::from("package lib.two\n\nannotation class Service\nfun helper() = 2\nfun String.shout() = this\n"), Some(1));
+    // Same-named classes, functions and extensions of different packages are all offered.
+    let mut imported = |text: &str, label: &str| -> Vec<String> {
+        let mut out: Vec<String> = fx.complete(text).items.into_iter().filter(|i| i.label == label).filter_map(|i| i.description).collect();
+        out.sort();
+        out
+    };
+    assert_eq!(imported("package app\n\nval x: Servi$0\n", "Service"), ["lib.one", "lib.two"]);
+    assert_eq!(imported("package app\n\n@Servi$0\nclass A\n", "Service"), ["lib.one", "lib.two"]);
+    assert_eq!(imported("package app\n\nfun f() = helpe$0\n", "helper"), ["lib.one", "lib.two"]);
+    assert_eq!(imported("package app\n\nfun f() = \"a\".shou$0\n", "shout"), ["app.model", "lib.one", "lib.two"]);
+}
