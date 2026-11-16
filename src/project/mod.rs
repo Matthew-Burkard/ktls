@@ -4,6 +4,7 @@
 pub mod coords;
 pub mod gradle;
 pub mod jdk;
+pub mod kotlinc;
 pub mod maven;
 pub mod pom;
 pub mod repo;
@@ -169,6 +170,10 @@ pub struct LoadOptions {
     pub extra_repositories: Vec<Repository>,
     /// Override the environment-derived repository configuration (tests).
     pub repo_config: Option<RepoConfig>,
+    /// Kotlin home whose standard library folders without a build file compile against.
+    pub kotlin_home: Option<PathBuf>,
+    /// Without `kotlin_home`, look for an installed `kotlinc` (off in hermetic tests).
+    pub find_kotlin: bool,
 }
 
 impl LoadOptions {
@@ -185,6 +190,7 @@ impl LoadOptions {
             servers: Default::default(),
             negative_ttl: std::time::Duration::from_secs(60),
         });
+        o.find_kotlin = false;
         o
     }
 
@@ -197,6 +203,8 @@ impl LoadOptions {
             progress: None,
             extra_repositories: Vec::new(),
             repo_config: None,
+            kotlin_home: None,
+            find_kotlin: true,
         }
     }
 
@@ -276,7 +284,7 @@ pub fn load(root: &Path, build_system: BuildSystem, opts: &LoadOptions) -> Proje
     let project = match build_system {
         BuildSystem::Gradle => gradle::load(root, opts),
         BuildSystem::Maven => maven::load(root, opts),
-        BuildSystem::None => plain_project(root),
+        BuildSystem::None => plain_project(root, opts),
     };
     if project.build_system != BuildSystem::None {
         save_cached(&project, opts);
@@ -284,8 +292,9 @@ pub fn load(root: &Path, build_system: BuildSystem, opts: &LoadOptions) -> Proje
     project
 }
 
-/// A directory without a build system: every Kotlin/Java file is a source.
-fn plain_project(root: &Path) -> Project {
+/// A directory without a build system: every Kotlin/Java file is a source, compiled (as
+/// with `kotlinc`) against the installed standard library and the jars in `lib/`/`libs/`.
+fn plain_project(root: &Path, opts: &LoadOptions) -> Project {
     let mut roots = Vec::new();
     for candidate in ["src/main/kotlin", "src/main/java", "src"] {
         let p = root.join(candidate);
@@ -303,6 +312,15 @@ fn plain_project(root: &Path) -> Project {
             roots.push(SourceRoot { path: p, kind: SourceKind::Test, generated: false, source_set: "test".into() });
         }
     }
+    let stdlib = if opts.kotlin_home.is_some() || opts.find_kotlin { kotlinc::stdlib(opts.kotlin_home.as_deref()) } else { None };
+    let (local_classpath, problems) = match stdlib {
+        Some(jar) => {
+            let problem = format!("No build file found: compiling against {} and the jars in lib/ and libs/", jar.display());
+            let jars = std::iter::once(jar).chain(kotlinc::local_jars(root)).map(|j| (j, Scope::Compile)).collect();
+            (jars, vec![problem])
+        }
+        None => (Vec::new(), vec!["No build file found and no Kotlin installation found (set kotlin.kotlinHome or KOTLIN_HOME): library dependencies are unknown".into()]),
+    };
     Project {
         root: root.to_path_buf(),
         build_system: BuildSystem::None,
@@ -310,8 +328,9 @@ fn plain_project(root: &Path) -> Project {
             name: root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "root".into()),
             dir: root.to_path_buf(),
             source_roots: roots,
-            complete: false,
-            problems: vec!["No build file found: library dependencies are unknown".into()],
+            complete: !local_classpath.is_empty(),
+            local_classpath,
+            problems,
             ..Default::default()
         }],
         problems: Vec::new(),

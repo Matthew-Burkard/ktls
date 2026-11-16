@@ -43,6 +43,7 @@ Passed as `initializationOptions` or via `workspace/configuration` (section `kot
 | Setting | Default | Meaning |
 |---|---|---|
 | `jdkHome` | auto | JDK to index (otherwise `JAVA_HOME`, `java` on `PATH`, `/usr/lib/jvm`, SDKMAN, `~/.gradle/jdks`) |
+| `kotlinHome` | auto | Kotlin installation for folders without a build file: they are checked against its `lib/kotlin-stdlib.jar` plus the jars in `lib/` and `libs/` (otherwise `KOTLIN_HOME`, `kotlinc` on `PATH`, SDKMAN; with none found, only syntax is checked) |
 | `cacheDir` | `$XDG_CACHE_HOME/ktls` | Downloaded artifacts and cached project models |
 | `project.gradleMode` | `auto` | `static` (read build scripts), `tooling` (ask Gradle), `auto` (tooling when allowed and a wrapper exists) |
 | `project.allowBuildToolExecution` | `false` | Allow running the project's `gradlew`. Off by default because it executes code from the project |

@@ -242,12 +242,12 @@ fn end_to_end_session() {
 
 #[test]
 fn pull_diagnostics_and_plain_folders() {
-    // A folder without build files: syntax-only checks, symbols still work.
+    // A folder without build files or Kotlin installation: syntax-only checks, symbols still work.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("plain");
     let file = root.join("src/Main.kt");
-    write(&file, "fun main() {\n    println(\"hi\")\n}\nclass Foo { val x = }\n");
-    let options = json!({ "kotlin": { "cacheDir": tmp.path().join("cache"), "project": { "offline": true } } });
+    write(&file, "fun main() {\n    println(\"hi\")\n    nonsense()\n}\nclass Foo { val x = }\n");
+    let options = json!({ "kotlin": { "cacheDir": tmp.path().join("cache"), "kotlinHome": tmp.path().join("no-kotlin"), "project": { "offline": true } } });
     let mut c = Client::start(&root, options, true);
     c.wait_for_import();
     let text = std::fs::read_to_string(&file).unwrap();
@@ -269,6 +269,28 @@ fn pull_diagnostics_and_plain_folders() {
     assert!(!c.notifications.iter().any(|n| n.method == "textDocument/publishDiagnostics"), "pushed diagnostics to a pull client");
     let report = c.request("textDocument/diagnostic", json!({ "textDocument": { "uri": path_to_uri(&file).as_str() } }));
     assert_eq!(report["items"].as_array().unwrap().len(), 1, "one error per line: {report}");
+    c.shutdown();
+}
+
+#[test]
+fn plain_folder_with_kotlin_installation() {
+    // A folder compiled with `kotlinc`: its standard library and the jars in `lib/`.
+    let Some(stdlib) = stdlib() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("kotlin");
+    write(&home.join("lib/.keep"), "");
+    std::fs::copy(&stdlib, home.join("lib/kotlin-stdlib.jar")).unwrap();
+    let root = tmp.path().join("hello");
+    let file = root.join("Main.kt");
+    write(&file, "package hello\n\nfun main() {\n    println(\"Hello\")\n    nonsense()\n}\n");
+    let options = json!({ "kotlin": { "cacheDir": tmp.path().join("cache"), "kotlinHome": home, "project": { "offline": true } } });
+    let mut c = Client::start(&root, options, true);
+    c.wait_for_import();
+    let text = std::fs::read_to_string(&file).unwrap();
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": path_to_uri(&file).as_str(), "languageId": "kotlin", "version": 1, "text": text } }));
+    let report = c.request("textDocument/diagnostic", json!({ "textDocument": { "uri": path_to_uri(&file).as_str() } }));
+    let messages: Vec<&str> = report["items"].as_array().unwrap().iter().map(|d| d["message"].as_str().unwrap()).collect();
+    assert_eq!(messages, vec!["Unresolved reference 'nonsense'."], "{report}");
     c.shutdown();
 }
 

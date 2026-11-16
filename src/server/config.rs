@@ -13,6 +13,9 @@ use crate::project::repo::Repository;
 pub struct Config {
     /// JDK to index (defaults to JAVA_HOME / `java` on PATH / common install locations).
     pub jdk_home: Option<PathBuf>,
+    /// Kotlin installation whose standard library folders without a build file use
+    /// (defaults to KOTLIN_HOME / `kotlinc` on PATH / SDKMAN).
+    pub kotlin_home: Option<PathBuf>,
     /// Where downloaded artifacts and cached models live.
     pub cache_dir: Option<PathBuf>,
     pub project: ProjectConfig,
@@ -83,6 +86,7 @@ impl Config {
         o.gradle_mode = self.project.gradle_mode;
         o.allow_tooling = self.project.allow_build_tool_execution;
         o.progress = progress;
+        o.kotlin_home = self.kotlin_home.clone();
         o.extra_repositories = self.project.extra_repositories.iter().map(|u| Repository::new(u.clone(), u)).collect();
         o
     }

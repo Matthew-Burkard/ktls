@@ -735,7 +735,7 @@ impl Server {
         if new == self.config {
             return;
         }
-        let reload = new.project != self.config.project || new.jdk_home != self.config.jdk_home || new.cache_dir != self.config.cache_dir;
+        let reload = new.project != self.config.project || new.jdk_home != self.config.jdk_home || new.kotlin_home != self.config.kotlin_home || new.cache_dir != self.config.cache_dir;
         self.host.set_lint_config(new.lint.clone());
         let hints_changed = new.inlay_hints != self.config.inlay_hints;
         self.config = new;
