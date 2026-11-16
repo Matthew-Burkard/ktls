@@ -19,6 +19,8 @@ use crate::symbols::{SymbolKind, TypeRef};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
+    // Calls already reported as unresolved: an error type, not `Nothing`, so the path goes on.
+    let unresolved: HashSet<TextRange> = out.lints.iter().filter(|l| std::ptr::eq(l.rule, &UNRESOLVED_REFERENCE_EXPR)).map(|l| l.range).collect();
     for root in cx.root.descendants().filter(is_root) {
         if cx.in_error(&root) {
             continue;
@@ -31,7 +33,7 @@ pub(super) fn check(cx: &Cx, out: &mut Sink) {
             continue;
         }
         let result = result_type(&root);
-        let mut a = Analysis::new(e, &root);
+        let mut a = Analysis::new(e, &root, &unresolved);
         if result.is_none() && a.vars.is_empty() && !body.iter().any(|b| b.descendants().any(|d| matches!(d.kind(), SyntaxKind::RETURN_EXPR | SyntaxKind::THROW_EXPR | SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR | SyntaxKind::CALL_EXPR))) {
             continue;
         }
@@ -112,8 +114,9 @@ impl Init {
 #[derive(Clone, Debug)]
 struct State {
     dead: bool,
-    /// Live, but possibly not: after a `when` that may be exhaustive, an unresolved call,
-    /// or a call whose lambda may return from the function.
+    /// Live, but possibly not: after a `when` that may be exhaustive, a call that does not
+    /// resolve (and is not reported as unresolved), or a call whose lambda may return from
+    /// the function.
     unsure: bool,
     init: Vec<Init>,
     /// Assignments (indexes into `Analysis::defs`) that may still be read, per local.
@@ -171,6 +174,8 @@ struct Frame {
 
 struct Analysis<'e, 'a> {
     e: &'e Engine<'a>,
+    /// Names reported as `UNRESOLVED_REFERENCE` (by range).
+    unresolved: &'e HashSet<TextRange>,
     vars: Vec<Var>,
     /// Name references (by range) of the body's locals.
     refs: HashMap<TextRange, usize>,
@@ -189,7 +194,7 @@ struct Analysis<'e, 'a> {
 }
 
 impl<'e, 'a> Analysis<'e, 'a> {
-    fn new(e: &'e Engine<'a>, root: &SyntaxNode) -> Self {
+    fn new(e: &'e Engine<'a>, root: &SyntaxNode, unresolved: &'e HashSet<TextRange>) -> Self {
         let mut vars = Vec::new();
         // Locals of this body (not of nested bodies), with a single name.
         for p in root.descendants().filter(|d| d.kind() == SyntaxKind::PROPERTY && is_local(d) && own(root, d)) {
@@ -222,7 +227,7 @@ impl<'e, 'a> Analysis<'e, 'a> {
                 refs.insert(r.text_range(), i);
             }
         }
-        Analysis { e, vars, refs, defs: Vec::new(), stores: HashMap::new(), loops: Vec::new(), tries: Vec::new(), uninitialized: HashMap::new(), reassigned: HashMap::new(), unreachable: Vec::new(), depth: 0 }
+        Analysis { e, unresolved, vars, refs, defs: Vec::new(), stores: HashMap::new(), loops: Vec::new(), tries: Vec::new(), uninitialized: HashMap::new(), reassigned: HashMap::new(), unreachable: Vec::new(), depth: 0 }
     }
 
     fn initial(&self) -> State {
@@ -425,7 +430,9 @@ impl<'e, 'a> Analysis<'e, 'a> {
         let Some(callee) = call.first_child().filter(|c| c.kind() == SyntaxKind::NAME_REF) else { return false };
         let defs = self.e.resolve_name_ref(&callee);
         if defs.is_empty() {
-            return true;
+            // The resolver may miss a declaration (one returning `Nothing`), unless the call
+            // is an error of its own.
+            return callee.first_token().is_none_or(|t| !self.unresolved.contains(&t.text_range()));
         }
         let lambdas: Vec<SyntaxNode> = call
             .children()

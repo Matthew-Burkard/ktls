@@ -2392,6 +2392,10 @@ fn missing_return_on_some_paths() {
     assert_eq!(missing("fun f(c: Color): Int {\n    when (c) {\n        Color.RED -> return 1\n    }\n}"), 1);
     assert_eq!(missing("val g: Int\n    get() {\n        if (lock.hashCode() > 0) return 1\n    }"), 1);
     assert_eq!(missing("fun f(xs: List<Int>): Int {\n    xs.forEach { println(it) }\n}"), 1);
+    // A call reported as unresolved (`roundToInt` is not imported) has an error type, not `Nothing`.
+    assert_eq!(missing("class C {\n    fun g() = f(1.0)\n    private fun f(d: Double): Int {\n        d.roundToInt()\n    }\n}"), 1);
+    assert_eq!(missing("fun f(d: Double): Int {\n    val x = d.roundToInt()\n    println(x)\n}"), 1);
+    assert_eq!(missing("fun f(): Int {\n    undefinedCall()\n}"), 1);
     // Every path returns, throws, or never ends.
     assert_eq!(missing("fun f(x: Int): Int {\n    if (x > 0) return 1 else return 2\n}"), 0);
     assert_eq!(missing("fun f(x: Int): Int {\n    when {\n        x > 0 -> return 1\n        else -> throw IllegalStateException()\n    }\n}"), 0);
