@@ -371,3 +371,25 @@ fn catch_parameter_needs_a_type() {
     assert_eq!(errs("fun f() { try {} catch (Exception) {} }\n"), vec!["Parameters must have type annotation"]);
     ok("fun f() { try {} catch (e: Exception) {} catch (@Suppress(\"x\") e: Throwable) {} }\n");
 }
+
+#[test]
+fn merge_conflict_markers() {
+    // A `when` entry starting with a token that cannot begin a condition used to make no
+    // progress ("parser seems stuck").
+    let text = "fun f(x: Int) = when (x) {\n<<<<<<< Updated upstream\n    1 -> \"a\"\n=======\n    1 -> \"b\"\n>>>>>>> Stashed changes\n    else -> \"c\"\n}\n";
+    let p = parse(text, false);
+    assert_eq!(p.syntax().text().to_string(), text);
+    assert!(!p.errors().is_empty());
+    let entries = p.syntax().descendants().filter(|n| n.kind() == SyntaxKind::WHEN_ENTRY && n.children().any(|c| c.kind() == SyntaxKind::BODY)).count();
+    assert_eq!(entries, 3, "{}", p.debug_tree());
+    // Stray lines anywhere in a realistic file.
+    let lines: Vec<&str> = include_str!("tests/sample.kt").lines().collect();
+    for i in 0..=lines.len() {
+        for stray in ["<<<<<<< Updated upstream", "=======", ">>>>>>> Stashed changes", ")", "=", "<", ","] {
+            let mut v = lines.clone();
+            v.insert(i, stray);
+            let src = v.join("\n");
+            assert_eq!(parse(&src, false).syntax().text().to_string(), src, "{stray:?} before line {i}");
+        }
+    }
+}

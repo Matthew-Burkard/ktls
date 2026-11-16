@@ -701,8 +701,11 @@ fn when_entry(p: &mut Parser) {
                 _ => {
                     if expression_opt(p).is_none() {
                         c.complete(p, ERROR);
+                        // The offending token is skipped even when it starts a line (`=======`
+                        // of a merge conflict), or the entry loop would make no progress.
+                        let first = std::cell::Cell::new(true);
                         p.err_recover_until("Expecting a when-condition", |p| {
-                            p.at(ARROW) || p.at(R_CURLY) || p.nl_before()
+                            p.at(ARROW) || p.at(R_CURLY) || (!first.replace(false) && p.nl_before())
                         });
                         break;
                     }
