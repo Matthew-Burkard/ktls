@@ -6,7 +6,8 @@
 //! receivers whose candidates all return the same type. A call's own type parameters are
 //! inferred from the certain types of its arguments and from what its lambdas return
 //! (`listOf(user)`, `x.let { it.name }`, `list.map { it.id }`); lambda parameters get
-//! their types from the call. Integer literals bind nothing (Kotlin may type them from the
+//! their types from the call. Arithmetic on built-in numbers promotes to the wider
+//! operand (at least `Int`), and `String + x` is a `String`. Integer literals bind nothing (Kotlin may type them from the
 //! expected type), and conflicting bindings leave a parameter unknown. A result that is
 //! still a type parameter of the called function is not certain; type arguments that
 //! stay unknown are kept as error types (shown `?`): the class and nullability still serve
@@ -47,6 +48,31 @@ fn certain(e: &Engine, x: &SyntaxNode, smart: bool, depth: u32) -> Option<TypeRe
         SyntaxKind::IS_EXPR => Some(TypeRef::named("kotlin.Boolean")),
         SyntaxKind::BINARY_EXPR if binary_op(x).is_some_and(|o| matches!(o.kind(), SyntaxKind::EQ2 | SyntaxKind::NOT_EQ | SyntaxKind::EQ3 | SyntaxKind::NOT_EQ2 | SyntaxKind::LT | SyntaxKind::GT | SyntaxKind::LT_EQ | SyntaxKind::GT_EQ | SyntaxKind::AMP2 | SyntaxKind::PIPE2 | SyntaxKind::IN_KW | SyntaxKind::NOT_IN_KW)) => Some(TypeRef::named("kotlin.Boolean")),
         SyntaxKind::PREFIX_EXPR if binary_op(x).is_some_and(|o| o.kind() == SyntaxKind::EXCL) => Some(TypeRef::named("kotlin.Boolean")),
+        SyntaxKind::BINARY_EXPR if binary_op(x).is_some_and(|o| matches!(o.kind(), SyntaxKind::PLUS | SyntaxKind::MINUS | SyntaxKind::STAR | SyntaxKind::SLASH | SyntaxKind::PERCENT)) => {
+            let (l, r) = binary_operands(x)?;
+            // Only literals: a constant typed from the expected type (`val x: Long = 1 + 2`).
+            if literal_type(&l).is_some() && literal_type(&r).is_some() {
+                return None;
+            }
+            let (lt, rt) = (certain(e, &l, smart, depth + 1)?, certain(e, &r, smart, depth + 1)?);
+            let (lf, rf) = (non_null_fq(&lt)?, non_null_fq(&rt)?);
+            // `String.plus(Any?)`.
+            if lf == "kotlin.String" && binary_op(x)?.kind() == SyntaxKind::PLUS {
+                return Some(TypeRef::named("kotlin.String"));
+            }
+            let rank = |fq: &str| ["kotlin.Byte", "kotlin.Short", "kotlin.Int", "kotlin.Long", "kotlin.Float", "kotlin.Double"].iter().position(|n| *n == fq);
+            // Built-in numbers promote to the wider operand, at least `Int`.
+            let (a, b) = (rank(lf)?, rank(rf)?);
+            Some(TypeRef::named(["kotlin.Int", "kotlin.Int", "kotlin.Int", "kotlin.Long", "kotlin.Float", "kotlin.Double"][a.max(b)]))
+        }
+        SyntaxKind::PREFIX_EXPR if binary_op(x).is_some_and(|o| matches!(o.kind(), SyntaxKind::PLUS | SyntaxKind::MINUS)) => {
+            let t = certain(e, &x.children().last()?, smart, depth + 1)?;
+            Some(TypeRef::named(match non_null_fq(&t)? {
+                "kotlin.Byte" | "kotlin.Short" | "kotlin.Int" => "kotlin.Int",
+                f @ ("kotlin.Long" | "kotlin.Float" | "kotlin.Double") => f,
+                _ => return None,
+            }))
+        }
         SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR => {
             let (recv, sel) = (x.first_child()?, x.last_child()?);
             if recv == sel {
@@ -120,6 +146,14 @@ fn mentions(t: &TypeRef, name: &str) -> bool {
 /// A certain type as shown in messages: unknown type arguments as `*`.
 pub(super) fn shown(t: &TypeRef) -> String {
     t.display().replace("<error>", "*")
+}
+
+/// The class of a non-null named type.
+fn non_null_fq(t: &TypeRef) -> Option<&str> {
+    match t {
+        TypeRef::Named { nullable: false, fq: Some(fq), .. } => Some(fq),
+        _ => None,
+    }
 }
 
 /// `x!!`: the type without `?`.

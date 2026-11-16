@@ -4184,3 +4184,38 @@ object Single {
         assert!(found.is_empty(), "{quiet}: {found:?}");
     }
 }
+
+#[test]
+fn redundant_conversion_of_arithmetic() {
+    let fx = Fixture::new();
+    if !fx.typed() {
+        return;
+    }
+    let redundant = |body: &str| lint(&format!("package a\n\n{body}\n")).iter().any(|l| l.starts_with("RemoveRedundantCallsOfConversionMethods"));
+    // Built-in numbers promote to the wider operand, at least `Int`.
+    for body in [
+        "fun f(d: Double, e: Double) = (d * e).toDouble()",
+        "fun f(d: Double) = (d / 2).toDouble()",
+        "fun f(d: Double) = (-d).toDouble()",
+        "fun f(i: Int) = (i * 2).toInt()",
+        "fun f(i: Int) = (i * 2L).toLong()",
+        "fun f(b: Byte) = (b + b).toInt()",
+        "fun f(d: Double): Double {\n    val x = d * 2\n    return x.toDouble()\n}",
+        "fun f(s: String, i: Int) = (s + i).toString()",
+        "fun f(i: Int?) = (i!! + 1).toInt()",
+    ] {
+        assert!(redundant(body), "{body}");
+    }
+    for body in [
+        "fun f(i: Int) = (i * 2L).toInt()",
+        "fun f(b: Byte) = (b + b).toByte()",
+        "fun f(b: Byte) = (-b).toByte()",
+        "fun f(i: Int) = (i / 2.0).toInt()",
+        "fun f(i: Int) = (i / 2f).toDouble()",
+        "fun f(c: Char) = (c + 1).toInt()",
+        // Constants are typed from the expected type.
+        "fun f() = (1 + 2).toLong()",
+    ] {
+        assert!(!redundant(body), "{body}");
+    }
+}
