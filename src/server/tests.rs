@@ -23,6 +23,11 @@ impl Client {
 
     /// Like `start`, with the client capabilities adjusted by `caps`.
     fn start_with(root: &Path, options: Value, pull: bool, adjust: impl FnOnce(&mut Value)) -> Client {
+        Client::start_in(Some(root), options, pull, adjust)
+    }
+
+    /// Like `start_with`; without `root`, no workspace folder (an editor on a loose file).
+    fn start_in(root: Option<&Path>, options: Value, pull: bool, adjust: impl FnOnce(&mut Value)) -> Client {
         let (server_conn, client_conn) = Connection::memory();
         let server = std::thread::spawn(move || super::run(server_conn));
         let mut c = Client { conn: client_conn, server: Some(server), next_id: 0, notifications: Vec::new() };
@@ -45,10 +50,10 @@ impl Client {
             "initialize",
             json!({
                 "processId": null,
-                "rootUri": path_to_uri(root).as_str(),
+                "rootUri": root.map(|r| path_to_uri(r).as_str().to_string()),
                 "capabilities": caps,
                 "initializationOptions": options,
-                "workspaceFolders": [{ "uri": path_to_uri(root).as_str(), "name": "test" }],
+                "workspaceFolders": root.map(|r| json!([{ "uri": path_to_uri(r).as_str(), "name": "test" }])),
             }),
         );
         assert!(result["capabilities"]["documentSymbolProvider"].as_bool().unwrap());
@@ -291,6 +296,21 @@ fn plain_folder_with_kotlin_installation() {
     let report = c.request("textDocument/diagnostic", json!({ "textDocument": { "uri": path_to_uri(&file).as_str() } }));
     let messages: Vec<&str> = report["items"].as_array().unwrap().iter().map(|d| d["message"].as_str().unwrap()).collect();
     assert_eq!(messages, vec!["Unresolved reference 'nonsense'."], "{report}");
+    c.shutdown();
+
+    // Started without a workspace folder (Neovim finds no root marker): the folder of the
+    // opened file is the workspace.
+    let options = json!({ "kotlin": { "cacheDir": tmp.path().join("cache"), "kotlinHome": home, "project": { "offline": true }, "diagnostics": { "debounceMs": 10 } } });
+    let mut c = Client::start_in(None, options, false, |_| {});
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": path_to_uri(&file).as_str(), "languageId": "kotlin", "version": 1, "text": text } }));
+    let uri = path_to_uri(&file).as_str().to_string();
+    // Times out unless the unresolved reference is published.
+    c.pump(Duration::from_secs(30), |m, _| match m {
+        Message::Notification(n) if n.method == "textDocument/publishDiagnostics" && n.params["uri"] == uri.as_str() => {
+            n.params["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "UNRESOLVED_REFERENCE").then_some(())
+        }
+        _ => None,
+    });
     c.shutdown();
 }
 

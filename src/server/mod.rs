@@ -769,6 +769,16 @@ impl Server {
             DidOpenTextDocument::METHOD => {
                 let Ok(p) = serde_json::from_value::<lsp_types::DidOpenTextDocumentParams>(n.params) else { return };
                 let Some(path) = uri_to_path(&p.text_document.uri) else { return };
+                // Started without a workspace (Neovim on a file under no root marker): the
+                // folder of the first opened file is the workspace.
+                if self.folders.is_empty()
+                    && crate::analysis::Language::of(&path).is_some()
+                    && let Some(dir) = path.parent()
+                {
+                    log::info!("no workspace folder: using {}", dir.display());
+                    self.folders.push(dir.to_path_buf());
+                    self.start_load(false);
+                }
                 self.docs.insert(path.clone(), OpenDoc { version: p.text_document.version, text: p.text_document.text.clone() });
                 // Contents the analysis has not seen (a new file, unsaved changes, a file
                 // moved back in) may change what the other open files see.
