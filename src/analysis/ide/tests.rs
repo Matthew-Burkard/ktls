@@ -317,6 +317,58 @@ fn references_include_overrides() {
 }
 
 #[test]
+fn references_through_labeled_this_and_type_parameters() {
+    let Some(mut fx) = fixture() else { return };
+    let refs = |fx: &mut Fx, body: &str| fx.refs(&format!("{HEADER}{body}"), false);
+    // `this@Outer` from an inner class, past a lambda receiver, and next to a same-named
+    // member of the inner class (which plain `foo()` means).
+    let src = "class A {\n    private fun f$0oo() = 1\n    inner class I {\n        fun foo() = 2\n        fun a() = this@A.foo() + foo()\n        fun b() = with(\"s\") { this@A.foo() }\n    }\n}\n";
+    assert_eq!(refs(&mut fx, src), vec!["Main.kt:12:foo", "Main.kt:13:foo"]);
+    assert_eq!(refs(&mut fx, &src.replacen("f$0oo", "foo", 1).replacen("this@A.foo() +", "this@A.fo$0o() +", 1)), vec!["Main.kt:12:foo", "Main.kt:13:foo"]);
+    // Lambda labels: explicit, and the name of the function the lambda is passed to.
+    let src = "class A {\n    private fun f$0oo() = 1\n    fun a(o: A) = o.run lbl@{ \"s\".run { this@lbl.foo() } }\n    fun b(o: A) = with(o) { \"s\".run { this@with.foo() } }\n    fun A.c() = \"s\".run { this@c.foo() }\n}\n";
+    assert_eq!(refs(&mut fx, src), vec!["Main.kt:10:foo", "Main.kt:11:foo", "Main.kt:12:foo"]);
+    // A value whose type is a type parameter has the members of its bounds.
+    let src = "class A<T : A<T>> {\n    private fun f$0oo() = this\n    fun a(t: T) = t.foo().foo()\n    fun <U : A<U>> b(u: U?) = u?.foo()\n    fun <V> c(v: V) where V : A<V> = v.foo()\n    fun <W : A<W>> W.d() = foo()\n}\n";
+    assert_eq!(refs(&mut fx, src), vec!["Main.kt:10:foo", "Main.kt:10:foo", "Main.kt:11:foo", "Main.kt:12:foo", "Main.kt:13:foo"]);
+    assert_eq!(fx.goto(&format!("{HEADER}fun <T : CharSequence> f(t: T) = t.len$0gth\n")).len(), 1);
+}
+
+#[test]
+fn references_to_constructors() {
+    let Some(mut fx) = fixture() else { return };
+    let src = format!(
+        "{HEADER}{}",
+        [
+            "open class A private constructor(x: Int) {", // 8
+            "    constructor() : this(1)", // 9
+            "    constructor(s: String) : this()", // 10
+            "    companion object { fun m() = A(2) }", // 11
+            "}", // 12
+            "class B : A {", // 13
+            "    constructor() : super()", // 14
+            "}", // 15
+            "class C : app.A(\"s\")", // 16
+            "fun f() = A(\"s\")", // 17
+            "",
+        ]
+        .join("\n")
+    );
+    let primary = vec!["Main.kt:11:A", "Main.kt:9:this"];
+    // From a delegation and from the `constructor` keyword. The calls pick their
+    // constructor by argument types; supertype mentions without a call are not calls.
+    assert_eq!(fx.refs(&src.replacen(": this(1)", ": th$0is(1)", 1), false), primary);
+    assert_eq!(fx.refs(&src.replacen("private constructor", "private construct$0or", 1), false), primary);
+    assert_eq!(fx.refs(&src.replacen("private constructor", "private construct$0or", 1), true), vec!["Main.kt:11:A", "Main.kt:8:", "Main.kt:9:this"]);
+    // The no-argument secondary constructor: a `this()` and a subclass's `super()`.
+    assert_eq!(fx.refs(&src.replacen("    constructor() : this(1)", "    construct$0or() : this(1)", 1), false), vec!["Main.kt:10:this", "Main.kt:14:super"]);
+    // The `String` one: a qualified supertype call and a plain call.
+    assert_eq!(fx.refs(&src.replacen("    constructor(s: String)", "    construct$0or(s: String)", 1), false), vec!["Main.kt:16:A", "Main.kt:17:A"]);
+    // A call still means the class.
+    assert!(fx.refs(&src.replacen("A(2)", "A$0(2)", 1), false).contains(&"Main.kt:13:A".to_string()));
+}
+
+#[test]
 fn overrides_in_other_source_sets_and_anonymous_objects() {
     let Some(mut fx) = fixture() else { return };
     // An override in test sources: not visible from the base's (main) module.

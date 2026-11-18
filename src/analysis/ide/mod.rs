@@ -130,7 +130,11 @@ pub(super) fn defs_of_token(e: &Engine, tok: &SyntaxToken) -> Option<(TextRange,
         // `val x by delegate` → getValue/setValue
         SyntaxKind::PROPERTY_DELEGATE if tok.text() == "by" => e.operator_defs(&tok).unwrap_or_default(),
         SyntaxKind::NAME_REF => e.resolve_name_ref(&parent),
-        SyntaxKind::THIS_EXPR | SyntaxKind::SUPER_EXPR => e.this_target(&parent).map(|s| vec![Def::Symbol { sym: s, subst: Default::default() }]).unwrap_or_default(),
+        // `constructor() : this(1)` → the constructor it delegates to.
+        SyntaxKind::CONSTRUCTOR_DELEGATION_CALL => e.delegation_targets(&parent),
+        // The `constructor` keyword of a primary or secondary constructor.
+        SyntaxKind::PRIMARY_CONSTRUCTOR | SyntaxKind::SECONDARY_CONSTRUCTOR if tok.kind() == SyntaxKind::IDENT && tok.text() == "constructor" => constructor_def(e, &parent).into_iter().collect(),
+        SyntaxKind::THIS_EXPR | SyntaxKind::SUPER_EXPR =>e.this_target(&parent).map(|s| vec![Def::Symbol { sym: s, subst: Default::default() }]).unwrap_or_default(),
         SyntaxKind::OPERATION_REFERENCE => e.resolve_infix(&parent),
         SyntaxKind::USER_TYPE_SEGMENT => type_segment(e, &parent),
         SyntaxKind::DOT_QUALIFIED_NAME => qualified_name_segment(e, &parent, &tok),
@@ -207,6 +211,18 @@ pub(super) fn qualified_name_segment(e: &Engine, qn: &SyntaxNode, tok: &SyntaxTo
 }
 
 /// The declaration whose name is `tok`.
+/// The indexed constructor symbol declared by a PRIMARY_CONSTRUCTOR / SECONDARY_CONSTRUCTOR.
+fn constructor_def(e: &Engine, ctor: &SyntaxNode) -> Option<Def> {
+    fn walk(ds: &[super::source::SourceDecl], r: TextRange) -> Option<&Symbol> {
+        ds.iter().find_map(|d| match &d.symbol.origin {
+            Origin::Source { range, .. } if d.symbol.kind == SymbolKind::Constructor && *range == r => Some(&d.symbol),
+            _ => walk(&d.children, r),
+        })
+    }
+    let summary = e.file.summary();
+    walk(&summary.decls, ctor.text_range()).map(|s| Def::Symbol { sym: s.clone(), subst: Default::default() })
+}
+
 pub(super) fn declaration_def(e: &Engine, decl: &SyntaxNode, tok: &SyntaxToken) -> Option<Def> {
     // Indexed declarations carry full symbols.
     let summary = e.file.summary();
@@ -335,6 +351,12 @@ pub fn references(snap: &Snapshot, path: &Path, offset: TextSize, include_declar
         _ => String::new(),
     };
     let (op_kinds, lexemes) = operator_tokens_for(&op_name);
+    // Constructors are also called by `this(...)` / `super(...)` delegations.
+    let ctor_class: Option<String> = match &target {
+        Def::Symbol { sym, .. } if sym.kind == SymbolKind::Constructor => Some(sym.fq_name.trim_end_matches(".<init>").to_string()),
+        _ => None,
+    };
+    let is_constructor = ctor_class.is_some();
     // Destructuring calls componentN, which for source data classes is a constructor property.
     let destructuring = op_name.starts_with("component") && op_name[9..].parse::<u32>().is_ok()
         || matches!(&target, Def::Symbol { sym, .. } if sym.kind == SymbolKind::Property && is_data_class_property(&e, sym));
@@ -401,7 +423,10 @@ pub fn references(snap: &Snapshot, path: &Path, offset: TextSize, include_declar
                 let by = t.kind() == SyntaxKind::IDENT && t.text() == "by" && op_kinds.contains(&SyntaxKind::IDENT);
                 let entry = destructuring && t.kind() == SyntaxKind::IDENT && t.parent().is_some_and(|p| p.kind() == SyntaxKind::DESTRUCTURING_ENTRY);
                 let matches_name = t.kind() == SyntaxKind::IDENT && ast::ident_text(&t) == name;
-                if !(matches_name || by || entry || op_kinds.contains(&t.kind()) && t.kind() != SyntaxKind::IDENT) {
+                let delegation = is_constructor
+                    && matches!(t.kind(), SyntaxKind::THIS_KW | SyntaxKind::SUPER_KW)
+                    && t.parent().is_some_and(|p| p.kind() == SyntaxKind::CONSTRUCTOR_DELEGATION_CALL);
+                if !(matches_name || by || entry || delegation ||op_kinds.contains(&t.kind()) && t.kind() != SyntaxKind::IDENT) {
                     continue;
                 }
                 let resolved = if entry {
@@ -409,7 +434,14 @@ pub fn references(snap: &Snapshot, path: &Path, offset: TextSize, include_declar
                 } else {
                     defs_of_token(&fe, &t)
                 };
-                let Some((range, defs)) = resolved else { continue };
+                let Some((range, mut defs)) = resolved else { continue };
+                // A class name that calls a constructor stands for the constructors it may call.
+                if let Some(class_fq) = &ctor_class
+                    && defs.iter().any(|d| matches!(d, Def::Symbol { sym, .. } if sym.kind.is_classifier() && sym.fq_name == *class_fq))
+                {
+                    let Some(ctors) = fe.constructor_call_targets(&t, class_fq) else { continue };
+                    defs = ctors;
+                }
                 if defs.iter().any(|d| in_family(&fe, d)) {
                     // Override declarations count as declarations, not usages (destructuring
                     // entries are usages of componentN / the data class property).

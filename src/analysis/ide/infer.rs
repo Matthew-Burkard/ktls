@@ -1173,35 +1173,84 @@ impl<'s> Engine<'s> {
     }
 
     pub fn implicit_receivers(&self, at: &SyntaxNode) -> Vec<(TypeRef, Option<Classifier>)> {
-        let mut out = Vec::new();
         let package = self.package();
-        for anc in at.ancestors().skip(1) {
-            match anc.kind() {
-                SyntaxKind::LAMBDA_EXPR => {
-                    if let Some((Some(r), _)) = self.lambda_signature(&anc) {
-                        out.push((r, None));
-                    }
-                }
-                SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION => {
-                    // `scope_at` on the class node includes the class itself as innermost
-                    // enclosing class (local classes have no FQ name and are skipped).
-                    let scope = scope_at(&anc, &package, &mut self.locals_cache.borrow_mut());
-                    if let Some(fq) = scope.enclosing.last()
-                        && let Some(c) = self.res.find_classifier(fq) {
-                            out.push((class_type(c.symbol()), Some(c)));
-                        }
-                }
-                SyntaxKind::OBJECT_LITERAL => out.push((self.anon_type(&anc), None)),
-                SyntaxKind::FUN | SyntaxKind::PROPERTY => {
-                    // Extension receivers: `fun String.foo() { length }`
-                    if let Some(r) = anc.children().find(|c| c.kind() == SyntaxKind::RECEIVER_TYPE).and_then(|r| ast::child::<ast::TypeRef>(&r)) {
-                        out.push((self.resolve_syntax_type(&r), None));
-                    }
-                }
-                _ => {}
+        at.ancestors().skip(1).filter_map(|anc| self.receiver_of(&anc, &package)).collect()
+    }
+
+    /// The receivers `this` may denote at `this_expr`: the one its `@label` names, or
+    /// every implicit receiver (innermost first) when it has none.
+    pub fn this_receivers(&self, this_expr: &SyntaxNode) -> Vec<(TypeRef, Option<Classifier>)> {
+        let Some(label) = this_label(this_expr) else { return self.implicit_receivers(this_expr) };
+        let package = self.package();
+        this_expr
+            .ancestors()
+            .skip(1)
+            .find(|anc| receiver_label(anc).is_some_and(|l| l == label) && self.receiver_of(anc, &package).is_some())
+            .and_then(|anc| self.receiver_of(&anc, &package))
+            .into_iter()
+            .collect()
+    }
+
+    /// The implicit receiver `anc` introduces, if any.
+    fn receiver_of(&self, anc: &SyntaxNode, package: &str) -> Option<(TypeRef, Option<Classifier>)> {
+        match anc.kind() {
+            SyntaxKind::LAMBDA_EXPR => match self.lambda_signature(anc) {
+                Some((Some(r), _)) => Some((r, None)),
+                _ => None,
+            },
+            SyntaxKind::CLASS | SyntaxKind::OBJECT_DECLARATION => {
+                // `scope_at` on the class node includes the class itself as innermost
+                // enclosing class (local classes have no FQ name and are skipped).
+                let scope = scope_at(anc, package, &mut self.locals_cache.borrow_mut());
+                let c = self.res.find_classifier(scope.enclosing.last()?)?;
+                Some((class_type(c.symbol()), Some(c)))
             }
+            SyntaxKind::OBJECT_LITERAL => Some((self.anon_type(anc), None)),
+            SyntaxKind::FUN | SyntaxKind::PROPERTY => {
+                // Extension receivers: `fun String.foo() { length }`
+                let r = anc.children().find(|c| c.kind() == SyntaxKind::RECEIVER_TYPE).and_then(|r| ast::child::<ast::TypeRef>(&r))?;
+                let t = self.resolve_syntax_type(&r);
+                // `fun <T : A> T.f()`: members come from the bound.
+                let t = match strip(&t) {
+                    TypeRef::TypeParam { name, .. } => self.type_param_bounds(anc, name).into_iter().next().unwrap_or(t),
+                    _ => t,
+                };
+                Some((t, None))
+            }
+            _ => None,
         }
-        out
+    }
+
+    /// The declared upper bounds of the type parameter `name` in scope at `at` (its
+    /// `T : Bound` and `where T : Bound` clauses); `kotlin.Any` when it has none.
+    pub fn type_param_bounds(&self, at: &SyntaxNode, name: &str) -> Vec<TypeRef> {
+        for anc in at.ancestors() {
+            let Some(tp) = anc
+                .children()
+                .filter(|c| c.kind() == SyntaxKind::TYPE_PARAMETER_LIST)
+                .flat_map(|l| l.children().filter(|c| c.kind() == SyntaxKind::TYPE_PARAMETER).collect::<Vec<_>>())
+                .find(|tp| ast::token(tp, SyntaxKind::IDENT).is_some_and(|t| ast::ident_text(&t) == name))
+            else {
+                continue;
+            };
+            let constraints = anc
+                .children()
+                .filter(|c| c.kind() == SyntaxKind::TYPE_CONSTRAINT_LIST)
+                .flat_map(|l| l.children().filter(|c| c.kind() == SyntaxKind::TYPE_CONSTRAINT).collect::<Vec<_>>())
+                .filter(|c| ast::token(c, SyntaxKind::IDENT).is_some_and(|t| ast::ident_text(&t) == name));
+            let mut out: Vec<TypeRef> = std::iter::once(tp)
+                .chain(constraints)
+                .filter_map(|n| ast::child::<ast::TypeRef>(&n))
+                .map(|t| self.resolve_syntax_type(&t))
+                // A bound naming another type parameter (`U : T`) is not followed.
+                .filter(|t| !matches!(strip(t), TypeRef::TypeParam { .. }))
+                .collect();
+            if out.is_empty() {
+                out.push(TypeRef::named("kotlin.Any"));
+            }
+            return out;
+        }
+        Vec::new()
     }
 
     /// Resolve a simple (unqualified) name used as an expression.
@@ -1503,20 +1552,35 @@ impl<'s> Engine<'s> {
         }
     }
 
+    /// `name` on a receiver value of type `t`: members, then extensions.
+    fn value_member_reference(&self, recv: &SyntaxNode, t: &TypeRef, name: &str, call: Option<&SyntaxNode>) -> Vec<Def> {
+        let members = if call.is_some() { self.callable_members(t, name) } else { self.members_named(t, name) };
+        let mut defs: Vec<Def> = members.into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }).collect();
+        if defs.is_empty() || call.is_some() && !defs.iter().any(|d| matches!(d, Def::Symbol { sym, .. } if sym.kind == SymbolKind::Function && call.is_some_and(|c| arity_fits(sym, call_arity(c))))) {
+            let mut ext = self.member_extensions(recv, t, name);
+            if ext.is_empty() {
+                ext = self.extensions(t, name);
+            }
+            defs.extend(ext.into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }));
+        }
+        self.filter_call(defs, call)
+    }
+
     fn member_reference(&self, recv: &SyntaxNode, name: &str, call: Option<&SyntaxNode>) -> Vec<Def> {
         match self.resolve_qualifier(recv) {
-            Qualifier::Value(t) => {
-                let members = if call.is_some() { self.callable_members(&t, name) } else { self.members_named(&t, name) };
-                let mut defs: Vec<Def> = members.into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }).collect();
-                if defs.is_empty() || call.is_some() && !defs.iter().any(|d| matches!(d, Def::Symbol { sym, .. } if sym.kind == SymbolKind::Function && call.is_some_and(|c| arity_fits(sym, call_arity(c))))) {
-                    let mut ext = self.member_extensions(recv, &t, name);
-                    if ext.is_empty() {
-                        ext = self.extensions(&t, name);
+            // A value of type parameter type has the members of its bounds.
+            Qualifier::Value(t) if matches!(strip(&t), TypeRef::TypeParam { .. }) => {
+                let TypeRef::TypeParam { name: tp, .. } = strip(&t) else { unreachable!() };
+                let bounds = self.type_param_bounds(recv, tp);
+                for b in &bounds {
+                    let defs = self.value_member_reference(recv, b, name, call);
+                    if !defs.is_empty() {
+                        return defs;
                     }
-                    defs.extend(ext.into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }));
                 }
-                self.filter_call(defs, call)
+                self.value_member_reference(recv, &t, name, call)
             }
+            Qualifier::Value(t) => self.value_member_reference(recv, &t, name, call),
             Qualifier::Static(c) => {
                 // `Type::member` refers to instance members too.
                 let mut defs = self.static_members(&c, name);
@@ -1700,14 +1764,14 @@ impl<'s> Engine<'s> {
                     _ => Some(t),
                 }
             }
-            THIS_EXPR => self.implicit_receivers(e).into_iter().next().map(|(t, _)| t),
+            THIS_EXPR => self.this_receivers(e).into_iter().next().map(|(t, _)| t),
             SUPER_EXPR => {
                 // `super<T>` names the supertype; plain `super` is the superclass
                 // (the first supertype that is not an interface).
                 if let Some(t) = ast::child::<ast::TypeRef>(e) {
                     return Some(self.resolve_syntax_type(&t));
                 }
-                let (own, _) = self.implicit_receivers(e).into_iter().find(|(_, c)| c.is_some()).or_else(|| self.implicit_receivers(e).into_iter().next())?;
+                let (own, _) = self.this_receivers(e).into_iter().find(|(_, c)| c.is_some()).or_else(|| self.this_receivers(e).into_iter().next())?;
                 let supers: Vec<TypeRef> = self.supertype_closure(&own).into_iter().skip(1).collect();
                 let class = supers.iter().find(|st| {
                     fq_of(st).and_then(|fq| self.res.find_classifier(fq)).is_some_and(|c| c.symbol().kind != SymbolKind::Interface)
@@ -2048,13 +2112,92 @@ impl<'s> Engine<'s> {
         defs
     }
 
-    /// `this` at a position: the innermost implicit receiver's classifier symbol.
+    /// The constructors a `this(...)` / `super(...)` delegation call may invoke: the
+    /// enclosing class's own, or its superclass's.
+    pub fn delegation_targets(&self, call: &SyntaxNode) -> Vec<Def> {
+        let Some((own, Some(_))) = self.implicit_receivers(call).into_iter().next() else { return Vec::new() };
+        let class = if ast::token(call, SyntaxKind::SUPER_KW).is_some() {
+            let supers: Vec<TypeRef> = self.supertype_closure(&own).into_iter().skip(1).collect();
+            let Some(sup) = supers.into_iter().find(|st| fq_of(st).and_then(|fq| self.res.find_classifier(fq)).is_some_and(|c| c.symbol().kind != SymbolKind::Interface)) else {
+                return Vec::new();
+            };
+            sup
+        } else {
+            own
+        };
+        let Some(fq) = fq_of(&class) else { return Vec::new() };
+        let ctors: Vec<Def> = self.constructors(fq).into_iter().map(Def::symbol).collect();
+        self.filter_call(ctors, Some(call))
+    }
+
+    /// The constructors a class name at `tok` calls, when it is a call's callee (`A(1)`,
+    /// `pkg.A(1)`, `class B : A(1)`) or a callable reference (`::A`). `None` elsewhere.
+    pub fn constructor_call_targets(&self, tok: &SyntaxToken, class_fq: &str) -> Option<Vec<Def>> {
+        let parent = tok.parent()?;
+        let call = match parent.kind() {
+            SyntaxKind::NAME_REF => {
+                let up = parent.parent()?;
+                match up.kind() {
+                    SyntaxKind::CALL_EXPR if first_expr_child(&up).as_ref() == Some(&parent) => Some(up),
+                    SyntaxKind::CALLABLE_REFERENCE => None,
+                    _ => return None,
+                }
+            }
+            SyntaxKind::USER_TYPE_SEGMENT => {
+                // The last segment of a supertype call's type.
+                let ut = parent.parent()?;
+                if ut.children().filter(|c| c.kind() == SyntaxKind::USER_TYPE_SEGMENT).last().as_ref() != Some(&parent) {
+                    return None;
+                }
+                let entry = ut.parent()?.parent().filter(|e| e.kind() == SyntaxKind::SUPER_TYPE_CALL_ENTRY)?;
+                Some(entry)
+            }
+            _ => return None,
+        };
+        let ctors: Vec<Def> = self.constructors(class_fq).into_iter().map(Def::symbol).collect();
+        Some(self.filter_call(ctors, call.as_ref()))
+    }
+
+    /// `this` (or `this@label`) at a position: the receiver's classifier symbol.
     pub fn this_target(&self, at: &SyntaxNode) -> Option<Symbol> {
-        let (t, c) = self.implicit_receivers(at).into_iter().next()?;
+        let (t, c) = self.this_receivers(at).into_iter().next()?;
         match c {
             Some(c) => Some(c.symbol().clone()),
             None => self.res.find_classifier(fq_of(&t)?).map(|c| c.symbol().clone()),
         }
+    }
+}
+
+/// The `@label` of a `this`/`super` expression.
+fn this_label(e: &SyntaxNode) -> Option<String> {
+    let q = e.children().find(|c| c.kind() == SyntaxKind::LABEL_QUALIFIER)?;
+    ast::token(&q, SyntaxKind::IDENT).map(|t| ast::ident_text(&t))
+}
+
+/// The label `this@label` uses to name the receiver `anc` introduces: a class's or
+/// extension's name, a lambda's explicit label, or else the function it is passed to.
+fn receiver_label(anc: &SyntaxNode) -> Option<String> {
+    let name = |n: &SyntaxNode| ast::token(n, SyntaxKind::IDENT).map(|t| ast::ident_text(&t));
+    match anc.kind() {
+        SyntaxKind::CLASS | SyntaxKind::FUN | SyntaxKind::PROPERTY => name(anc),
+        // A companion's default name.
+        SyntaxKind::OBJECT_DECLARATION => name(anc).or_else(|| Some("Companion".to_string())),
+        SyntaxKind::LAMBDA_EXPR => {
+            let mut up = anc.parent()?;
+            if up.kind() == SyntaxKind::LABELED_EXPR {
+                return up.children().find(|c| c.kind() == SyntaxKind::LABEL).and_then(|l| name(&l));
+            }
+            // `f { }` / `f({ })`: the call's name.
+            while matches!(up.kind(), SyntaxKind::LAMBDA_ARGUMENT | SyntaxKind::VALUE_ARGUMENT | SyntaxKind::VALUE_ARGUMENT_LIST) {
+                up = up.parent()?;
+            }
+            if up.kind() != SyntaxKind::CALL_EXPR {
+                return None;
+            }
+            let callee = first_expr_child(&up).filter(|c| c.kind() == SyntaxKind::NAME_REF)?;
+            name(&callee)
+        }
+        _ => None,
     }
 }
 
