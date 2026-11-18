@@ -1831,26 +1831,7 @@ fn lambda_to_reference(cx: &Cx, n: &SyntaxNode, out: &mut Sink) {
 }
 
 pub(super) fn is_sam(e: &crate::analysis::ide::infer::Engine, fq: &str) -> bool {
-    single_abstract_method(e, fq).is_some()
-}
-
-/// Whether the interface `fq` has exactly one abstract method (a SAM).
-fn single_abstract_method(e: &crate::analysis::ide::infer::Engine, fq: &str) -> Option<crate::symbols::Symbol> {
-    let c = e.classifier(fq)?;
-    if c.symbol().kind != SymbolKind::Interface {
-        return None;
-    }
-    let java = matches!(e.res.find_classifier(fq), Some(crate::analysis::resolve::Classifier::Library(lc)) if !lc.is_kotlin);
-    if !java && !c.symbol().modifiers.has(Modifiers::FUN_INTERFACE) {
-        return None;
-    }
-    let fns: Vec<_> = e.declared_members(fq).into_iter().filter(|m| m.kind == SymbolKind::Function && !m.modifiers.has(Modifiers::STATIC)).collect();
-    let abstract_fns: Vec<_> = fns.iter().filter(|m| m.modifiers.has(Modifiers::ABSTRACT)).cloned().collect();
-    let candidates = if abstract_fns.is_empty() { fns } else { abstract_fns };
-    match candidates.as_slice() {
-        [one] => Some(one.clone()),
-        _ => None,
-    }
+    e.sam_method(fq).is_some()
 }
 
 /// `object : Runnable { override fun run() { … } }` → `Runnable { … }`.
@@ -1878,7 +1859,7 @@ fn object_to_lambda(cx: &Cx, o: &SyntaxNode, out: &mut Sink) {
     let Some(e) = cx.engine() else { return };
     let t = e.resolve_syntax_type(&tr);
     let Some(fq) = fq_of(&t) else { return };
-    let Some(sam) = single_abstract_method(e, fq) else { return };
+    let Some(sam) = e.sam_method(fq) else { return };
     if name_token(f).is_none_or(|n| n.text() != sam.name) {
         return;
     }

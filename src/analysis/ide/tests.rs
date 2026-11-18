@@ -335,6 +335,30 @@ fn references_through_labeled_this_and_type_parameters() {
 }
 
 #[test]
+fn references_through_inferred_receivers_and_extensions() {
+    let Some(mut fx) = fixture() else { return };
+    let cls = "class A {\n    fun f$0oo(): A = this\n}\n";
+    for (label, body) in [
+        ("lazy property", "val l by lazy { A() }\nfun g() = l.foo()"),
+        ("custom delegate", "class D { operator fun getValue(r: Any?, p: kotlin.reflect.KProperty<*>) = A() }\nval d by D()\nfun g() = d.foo()"),
+        ("lambda in a val", "val f = { a: A -> a }\nfun g() = f(A()).foo()"),
+        ("lambda in a local", "fun g() { val f = { a: A -> a }; f(A()).foo() }"),
+        ("builder inference", "fun g() = buildList { add(A()) }.first().foo()"),
+        ("builder map", "fun g() = buildMap { put(1, A()) }[1]?.foo()"),
+        ("SAM constructor", "fun interface F { fun h(a: A) }\nval x = F { it.foo() }"),
+        ("this smart cast", "fun Any.g() { if (this is A) foo() }"),
+        ("this smart cast qualified", "fun Any.g() { if (this is A) this.foo() }"),
+    ] {
+        let refs = fx.refs(&format!("{HEADER}{cls}{body}\n"), false);
+        assert!(refs.len() == 1 && refs[0].ends_with(":foo"), "{label}: {refs:?}");
+    }
+    // Extensions on a companion, called through the class, and callable references to extensions.
+    let src = "class B { companion object }\nfun B.Companion.e$0x() = 1\nfun k() = B.ex() + B.Companion.ex()\nclass C\nfun C.cx() = 1\nval r = B.Companion::ex\nval s = C::cx\n";
+    assert_eq!(fx.refs(&format!("{HEADER}{src}"), false), vec!["Main.kt:10:ex", "Main.kt:10:ex", "Main.kt:13:ex"]);
+    assert_eq!(fx.refs(&format!("{HEADER}{}", src.replacen("e$0x", "ex", 1).replacen("fun C.cx", "fun C.c$0x", 1)), false), vec!["Main.kt:14:cx"]);
+}
+
+#[test]
 fn references_to_constructors() {
     let Some(mut fx) = fixture() else { return };
     let src = format!(

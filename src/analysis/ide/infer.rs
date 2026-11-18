@@ -442,7 +442,8 @@ impl<'s> Engine<'s> {
 
     /// Type of `val x = <expr>` / `fun f() = <expr>`.
     pub fn initializer_type(&self, decl: &SyntaxNode) -> Option<TypeRef> {
-        let eq = token_at(decl, SyntaxKind::EQ)?;
+        // `val x by delegate`: the delegate's value type.
+        let Some(eq) = token_at(decl, SyntaxKind::EQ) else { return self.delegate_type(decl) };
         let expr = decl.children().find(|c| c.text_range().start() >= eq.text_range().end())?;
         self.type_of(&expr)
     }
@@ -714,15 +715,21 @@ impl<'s> Engine<'s> {
         if sym.kind == SymbolKind::Object {
             return self.members_named(&class_type(sym), name).into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }).collect();
         }
+        if let Some(comp) = self.companion_type(c) {
+            return self.members_named(&comp, name).into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }).collect();
+        }
+        Vec::new()
+    }
+
+    /// The type of `c`'s companion object, if it has one.
+    fn companion_type(&self, c: &Classifier) -> Option<TypeRef> {
         let companion = match c {
             Classifier::Library(lc) => lc.companion.clone(),
             _ => None,
         }
         .unwrap_or_else(|| "Companion".into());
-        if let Some(comp) = self.res.find_classifier(&format!("{}.{companion}", sym.fq_name)) {
-            return self.members_named(&class_type(comp.symbol()), name).into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }).collect();
-        }
-        Vec::new()
+        let comp = self.res.find_classifier(&format!("{}.{companion}", c.symbol().fq_name))?;
+        Some(class_type(comp.symbol()))
     }
 
     // -------------------------------------------------------- extensions
@@ -907,7 +914,9 @@ impl<'s> Engine<'s> {
         if fq_of(&t) == Some("kotlin.Lazy") {
             return args_of(&t).first().map(arg_type);
         }
-        None
+        // Otherwise what its `getValue` operator returns (member, then extension).
+        let (sym, s) = self.members_named(&t, "getValue").into_iter().chain(self.extensions(&t, "getValue")).find(|(m, _)| m.kind == SymbolKind::Function)?;
+        Some(substitute(&self.symbol_type(&sym)?, &s))
     }
 
     /// `componentN()` of a type (for destructuring).
@@ -1087,6 +1096,60 @@ impl<'s> Engine<'s> {
         Some((recv, params))
     }
 
+    /// The function type of a lambda that is not an argument and has no expected type
+    /// (`val f = { a: A -> a }`): its declared parameter types and its last expression's
+    /// type. `None` when a parameter has no declared type.
+    fn standalone_lambda_type(&self, lambda: &SyntaxNode) -> Option<TypeRef> {
+        let mut parent = lambda.parent()?;
+        if parent.kind() == SyntaxKind::LABELED_EXPR {
+            parent = parent.parent()?;
+        }
+        if matches!(parent.kind(), SyntaxKind::LAMBDA_ARGUMENT | SyntaxKind::VALUE_ARGUMENT) || parent.kind() == SyntaxKind::PROPERTY && ast::child::<ast::TypeRef>(&parent).is_some() {
+            return None;
+        }
+        let params: Option<Vec<TypeRef>> = lambda
+            .children()
+            .filter(|c| c.kind() == SyntaxKind::LAMBDA_PARAMETER_LIST)
+            .flat_map(|l| l.children().filter(|p| p.kind() == SyntaxKind::VALUE_PARAMETER).collect::<Vec<_>>())
+            .map(|p| ast::child::<ast::TypeRef>(&p).map(|t| self.resolve_syntax_type(&t)))
+            .collect();
+        let body = lambda.children().find(|c| c.kind() == SyntaxKind::BLOCK);
+        let ret = match body.and_then(|b| b.children().last()) {
+            None => TypeRef::named("kotlin.Unit"),
+            Some(last) if super::DECLARATIONS.contains(&last.kind()) => TypeRef::named("kotlin.Unit"),
+            Some(last) => self.type_of(&last)?,
+        };
+        Some(TypeRef::Function { receiver: None, params: params?, ret: Box::new(ret), suspend: false, nullable: false })
+    }
+
+    /// The single abstract method of the interface `fq`, when it is a Kotlin `fun
+    /// interface` or a Java interface with exactly one.
+    pub fn sam_method(&self, fq: &str) -> Option<Symbol> {
+        let c = self.classifier(fq)?;
+        if c.symbol().kind != SymbolKind::Interface {
+            return None;
+        }
+        let java = matches!(self.res.find_classifier(fq), Some(Classifier::Library(lc)) if !lc.is_kotlin);
+        if !java && !c.symbol().modifiers.has(Modifiers::FUN_INTERFACE) {
+            return None;
+        }
+        let fns: Vec<Symbol> = self.declared_members(fq).into_iter().filter(|m| m.kind == SymbolKind::Function && !m.modifiers.has(Modifiers::STATIC)).collect();
+        let abstract_fns: Vec<Symbol> = fns.iter().filter(|m| m.modifiers.has(Modifiers::ABSTRACT)).cloned().collect();
+        let candidates = if abstract_fns.is_empty() { fns } else { abstract_fns };
+        match candidates.as_slice() {
+            [one] => Some(one.clone()),
+            _ => None,
+        }
+    }
+
+    /// The function type a SAM constructor call `F { … }` expects for its lambda.
+    fn sam_function_type(&self, iface: &Symbol, s: &Subst) -> Option<TypeRef> {
+        let m = self.sam_method(&iface.fq_name)?;
+        let params = m.params.iter().map(|p| substitute(&self.resolve_declared(&m, &p.ty), s)).collect();
+        let ret = m.ty.as_ref().map(|t| substitute(&self.resolve_declared(&m, t), s)).unwrap_or_else(|| TypeRef::named("kotlin.Unit"));
+        Some(TypeRef::Function { receiver: None, params, ret: Box::new(ret), suspend: m.modifiers.has(Modifiers::SUSPEND), nullable: false })
+    }
+
     /// The return type a lambda is expected to have (from the function it is passed to).
     pub fn lambda_return(&self, lambda: &SyntaxNode) -> Option<TypeRef> {
         let (expected, _) = self.lambda_expected(lambda)?;
@@ -1117,6 +1180,10 @@ impl<'s> Engine<'s> {
             SyntaxKind::LAMBDA_ARGUMENT => {
                 let call = parent.parent()?;
                 let (sym, s) = self.resolve_call_target(&call, false)?;
+                // SAM constructor: `Runnable { … }`, `F { … }`.
+                if sym.kind == SymbolKind::Interface {
+                    return Some((self.sam_function_type(&sym, &s)?, None));
+                }
                 let p = sym.params.last()?;
                 Some((substitute(&self.resolve_declared(&sym, &p.ty), &s), Some(sym)))
             }
@@ -1174,21 +1241,48 @@ impl<'s> Engine<'s> {
 
     pub fn implicit_receivers(&self, at: &SyntaxNode) -> Vec<(TypeRef, Option<Classifier>)> {
         let package = self.package();
-        at.ancestors().skip(1).filter_map(|anc| self.receiver_of(&anc, &package)).collect()
+        let mut out = Vec::new();
+        for anc in at.ancestors().skip(1) {
+            if let Some((t, c)) = self.receiver_of(&anc, &package) {
+                self.push_receiver(at, &anc, t, c, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Add the receiver `anc` introduces, preceded by its smart-cast type at `at` when an
+    /// `is` check on `this` narrows it there (`if (this is A) foo()`).
+    fn push_receiver(&self, at: &SyntaxNode, anc: &SyntaxNode, t: TypeRef, c: Option<Classifier>, out: &mut Vec<(TypeRef, Option<Classifier>)>) {
+        let narrowed = self.smart_cast(at, &receiver_local(anc), t.clone());
+        if narrowed != t {
+            out.push((narrowed, None));
+        }
+        out.push((t, c));
+    }
+
+    /// The declaration or lambda whose receiver `this_expr` denotes.
+    fn this_owner(&self, this_expr: &SyntaxNode) -> Option<SyntaxNode> {
+        let label = this_label(this_expr);
+        let package = self.package();
+        this_expr
+            .ancestors()
+            .skip(1)
+            .find(|anc| label.as_ref().is_none_or(|l| receiver_label(anc).as_ref() == Some(l)) && self.receiver_of(anc, &package).is_some())
     }
 
     /// The receivers `this` may denote at `this_expr`: the one its `@label` names, or
     /// every implicit receiver (innermost first) when it has none.
     pub fn this_receivers(&self, this_expr: &SyntaxNode) -> Vec<(TypeRef, Option<Classifier>)> {
-        let Some(label) = this_label(this_expr) else { return self.implicit_receivers(this_expr) };
-        let package = self.package();
-        this_expr
-            .ancestors()
-            .skip(1)
-            .find(|anc| receiver_label(anc).is_some_and(|l| l == label) && self.receiver_of(anc, &package).is_some())
-            .and_then(|anc| self.receiver_of(&anc, &package))
-            .into_iter()
-            .collect()
+        if this_label(this_expr).is_none() {
+            return self.implicit_receivers(this_expr);
+        }
+        let mut out = Vec::new();
+        if let Some(anc) = self.this_owner(this_expr)
+            && let Some((t, c)) = self.receiver_of(&anc, &self.package())
+        {
+            self.push_receiver(this_expr, &anc, t, c, &mut out);
+        }
+        out
     }
 
     /// The implicit receiver `anc` introduces, if any.
@@ -1587,6 +1681,16 @@ impl<'s> Engine<'s> {
                 if defs.is_empty() {
                     defs = self.members_named(&class_type(c.symbol()), name).into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }).collect();
                 }
+                // `B.ext()` with `fun B.Companion.ext()`: the class name stands for its companion.
+                if defs.is_empty()
+                    && let Some(comp) = self.companion_type(&c)
+                {
+                    defs = self.extensions(&comp, name).into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }).collect();
+                }
+                // `Type::ext`: a reference to an extension of the type.
+                if defs.is_empty() && recv.parent().is_some_and(|p| p.kind() == SyntaxKind::CALLABLE_REFERENCE) {
+                    defs = self.extensions(&class_type(c.symbol()), name).into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }).collect();
+                }
                 self.filter_call(defs, call)
             }
             Qualifier::Package(p) => {
@@ -1636,6 +1740,12 @@ impl<'s> Engine<'s> {
     /// Bind the type parameters `vars` of `sym` from the types of the (non-lambda) arguments
     /// in `list`.
     pub fn bind_from_arguments(&self, sym: &Symbol, vars: &HashSet<String>, list: &SyntaxNode, s: &mut Subst) {
+        self.bind_arguments_through(sym, &Subst::new(), vars, list, s);
+    }
+
+    /// [`Engine::bind_from_arguments`] with `sym`'s parameter types first substituted by
+    /// `through` (a member's class type arguments).
+    fn bind_arguments_through(&self, sym: &Symbol, through: &Subst, vars: &HashSet<String>, list: &SyntaxNode, s: &mut Subst) {
         let args: Vec<SyntaxNode> = list.children().filter(|a| a.kind() == SyntaxKind::VALUE_ARGUMENT).collect();
         for (i, a) in args.iter().enumerate() {
             let named = a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME).and_then(|n| token_at(&n, SyntaxKind::IDENT)).map(|t| ast::ident_text(&t));
@@ -1651,8 +1761,35 @@ impl<'s> Engine<'s> {
             }
             if let Some(at) = self.type_of(&expr) {
                 let pt = self.resolve_declared(sym, &p.ty);
+                let pt = if through.is_empty() { pt } else { substitute(&pt, through) };
                 unify(&pt, &at, vars, s, self);
             }
+        }
+    }
+
+    /// Builder inference: type variables of a call that only its lambda's receiver
+    /// mentions (`buildList { add(x) }`) are bound from the arguments of calls made on
+    /// that receiver inside the lambda.
+    fn bind_from_builder_calls(&self, lambda: &SyntaxNode, recv: &TypeRef, vars: &HashSet<String>, s: &mut Subst) {
+        for call in lambda.descendants().filter(|n| n.kind() == SyntaxKind::CALL_EXPR) {
+            if vars.iter().all(|v| s.contains_key(v)) {
+                return;
+            }
+            // Calls on this lambda's receiver: bare (`add(x)`) or through plain `this.`.
+            if call.ancestors().find(|a| a.kind() == SyntaxKind::LAMBDA_EXPR).as_ref() != Some(lambda) {
+                continue;
+            }
+            if let Some(q) = call.parent().filter(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR))
+                && !first_expr_child(&q).is_some_and(|r| r.kind() == SyntaxKind::THIS_EXPR && this_label(&r).is_none())
+            {
+                continue;
+            }
+            let Some(callee) = first_expr_child(&call).filter(|c| c.kind() == SyntaxKind::NAME_REF) else { continue };
+            let Some(tok) = token_at(&callee, SyntaxKind::IDENT) else { continue };
+            let Some(list) = call.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) else { continue };
+            let n = call_arity(&call);
+            let Some((m, through)) = self.callable_members(recv, &ast::ident_text(&tok)).into_iter().find(|(m, _)| arity_fits(m, n)) else { continue };
+            self.bind_arguments_through(&m, &through, vars, &list, s);
         }
     }
 
@@ -1711,11 +1848,14 @@ impl<'s> Engine<'s> {
             for la in call.children().filter(|c| c.kind() == SyntaxKind::LAMBDA_ARGUMENT) {
                 let Some(p) = sym.params.last() else { break };
                 let pt = substitute(&self.resolve_declared(&sym, &p.ty), &s);
-                let Some((_, _, ret)) = function_parts(&pt) else { continue };
+                let Some((recv, _, ret)) = function_parts(&pt) else { continue };
                 let lambda = la.descendants().find(|n| n.kind() == SyntaxKind::LAMBDA_EXPR);
-                let result = lambda.and_then(|l| l.children().find(|c| c.kind() == SyntaxKind::BLOCK)).and_then(|b| b.children().last()).and_then(|e| self.type_of(&e));
+                let result = lambda.as_ref().and_then(|l| l.children().find(|c| c.kind() == SyntaxKind::BLOCK)).and_then(|b| b.children().last()).and_then(|e| self.type_of(&e));
                 if let Some(rt) = result {
                     unify(&ret, &rt, &vars, &mut s, self);
+                }
+                if let (Some(recv), Some(lambda)) = (recv, &lambda) {
+                    self.bind_from_builder_calls(lambda, &recv, &vars, &mut s);
                 }
             }
         }
@@ -1786,7 +1926,13 @@ impl<'s> Engine<'s> {
                     let ft = self.type_of(&callee)?;
                     return function_parts(&ft).map(|(_, _, r)| r);
                 }
-                let (sym, s) = self.resolve_call_target(e, true)?;
+                let Some((sym, s)) = self.resolve_call_target(e, true) else {
+                    // Invoking a local of function type: `val f = { a: A -> a }; f(x)`.
+                    return match self.resolve_name_ref(&callee).first() {
+                        Some(d @ Def::Local(_)) => self.def_type(d, Some(e)),
+                        _ => None,
+                    };
+                };
                 if sym.kind == SymbolKind::Constructor {
                     let cls = self.res.find_classifier(sym.fq_name.trim_end_matches(".<init>"))?;
                     return Some(substitute(&class_type(cls.symbol()), &s));
@@ -1805,7 +1951,8 @@ impl<'s> Engine<'s> {
                 let t = self.type_of(&sel)?;
                 if e.kind() == SAFE_QUALIFIED_EXPR { Some(t.nullable(true)) } else { Some(t) }
             }
-            CALLABLE_REFERENCE | CLASS_LITERAL | LAMBDA_EXPR | ANONYMOUS_FUNCTION => None,
+            LAMBDA_EXPR => self.standalone_lambda_type(e),
+            CALLABLE_REFERENCE | CLASS_LITERAL | ANONYMOUS_FUNCTION => None,
             OBJECT_LITERAL => Some(self.anon_type(e)),
             IS_EXPR => Some(TypeRef::named("kotlin.Boolean")),
             BINARY_WITH_TYPE => {
@@ -2166,6 +2313,16 @@ impl<'s> Engine<'s> {
             None => self.res.find_classifier(fq_of(&t)?).map(|c| c.symbol().clone()),
         }
     }
+}
+
+/// The receiver `owner` introduces, as a pseudo-local for smart casts: named `this`
+/// (no real local can be) and placed at the start of its owner.
+fn receiver_local(owner: &SyntaxNode) -> LocalDef {
+    LocalDef { name: "this".into(), kind: LocalKind::Val, name_range: TextRange::empty(owner.text_range().start()), ty: None }
+}
+
+fn is_receiver_local(l: &LocalDef) -> bool {
+    l.name == "this" && l.name_range.is_empty()
 }
 
 /// The `@label` of a `this`/`super` expression.
@@ -3158,6 +3315,9 @@ impl<'s> Engine<'s> {
 
     /// `r` is a use of the local `l`.
     fn refers(&self, r: &SyntaxNode, l: &LocalDef) -> bool {
+        if is_receiver_local(l) {
+            return r.kind() == SyntaxKind::THIS_EXPR && self.this_owner(r).is_some_and(|o| o.text_range().start() == l.name_range.start());
+        }
         r.kind() == SyntaxKind::NAME_REF && r.text() == l.name.as_str() && self.find_local(r, &l.name).is_some_and(|x| x.name_range == l.name_range)
     }
 
