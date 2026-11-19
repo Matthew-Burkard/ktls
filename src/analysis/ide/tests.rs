@@ -1764,3 +1764,19 @@ fn auto_import_offers_every_package_of_a_name() {
     assert_eq!(imported("package app\n\nfun f() = helpe$0\n", "helper"), ["lib.one", "lib.two"]);
     assert_eq!(imported("package app\n\nfun f() = \"a\".shou$0\n", "shout"), ["app.model", "lib.one", "lib.two"]);
 }
+
+#[test]
+fn inherited_statics_and_java_getters() {
+    let Some(mut fx) = fixture() else { return };
+    fx.host.set_file(
+        fx.root.join("src/j/JBase.java"),
+        Arc::from("package j;\npublic class JBase {\n    private String name;\n    public String getName() { return name; }\n    public static final int PUB = 2;\n    public static int util() { return 1; }\n}\n"),
+        Some(1),
+    );
+    // Statics of supertypes are in scope bare in a subclass body (source and library).
+    assert_eq!(fx.goto("package app\n\nimport j.JBase\nclass JSub : JBase() { fun f() = PU$0B }\n"), vec!["JBase.java:PUB"]);
+    assert_eq!(fx.goto("package app\n\nimport j.JBase\nclass JSub : JBase() { fun f() = ut$0il() }\n"), vec!["JBase.java:util"]);
+    assert!(fx.hover("package app\n\nclass T : Thread() { fun f() = MIN_PRIO$0RITY }\n").contains("val MIN_PRIORITY: Int"));
+    // A private field gives way to its public getter, in source Java classes too.
+    assert_eq!(fx.goto("package app\n\nimport j.JBase\nfun f(j: JBase) = j.na$0me\n"), vec!["JBase.java:getName"]);
+}

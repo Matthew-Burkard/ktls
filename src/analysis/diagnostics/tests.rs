@@ -247,3 +247,45 @@ fn java_members_are_not_in_scope_bare() {
     );
     assert_eq!(fx.diagnostics(&ok), Vec::<String>::new());
 }
+
+#[test]
+fn private_members_used_in_subclasses() {
+    let Some(mut fx) = Fixture::new() else { return };
+    fx.host.set_file(
+        fx.root.join("app/src/main/kotlin/j/JBase.java"),
+        Arc::from("package j;\npublic class JBase {\n    private static final int MY_PRIVATE_CONST = 1;\n    private int count;\n    private String name;\n    public String getName() { return name; }\n    int pkg;\n    protected int prot;\n    private void secretly() {}\n}\n"),
+        Some(1),
+    );
+    fx.add("app/src/main/kotlin/k/Base.kt", "package k\nopen class Base {\n    private val secret = 1\n    private fun hidden() = 2\n    val open = 3\n    fun inside() = secret + hidden()\n    class Nested { fun f(b: Base) = b.secret }\n}\n");
+    // Bare, in subclasses in another file (Kotlin and Java bases), and qualified.
+    let k = fx.add(
+        "app/src/main/kotlin/k/Sub.kt",
+        "package k\nimport j.JBase\nclass Sub : Base() {\n    fun f() = secret + hidden() + open\n    fun g() = this.secret\n}\nclass JSub : JBase() {\n    fun f() = MY_PRIVATE_CONST + count\n    fun g() { secretly() }\n    fun h() = name + pkg + prot\n}\nfun q(b: Base, j: JBase) = b.hidden() + j.count + JBase.MY_PRIVATE_CONST + j.name.length\n",
+    );
+    assert_eq!(
+        fx.diagnostics(&k),
+        vec![
+            "secret: INVISIBLE_REFERENCE",
+            "hidden: INVISIBLE_REFERENCE",
+            "secret: INVISIBLE_REFERENCE",
+            "MY_PRIVATE_CONST: INVISIBLE_REFERENCE",
+            "count: INVISIBLE_REFERENCE",
+            "secretly: INVISIBLE_REFERENCE",
+            "hidden: INVISIBLE_REFERENCE",
+            "count: INVISIBLE_REFERENCE",
+            "MY_PRIVATE_CONST: INVISIBLE_REFERENCE",
+        ]
+    );
+    // The same file's subclass, and a visible declaration of the name in an outer scope
+    // (the invisible member is skipped, so the name means that one).
+    let same = fx.add(
+        "app/src/main/kotlin/k/Same.kt",
+        "package k\nopen class P { private val x = 1 }\nclass Q : P() { fun f() = x }\n",
+    );
+    assert_eq!(fx.diagnostics(&same), vec!["x: INVISIBLE_REFERENCE"]);
+    let shadowed = fx.add(
+        "app/src/main/kotlin/k/Shadowed.kt",
+        "package k\nval secret = 10\nclass Outer {\n    fun hidden() = 1\n    inner class S : Base() { fun f() = secret + hidden() }\n}\nclass L : Base() { fun f(secret: Int) = secret; fun g() = run { val hidden = 1; hidden } }\n",
+    );
+    assert_eq!(fx.diagnostics(&shadowed), Vec::<String>::new());
+}

@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use super::super::*;
-use crate::analysis::ide::infer::{Def, Engine, fq_of};
+use crate::analysis::ide::infer::{Def, Engine, Qualifier, fq_of};
 use crate::symbols::{Modifiers, Origin, Symbol, SymbolKind, Visibility};
 
 pub(super) fn check(cx: &Cx, out: &mut Sink) {
@@ -122,14 +122,34 @@ fn visibility(cx: &Cx, e: &Engine, nr: &SyntaxNode, out: &mut Sink) {
     let expr = nr.parent().filter(|p| p.kind() == SyntaxKind::CALL_EXPR && p.first_child().as_ref() == Some(nr)).unwrap_or_else(|| nr.clone());
     let qualified = expr.parent().filter(|p| matches!(p.kind(), SyntaxKind::DOT_QUALIFIED_EXPR | SyntaxKind::SAFE_QUALIFIED_EXPR) && p.first_child().as_ref() != Some(&expr));
     let Some(q) = qualified else {
-        let top_level = syms.iter().all(|s| s.fq_name.rsplit_once('.').is_none_or(|(c, _)| e.classifier(c).is_none()) && s.visibility == Visibility::Private);
-        let in_scope = e.top_level_named(&name).iter().any(|s| hidden(e, s, nr).is_none());
-        if top_level && !in_scope && nr.parent().is_none_or(|p| p.kind() != SyntaxKind::CALLABLE_REFERENCE) {
+        if nr.parent().is_some_and(|p| p.kind() == SyntaxKind::CALLABLE_REFERENCE) || syms.iter().any(|s| s.visibility != Visibility::Private) {
+            return;
+        }
+        // Extensions need a receiver, which a bare name does not supply (unless an implicit
+        // receiver does, checked below).
+        let in_scope = e.top_level_named(&name).iter().any(|s| s.receiver.is_none() && hidden(e, s, nr).is_none());
+        if in_scope {
+            return;
+        }
+        let top_level = syms.iter().all(|s| s.fq_name.rsplit_once('.').is_none_or(|(c, _)| e.classifier(c).is_none()));
+        // Private members of a supertype used bare in a subclass: only when no implicit
+        // receiver (this class, outer classes, lambda receivers) has a visible member or
+        // extension of that name, which the name would mean instead.
+        let member_only_hidden = || {
+            e.implicit_receivers(nr).iter().all(|(t, _)| e.extensions(t, &name).is_empty() && e.members_named(t, &name).iter().all(|(m, _)| hidden(e, m, nr).is_some()))
+        };
+        if top_level || member_only_hidden() {
             out.report(&INVISIBLE_REFERENCE, tok.text_range(), format!("Cannot access '{name}': it is {reason}."), make_visible());
         }
         return;
     };
-    let Some(t) = q.first_child().and_then(|r| e.type_of(&r)) else { return };
+    let Some(recv) = q.first_child() else { return };
+    // `JBase.MY_PRIVATE_CONST`: a static member through its class name.
+    if let Qualifier::Static(_) = e.resolve_qualifier(&recv) {
+        out.report(&INVISIBLE_REFERENCE, tok.text_range(), format!("Cannot access '{name}': it is {reason}."), make_visible());
+        return;
+    }
+    let Some(t) = e.type_of(&recv) else { return };
     if !e.extensions(&t, &name).is_empty() || e.members_named(&t, &name).iter().any(|(m, _)| hidden(e, m, nr).is_none()) {
         return;
     }
@@ -148,7 +168,9 @@ fn hidden(e: &Engine, s: &Symbol, at: &SyntaxNode) -> Option<String> {
         _ => false,
     };
     if !kotlin {
-        return None;
+        // Private Java members are visible only inside their (Java) class. Package-private
+        // and protected ones are also visible in the package, which is left alone.
+        return (s.visibility == Visibility::Private && class.is_some()).then(|| format!("private in '{class_name}'"));
     }
     match s.visibility {
         Visibility::Private => match &s.origin {

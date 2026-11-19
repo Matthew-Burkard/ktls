@@ -674,22 +674,31 @@ impl<'s> Engine<'s> {
                 .filter(|m| m.name == name && m.kind != SymbolKind::Constructor && !m.modifiers.has(Modifiers::STATIC) && keep(m))
                 .map(|m| (m.clone(), s.clone()))
                 .collect();
-            if !found.is_empty() {
+            let java = match &c {
+                Classifier::Library(lc) => !lc.is_kotlin,
+                Classifier::Source(sym) => matches!(&sym.origin, Origin::Source { file, .. } if file.extension().is_some_and(|x| x == "java")),
+                Classifier::LibraryAlias(_) => false,
+            };
+            // A private Java field gives way to the getter of the same property name.
+            let private_fields = found.iter().all(|(m, _)| matches!(m.kind, SymbolKind::Field | SymbolKind::Property) && m.visibility == crate::symbols::Visibility::Private);
+            if !found.is_empty() && !(java && private_fields) {
                 return found;
             }
             // Java getters as Kotlin properties: `name` → getName()/isName().
-            if let Classifier::Library(lc) = &c
-                && !lc.is_kotlin && !name.is_empty() {
-                    let getters: Vec<(Symbol, Subst)> = lc
-                        .members
-                        .iter()
-                        .filter(|m| m.kind == SymbolKind::Function && m.params.is_empty() && java_property_name(&m.name).as_deref() == Some(name))
-                        .map(|m| (m.clone(), s.clone()))
-                        .collect();
-                    if !getters.is_empty() && name.chars().next().is_some_and(|c| c.is_lowercase()) {
-                        return getters;
-                    }
+            if java && name.chars().next().is_some_and(|c| c.is_lowercase()) {
+                let getters: Vec<(Symbol, Subst)> = self
+                    .members_ref(&c)
+                    .iter()
+                    .filter(|m| m.kind == SymbolKind::Function && m.params.is_empty() && !m.modifiers.has(Modifiers::STATIC) && java_property_name(&m.name).as_deref() == Some(name))
+                    .map(|m| (m.clone(), s.clone()))
+                    .collect();
+                if !getters.is_empty() {
+                    return getters;
                 }
+            }
+            if !found.is_empty() {
+                return found;
+            }
         }
         Vec::new()
     }
@@ -1358,6 +1367,18 @@ impl<'s> Engine<'s> {
             if found.is_empty()
                 && let Some(c) = &cls {
                     found = self.static_members(c, name);
+                    // Statics, nested classes and companion members of supertypes are in
+                    // scope bare in a class body (`MIN_PRIORITY` in a `Thread` subclass).
+                    if found.is_empty() {
+                        found = self
+                            .supertype_closure(&class_type(c.symbol()))
+                            .iter()
+                            .skip(1)
+                            .filter_map(|st| fq_of(st).and_then(|fq| self.classifier(fq)))
+                            .map(|sc| self.static_members(&sc, name))
+                            .find(|f| !f.is_empty())
+                            .unwrap_or_default();
+                    }
                 }
             if found.is_empty() {
                 found = self.extensions(&recv, name).into_iter().map(|(sym, subst)| Def::Symbol { sym, subst }).collect();
