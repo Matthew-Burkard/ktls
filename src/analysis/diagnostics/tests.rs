@@ -229,3 +229,21 @@ fn internal_library_types() {
     );
     assert_eq!(fx.diagnostics(&ok), Vec::<String>::new());
 }
+
+#[test]
+fn java_members_are_not_in_scope_bare() {
+    let Some(mut fx) = Fixture::new() else { return };
+    fx.host.set_file(
+        fx.root.join("app/src/main/kotlin/j/Consts.java"),
+        Arc::from("package j;\npublic class Consts {\n    private static final int MY_PRIVATE_CONST = 1;\n    public static final int MY_PUBLIC_CONST = 2;\n    public int field = 3;\n    public static int util() { return 4; }\n}\n"),
+        Some(1),
+    );
+    let k = fx.add("app/src/main/kotlin/k/Use.kt", "package k\nfun f() = MY_PRIVATE_CONST + MY_PUBLIC_CONST + field\nfun g() = util()\n");
+    assert_eq!(fx.diagnostics(&k), vec!["MY_PRIVATE_CONST: UNRESOLVED_REFERENCE", "MY_PUBLIC_CONST: UNRESOLVED_REFERENCE", "field: UNRESOLVED_REFERENCE", "util: UNRESOLVED_REFERENCE"]);
+    // Statics reached the ways Kotlin allows: imports, qualification, and inheritance.
+    let ok = fx.add(
+        "app/src/main/kotlin/k/Ok.kt",
+        "package k\nimport j.Consts\nimport j.Consts.MY_PUBLIC_CONST\nimport j.Consts.util\nfun f() = MY_PUBLIC_CONST + Consts.MY_PUBLIC_CONST + util()\nclass Sub : Consts() { fun g() = MY_PUBLIC_CONST + field.also { util() } }\n",
+    );
+    assert_eq!(fx.diagnostics(&ok), Vec::<String>::new());
+}
