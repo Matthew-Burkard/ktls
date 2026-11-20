@@ -453,7 +453,16 @@ impl<'e, 'a> Analysis<'e, 'a> {
                 _ => false,
             })
         });
-        generic_result || leaves
+        // A generic result is `Nothing` only when a lambda's value can be: it calls something
+        // that returns `Nothing` or may not return (`run { error("x") }`).
+        let may_be_nothing = || {
+            lambdas.iter().any(|l| {
+                l.descendants()
+                    .filter(|d| d.kind() == SyntaxKind::CALL_EXPR && d.ancestors().find(|a| a.kind() == SyntaxKind::LAMBDA_EXPR).as_ref() == Some(l))
+                    .any(|c| self.returns_nothing(&c) || self.may_not_return(&c))
+            })
+        };
+        leaves || (generic_result && may_be_nothing())
     }
 
     fn children(&mut self, n: &SyntaxNode, mut st: State) -> State {

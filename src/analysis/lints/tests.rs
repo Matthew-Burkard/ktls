@@ -2396,6 +2396,9 @@ fn missing_return_on_some_paths() {
     assert_eq!(missing("class C {\n    fun g() = f(1.0)\n    private fun f(d: Double): Int {\n        d.roundToInt()\n    }\n}"), 1);
     assert_eq!(missing("fun f(d: Double): Int {\n    val x = d.roundToInt()\n    println(x)\n}"), 1);
     assert_eq!(missing("fun f(): Int {\n    undefinedCall()\n}"), 1);
+    // A generic call whose lambda cannot produce `Nothing` (no return, throw or `Nothing` call).
+    assert_eq!(missing("fun f(xs: List<String>): String {\n    xs.firstOrNull()?.let { println(it) }\n}"), 1);
+    assert_eq!(missing("fun f(xs: List<Int>): String {\n    xs.map { it + 1 }.also { println(it) }\n}"), 1);
     // Every path returns, throws, or never ends.
     assert_eq!(missing("fun f(x: Int): Int {\n    if (x > 0) return 1 else return 2\n}"), 0);
     assert_eq!(missing("fun f(x: Int): Int {\n    when {\n        x > 0 -> return 1\n        else -> throw IllegalStateException()\n    }\n}"), 0);
@@ -2407,6 +2410,7 @@ fn missing_return_on_some_paths() {
     // Inline lambdas may return for the function (contracts are not read).
     assert_eq!(missing("fun f(x: Int): Int {\n    synchronized(lock) {\n        return x\n    }\n}"), 0);
     assert_eq!(missing("fun f(x: Int): Int {\n    run { return x }\n}"), 0);
+    assert_eq!(missing("fun f(x: Int): Int {\n    x.let { error(\"no\") }\n}"), 0);
     // Unit, Nothing, and expression bodies need no return.
     assert_eq!(missing("fun f(x: Int): Unit {\n    println(x)\n}\nfun g(): Nothing {\n    throw Exception()\n}\nfun h(x: Int): Int = x"), 0);
 }
