@@ -393,6 +393,42 @@ fn references_to_constructors() {
 }
 
 #[test]
+fn references_of_parameters_include_named_arguments() {
+    let Some(mut fx) = fixture() else { return };
+    let src = format!(
+        "{HEADER}{}",
+        [
+            "fun f(force: Boolean) = force", // 8
+            "class G(val title: String, val path: String)", // 9
+            "fun g() = f(force = true) + f(false)", // 10
+            "val x = G(title = \"t\", path = \"p\").title", // 11
+            "",
+        ]
+        .join("\n")
+    );
+    let force = vec!["Main.kt:10:force", "Main.kt:8:force", "Main.kt:8:force"];
+    // From the parameter and from a named argument: the same occurrences.
+    assert_eq!(fx.refs(&src.replacen("f(force: Boolean)", "f(fo$0rce: Boolean)", 1), true), force);
+    assert_eq!(fx.refs(&src.replacen("f(force = true)", "f(fo$0rce = true)", 1), true), force);
+    // Constructor properties: named arguments and member accesses.
+    let title = vec!["Main.kt:11:title", "Main.kt:11:title", "Main.kt:9:title"];
+    assert_eq!(fx.refs(&src.replacen("G(title =", "G(ti$0tle =", 1), true), title);
+    assert_eq!(fx.refs(&src.replacen("val title", "val ti$0tle", 1), true), title);
+    assert_eq!(fx.refs(&src.replacen("G(title =", "G(ti$0tle =", 1), false), vec!["Main.kt:11:title", "Main.kt:11:title"]);
+    // Go to definition: the parameter, not the function or class.
+    assert_eq!(fx.goto(&src.replacen("f(force = true)", "f(fo$0rce = true)", 1)), vec!["Main.kt:force"]);
+    assert_eq!(fx.goto(&src.replacen("path = \"p\"", "pa$0th = \"p\"", 1)), vec!["Main.kt:path"]);
+    // Library parameters have no source: the called function.
+    assert!(!fx.goto(&format!("{HEADER}val s = listOf(1).joinToString(separa$0tor = \",\")\n")).is_empty());
+    // Hover: the parameter too, from source or from a library signature.
+    assert_eq!(fx.hover(&src.replacen("f(force = true)", "f(fo$0rce = true)", 1)).lines().nth(1), Some("force: Boolean"));
+    assert_eq!(fx.hover(&src.replacen("G(title =", "G(ti$0tle =", 1)).lines().nth(1), Some("val title: String"));
+    let h = fx.hover(&format!("{HEADER}val s = listOf(1).joinToString(separa$0tor = \",\")\n"));
+    assert_eq!(h.lines().nth(1), Some("separator: CharSequence = …"), "{h}");
+    assert!(h.contains("parameter of `kotlin.collections.joinToString`"), "{h}");
+}
+
+#[test]
 fn overrides_in_other_source_sets_and_anonymous_objects() {
     let Some(mut fx) = fixture() else { return };
     // An override in test sources: not visible from the base's (main) module.

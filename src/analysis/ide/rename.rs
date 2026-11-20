@@ -58,13 +58,8 @@ pub fn rename(snap: &Snapshot, path: &Path, offset: TextSize, new_name: &str, ca
             edits.insert((r.path.clone(), r.range.start(), r.range.end()));
         }
     }
-    // Parameters: named arguments at every call.
+    // (The references of a parameter include the named arguments at every call.)
     let decl = declaration_target(&e, &def);
-    if let Some(d) = &decl {
-        for r in named_arguments(snap, d, &old, cancelled)? {
-            edits.insert((r.path, r.range.start(), r.range.end()));
-        }
-    }
     // KDoc. Parameters: `[old]`, `@param old` and `@property old` on their owner only.
     // Other declarations: `[old]` / `[Owner.old]` links in the files that use them.
     let param_owner = decl.as_ref().and_then(|d| parameter_owner(snap, d));
@@ -106,8 +101,8 @@ fn target(snap: &Snapshot, path: &Path, offset: TextSize) -> Result<Target, Stri
     let tok = e.root.token_at_offset(offset).collect::<Vec<_>>().into_iter().rev().find(|t| t.kind() == SyntaxKind::IDENT).ok_or("no symbol to rename here")?;
     // A named argument stands for the parameter of the called function.
     if tok.parent().is_some_and(|p| p.kind() == SyntaxKind::VALUE_ARGUMENT_NAME) {
-        let (decl_path, decl_offset) = parameter_of_named_argument(&e, &tok)?;
-        let t = target(snap, &decl_path, decl_offset)?;
+        let param = parameter_of_named_argument(&e, &tok)?;
+        let t = target(snap, &param.path, param.range.start())?;
         return Ok(Target { range: tok.text_range(), ..t });
     }
     let (range, defs) = defs_of_token(&e, &tok).ok_or("no symbol to rename here")?;
@@ -144,7 +139,7 @@ fn target(snap: &Snapshot, path: &Path, offset: TextSize) -> Result<Target, Stri
 }
 
 /// The declaration of the parameter that named argument `tok` refers to.
-fn parameter_of_named_argument(e: &Engine, tok: &crate::syntax::SyntaxToken) -> Result<(PathBuf, TextSize), String> {
+pub(super) fn parameter_of_named_argument(e: &Engine, tok: &crate::syntax::SyntaxToken) -> Result<NavTarget, String> {
     let name = ast::ident_text(tok);
     let (_, callees) = defs_of_token(e, tok).ok_or("cannot resolve the call")?;
     for d in callees {
@@ -162,7 +157,7 @@ fn parameter_of_named_argument(e: &Engine, tok: &crate::syntax::SyntaxToken) -> 
             .flat_map(|l| l.children().filter(|p| p.kind() == SyntaxKind::VALUE_PARAMETER).collect::<Vec<_>>())
             .find_map(|p| ast::token(&p, SyntaxKind::IDENT).filter(|t| ast::ident_text(t) == name));
         if let Some(p) = param {
-            return Ok((file.clone(), p.text_range().start()));
+            return Ok(NavTarget { path: file.clone(), range: p.text_range() });
         }
     }
     Err(format!("cannot find parameter '{name}'"))
@@ -193,7 +188,7 @@ fn tree(snap: &Snapshot, path: &Path) -> Option<SyntaxNode> {
 }
 
 /// `f(old = 1)` / `Owner(old = 1)` / `@Ann(old = 1)` for a parameter declared at `decl`.
-fn named_arguments(snap: &Snapshot, decl: &NavTarget, old: &str, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<Vec<NavTarget>, String> {
+pub(super) fn named_arguments(snap: &Snapshot, decl: &NavTarget, old: &str, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<Vec<NavTarget>, String> {
     let Some(root) = tree(snap, &decl.path) else { return Ok(Vec::new()) };
     let Some(tok) = crate::syntax::covering(&root, decl.range) else { return Ok(Vec::new()) };
     let Some(param) = tok.ancestors().find(|a| a.kind() == SyntaxKind::VALUE_PARAMETER) else { return Ok(Vec::new()) };

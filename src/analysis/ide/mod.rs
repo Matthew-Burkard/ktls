@@ -288,9 +288,37 @@ pub(super) fn def_location(snap: &Snapshot, e: &Engine, d: &Def, download: bool)
     }
 }
 
+/// The name of the named argument at `offset` (`name` in `f(name = 1)`).
+fn named_argument_at(e: &Engine, offset: TextSize) -> Option<SyntaxToken> {
+    token_at(&e.root, offset).filter(|t| t.kind() == SyntaxKind::IDENT && t.parent().is_some_and(|p| p.kind() == SyntaxKind::VALUE_ARGUMENT_NAME))
+}
+
+/// The source parameter that the named argument at `offset` passes.
+fn named_argument_parameter(e: &Engine, offset: TextSize) -> Option<NavTarget> {
+    rename::parameter_of_named_argument(e, &named_argument_at(e, offset)?).ok()
+}
+
+/// Hover for a named argument of a library function: the parameter from its signature.
+fn library_parameter_hover(e: &Engine, tok: &SyntaxToken) -> Option<String> {
+    let name = ast::ident_text(tok);
+    let (_, callees) = defs_of_token(e, tok)?;
+    callees.iter().find_map(|d| {
+        let Def::Symbol { sym, .. } = d else { return None };
+        let p = sym.params.iter().find(|p| p.name == name)?;
+        let vararg = if p.vararg { "vararg " } else { "" };
+        let default = if p.has_default { " = …" } else { "" };
+        let owner = sym.fq_name.trim_end_matches(".<init>");
+        Some(format!("```kotlin\n{vararg}{}: {}{default}\n```\n\nparameter of `{owner}`\n", p.name, p.ty.display()))
+    })
+}
+
 /// Go to definition. `download` allows fetching `-sources.jar`s for libraries.
 pub fn definition(snap: &Snapshot, path: &Path, offset: TextSize, download: bool) -> Vec<NavTarget> {
     let Some(e) = Engine::new(snap, path) else { return Vec::new() };
+    // A named argument: its parameter (library parameters fall back to the function).
+    if let Some(param) = named_argument_parameter(&e, offset) {
+        return vec![param];
+    }
     let Some((_, defs)) = defs_at(&e, offset) else { return Vec::new() };
     let mut out: Vec<NavTarget> = Vec::new();
     for d in &defs {
@@ -336,6 +364,10 @@ fn declaration_target(e: &Engine, d: &Def) -> Option<NavTarget> {
 pub fn references(snap: &Snapshot, path: &Path, offset: TextSize, include_declaration: bool, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Vec<NavTarget>> {
     use rayon::prelude::*;
     let e = Engine::new(snap, path)?;
+    // A named argument stands for the parameter of the called function.
+    if let Some(param) = named_argument_parameter(&e, offset) {
+        return references(snap, &param.path, param.range.start(), include_declaration, cancelled);
+    }
     let (_, defs) = kdoc::defs_at(&e, offset).or_else(|| defs_of_token(&e, &token_at(&e.root, offset)?))?;
     let target = defs.into_iter().next()?;
     // `it` and similar implicit names have no written declaration.
@@ -454,10 +486,14 @@ pub fn references(snap: &Snapshot, path: &Path, offset: TextSize, include_declar
             out
         })
         .collect();
+    let mut out: Vec<NavTarget> = found.into_iter().flatten().collect();
+    // Parameters: the named arguments at every call of their function or constructor.
+    if let Some(d) = declaration_target(&e, &target) {
+        out.extend(rename::named_arguments(snap, &d, &name, cancelled).unwrap_or_default());
+    }
     if cancelled() {
         return None;
     }
-    let mut out: Vec<NavTarget> = found.into_iter().flatten().collect();
     if include_declaration {
         for d in decls {
             if !out.contains(&d) {
@@ -633,6 +669,16 @@ fn is_data_class_property(e: &Engine, sym: &Symbol) -> bool {
 /// Hover: signature, resolved type in context and documentation.
 pub fn hover(snap: &Snapshot, path: &Path, offset: TextSize) -> Option<HoverInfo> {
     let e = Engine::new(snap, path)?;
+    // A named argument: the parameter it passes.
+    if let Some(tok) = named_argument_at(&e, offset) {
+        if let Ok(param) = rename::parameter_of_named_argument(&e, &tok) {
+            let info = hover(snap, &param.path, param.range.start())?;
+            return Some(HoverInfo { range: tok.text_range(), ..info });
+        }
+        if let Some(md) = library_parameter_hover(&e, &tok) {
+            return Some(HoverInfo { markdown: md, range: tok.text_range() });
+        }
+    }
     let (range, defs) = defs_at(&e, offset)?;
     let d = defs.first()?;
     let mut md = String::new();
