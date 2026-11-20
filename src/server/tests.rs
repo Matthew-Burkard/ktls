@@ -440,6 +440,17 @@ fn rename_across_files() {
     c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": uri, "languageId": "kotlin", "version": 1, "text": text } }));
 
     let pos = json!({ "line": 2, "character": 31 }); // right after `User`
+    // Opening a file unchanged from disk (the editor showing a reference) does not cancel
+    // a references search in flight.
+    let id = c.send_request("textDocument/references", json!({ "textDocument": { "uri": uri }, "position": { "line": 2, "character": 28 }, "context": { "includeDeclaration": true } }));
+    let user_path = project.join("src/main/kotlin/demo/User.kt");
+    let user_text = std::fs::read_to_string(&user_path).unwrap();
+    c.notify("textDocument/didOpen", json!({ "textDocument": { "uri": path_to_uri(&user_path).as_str(), "languageId": "kotlin", "version": 1, "text": user_text } }));
+    let refs = c.pump(Duration::from_secs(60), |m, _| match m {
+        Message::Response(r) if r.id == id => Some(r.response_result.clone().unwrap_or_else(|e| panic!("references failed: {}", e.message))),
+        _ => None,
+    });
+    assert_eq!(refs.as_array().unwrap().len(), 3, "{refs:#}");
     let prep = c.request("textDocument/prepareRename", json!({ "textDocument": { "uri": uri }, "position": pos }));
     assert_eq!(prep["placeholder"], "User");
     assert_eq!(prep["range"], json!({ "start": { "line": 2, "character": 27 }, "end": { "line": 2, "character": 31 } }));

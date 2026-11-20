@@ -785,8 +785,10 @@ impl Server {
                 let unseen = self.host.file(&path).is_none_or(|f| *f.text != *p.text_document.text);
                 self.detached.remove(&path);
                 self.host.set_file(path.clone(), p.text_document.text.into(), Some(p.text_document.version));
-                self.state_changed();
+                // Opening a file as it is on disk changes no result: requests in flight (a
+                // references search whose result the editor is opening) keep running.
                 if unseen {
+                    self.state_changed();
                     self.schedule_open_files(Duration::from_millis(self.config.diagnostics.debounce_ms));
                 }
                 self.schedule_diagnostics(&path, Duration::ZERO);
@@ -942,10 +944,14 @@ impl Server {
             }
             if typ == lsp_types::FileChangeType::DELETED {
                 self.host.remove_file(&path);
+                sources_changed = true;
             } else if let Ok(text) = std::fs::read_to_string(&path) {
-                self.host.set_file(path, text.into(), None);
+                // Saves and checkouts that leave the contents as they were change nothing.
+                if self.host.file(&path).is_none_or(|f| *f.text != *text) {
+                    self.host.set_file(path, text.into(), None);
+                    sources_changed = true;
+                }
             }
-            sources_changed = true;
         }
         if sources_changed {
             self.state_changed();
