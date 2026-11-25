@@ -2763,6 +2763,40 @@ interface I { @JvmField val x: Int }
 }
 
 #[test]
+fn annotation_named_arguments() {
+    if !Fixture::new().typed() {
+        return;
+    }
+    let found = compiler(
+        r#"package a
+
+annotation class Deco(val name: String = "", val n: Int = 0)
+annotation class Bare
+
+@Deco(incorrectParamName = 0)
+fun f() {}
+
+@Deco(name = "x", n = 1)
+fun g() {}
+
+@Bare
+fun h() {}
+
+@Deprecated(message = "x", bogus = 1)
+fun i() {}
+
+@java.lang.annotation.Retention(value = java.lang.annotation.RetentionPolicy.RUNTIME)
+annotation class J
+
+@java.lang.annotation.Retention(nope = java.lang.annotation.RetentionPolicy.RUNTIME)
+annotation class K
+"#,
+    );
+    let named: Vec<_> = found.iter().filter(|f| f.starts_with("NAMED_PARAMETER_NOT_FOUND")).collect();
+    assert_eq!(named, vec!["NAMED_PARAMETER_NOT_FOUND: incorrectParamName", "NAMED_PARAMETER_NOT_FOUND: bogus", "NAMED_PARAMETER_NOT_FOUND: nope"], "{found:#?}");
+}
+
+#[test]
 fn bug_style_and_redundancy_batch() {
     let syntactic = lint(
         r#"package a

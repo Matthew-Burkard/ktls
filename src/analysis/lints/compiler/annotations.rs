@@ -113,8 +113,33 @@ fn constant_arguments(e: &Engine, a: &SyntaxNode, out: &mut Sink) {
     }
 }
 
+/// Named arguments for parameters the annotation does not declare.
+fn named_arguments(e: &Engine, a: &SyntaxNode, out: &mut Sink) {
+    let Some(list) = a.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_LIST) else { return };
+    let names: Vec<_> = list
+        .children()
+        .filter(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT)
+        .filter_map(|v| v.children().find(|c| c.kind() == SyntaxKind::VALUE_ARGUMENT_NAME))
+        .filter_map(|n| ast::token(&n, SyntaxKind::IDENT))
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    let Some(tr) = a.children().find_map(ast::TypeRef::cast) else { return };
+    let t = e.resolve_syntax_type(&tr);
+    let Some(fq) = fq_of(&t) else { return };
+    let Some(params) = e.annotation_parameters(fq) else { return };
+    for tok in names {
+        let n = ast::ident_text(&tok);
+        if !params.contains(&n) {
+            out.report(&NAMED_PARAMETER_NOT_FOUND, tok.text_range(), format!("No parameter with name '{n}' found."), None);
+        }
+    }
+}
+
 fn annotation(cx: &Cx, e: &Engine, a: &SyntaxNode, out: &mut Sink) {
     constant_arguments(e, a, out);
+    named_arguments(e, a, out);
     // A use-site target (`@get:`, `@field:`) picks the element explicitly.
     if a.children().any(|c| c.kind() == SyntaxKind::ANNOTATION_TARGET) {
         return;

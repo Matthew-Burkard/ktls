@@ -2961,6 +2961,21 @@ impl<'s> Engine<'s> {
         self.classifier_for(fq).map(|(c, _)| c)
     }
 
+    /// The parameter names an annotation `fq` accepts by name: its constructor's (Kotlin),
+    /// or its element methods (Java). `None` when they are not known.
+    pub fn annotation_parameters(&self, fq: &str) -> Option<Vec<String>> {
+        let (c, _) = self.classifier_for(fq)?;
+        let members = self.members_of(&c);
+        if matches!(&c, Classifier::Library(lc) if !lc.is_kotlin) {
+            return Some(members.iter().filter(|m| m.kind == SymbolKind::Function && m.params.is_empty()).map(|m| m.name.clone()).collect());
+        }
+        let ctors: Vec<&Symbol> = members.iter().filter(|m| m.kind == SymbolKind::Constructor).collect();
+        if ctors.is_empty() {
+            return None;
+        }
+        Some(ctors.iter().flat_map(|c| c.params.iter().map(|p| p.name.clone())).collect())
+    }
+
     /// Supertype closure of `t` without `t` itself, or `None` if some supertype declared in
     /// sources does not resolve (members would be unknown).
     pub fn known_supertypes(&self, t: &TypeRef) -> Option<Vec<TypeRef>> {
